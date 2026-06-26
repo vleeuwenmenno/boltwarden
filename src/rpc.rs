@@ -31,6 +31,7 @@ pub enum RpcRequest {
     GetTotp {
         id: String,
     },
+    LockVault,
     ClearSavedSession,
 }
 
@@ -42,6 +43,7 @@ pub enum RpcResponse {
     Search(Result<SearchPayload, RpcError>),
     Detail(Result<BwItemDetail, RpcError>),
     Totp(Result<String, RpcError>),
+    LockVault(Result<(), String>),
     ClearSavedSession(Result<(), String>),
 }
 

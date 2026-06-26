@@ -15,6 +15,7 @@ use bw::{BwClient, BwError, TwoFactorChallenge};
 use eframe::egui;
 use instance::LaunchCommand;
 use rpc::{RpcError, RpcRequest, RpcResponse, SearchPayload};
+use ui::search::{search_window_height, SEARCH_WIDTH};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -68,6 +69,7 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
 
     start_tray(tx.clone());
     start_activation_listener(listener, tx.clone());
+    let _daemon_tx_keepalive = tx;
 
     if show_on_start {
         show_popup(&popup, rpc_socket.as_deref());
@@ -88,17 +90,21 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
 }
 
 fn run_popup() -> eframe::Result<()> {
+    debug_log("starting popup");
     let (popup_tx, popup_rx) = mpsc::channel();
     start_popup_stdin_listener(popup_tx);
 
     let backend = popup_rpc_socket_arg()
         .map(|path| AppBackend::remote(rpc::RpcClient::new(path)))
         .unwrap_or_else(AppBackend::local);
-    eframe::run_native(
+    let starts_in_search = backend.has_session();
+    let result = eframe::run_native(
         "bw-quick-access",
-        popup_options(),
+        popup_options(starts_in_search),
         Box::new(|_cc| Ok(Box::new(App::new(backend, popup_rx)))),
-    )
+    );
+    debug_log("popup event loop exited");
+    result
 }
 
 fn start_tray(tx: mpsc::Sender<DaemonCommand>) {
@@ -225,11 +231,18 @@ fn handle_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>) -> Rp
         RpcRequest::GetTotp { id } => {
             RpcResponse::Totp(state.bw.get_totp(&id).map_err(rpc_error_from_bw))
         }
+        RpcRequest::LockVault => {
+            state.bw = BwClient::new();
+            state.pending_two_factor = None;
+            let _ = config::clear_recent_item();
+            RpcResponse::LockVault(Ok(()))
+        }
         RpcRequest::ClearSavedSession => {
             let result = config::clear_saved_session().map_err(|e| e.to_string());
             if result.is_ok() {
                 state.bw = BwClient::new();
                 state.pending_two_factor = None;
+                let _ = config::clear_recent_item();
             }
             RpcResponse::ClearSavedSession(result)
         }
@@ -465,17 +478,35 @@ fn start_popup_stdin_listener(tx: mpsc::Sender<PopupCommand>) {
     });
 }
 
-fn popup_options() -> eframe::NativeOptions {
+fn popup_options(starts_in_search: bool) -> eframe::NativeOptions {
+    let settings = config::load_settings();
+    let initial_size = if starts_in_search {
+        [
+            SEARCH_WIDTH,
+            search_window_height(settings.show_keyboard_shortcuts),
+        ]
+    } else {
+        [SEARCH_WIDTH, 540.0]
+    };
+
     eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([720.0, 540.0])
-            .with_min_inner_size([620.0, 104.0])
+            .with_inner_size(initial_size)
+            .with_min_inner_size([620.0, 72.0])
             .with_title("bw-quick-access")
             .with_decorations(false)
             .with_resizable(false)
+            .with_transparent(true)
+            .with_clamp_size_to_monitor_size(true)
             .with_always_on_top()
             .with_active(true),
         run_and_return: true,
         ..Default::default()
+    }
+}
+
+fn debug_log(message: &str) {
+    if std::env::var_os("BWQA_DEBUG").is_some() {
+        eprintln!("[bw-quick-access] {message}");
     }
 }

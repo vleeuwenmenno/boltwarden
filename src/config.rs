@@ -7,6 +7,33 @@ use std::path::PathBuf;
 const APP_DIR: &str = "bw-quick-access";
 const DEVICE_ID_FILE: &str = "device-id";
 const SESSION_FILE: &str = "session.json";
+const SETTINGS_FILE: &str = "settings.json";
+const RECENT_ITEM_FILE: &str = "recent-item.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct AppSettings {
+    #[serde(default = "default_true")]
+    pub show_keyboard_shortcuts: bool,
+    #[serde(default = "default_true")]
+    pub close_after_copy: bool,
+    #[serde(default = "default_true")]
+    pub restore_recent_item: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            show_keyboard_shortcuts: true,
+            close_after_copy: true,
+            restore_recent_item: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SavedSession {
@@ -16,6 +43,12 @@ pub struct SavedSession {
     pub master_key_encrypted_user_key: String,
     pub salt: String,
     pub kdf: SavedKdf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RecentItem {
+    pub id: String,
+    pub saved_at_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -87,6 +120,84 @@ pub fn clear_saved_session() -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+pub fn load_settings() -> AppSettings {
+    let Some(path) = config_path(SETTINGS_FILE) else {
+        return AppSettings::default();
+    };
+    let Ok(data) = fs::read_to_string(path) else {
+        return AppSettings::default();
+    };
+    serde_json::from_str(&data).unwrap_or_default()
+}
+
+pub fn save_settings(settings: &AppSettings) -> io::Result<()> {
+    let path = config_path(SETTINGS_FILE)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "config directory unavailable"))?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let data = serde_json::to_vec_pretty(settings)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    fs::write(path, data)
+}
+
+pub fn load_recent_item() -> Option<RecentItem> {
+    let path = config_path(RECENT_ITEM_FILE)?;
+    let data = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+pub fn save_recent_item(id: &str) -> io::Result<()> {
+    let path = config_path(RECENT_ITEM_FILE)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "config directory unavailable"))?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let data = serde_json::to_vec_pretty(&RecentItem {
+        id: id.to_string(),
+        saved_at_unix_ms: unix_millis_now(),
+    })
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    #[cfg(unix)]
+    {
+        let mut options = fs::OpenOptions::new();
+        options.create(true).truncate(true).write(true).mode(0o600);
+        std::io::Write::write_all(&mut options.open(path)?, &data)?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, data)?;
+    }
+    Ok(())
+}
+
+pub fn clear_recent_item() -> io::Result<()> {
+    let Some(path) = config_path(RECENT_ITEM_FILE) else {
+        return Ok(());
+    };
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+pub fn recent_item_is_fresh(item: &RecentItem, ttl: std::time::Duration) -> bool {
+    let now = unix_millis_now();
+    let Some(age) = now.checked_sub(item.saved_at_unix_ms) else {
+        return false;
+    };
+    age <= ttl.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn unix_millis_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }
 
 fn config_path(file_name: &str) -> Option<PathBuf> {
@@ -226,6 +337,157 @@ mod tests {
 
         restore_var("XDG_CONFIG_HOME", previous_config_home);
         let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn missing_settings_defaults_enabled_features() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = std::env::temp_dir().join(format!(
+            "bw-quick-access-config-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let config_dir = temp.join("config");
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
+
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &config_dir);
+        }
+
+        let actual = load_settings();
+
+        restore_var("XDG_CONFIG_HOME", previous_config_home);
+        let _ = fs::remove_dir_all(temp);
+        assert!(actual.show_keyboard_shortcuts);
+        assert!(actual.close_after_copy);
+        assert!(actual.restore_recent_item);
+    }
+
+    #[test]
+    fn saves_and_loads_app_settings() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = std::env::temp_dir().join(format!(
+            "bw-quick-access-config-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let config_dir = temp.join("config");
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
+
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &config_dir);
+        }
+
+        save_settings(&AppSettings {
+            show_keyboard_shortcuts: false,
+            close_after_copy: false,
+            restore_recent_item: false,
+        })
+        .unwrap();
+        let actual = load_settings();
+        assert!(!actual.show_keyboard_shortcuts);
+        assert!(!actual.close_after_copy);
+        assert!(!actual.restore_recent_item);
+
+        save_settings(&AppSettings {
+            show_keyboard_shortcuts: true,
+            close_after_copy: true,
+            restore_recent_item: true,
+        })
+        .unwrap();
+        let actual = load_settings();
+        assert!(actual.show_keyboard_shortcuts);
+        assert!(actual.close_after_copy);
+        assert!(actual.restore_recent_item);
+
+        restore_var("XDG_CONFIG_HOME", previous_config_home);
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn loading_old_settings_file_defaults_new_settings_to_enabled() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = std::env::temp_dir().join(format!(
+            "bw-quick-access-config-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let config_dir = temp.join("config");
+        let app_dir = config_dir.join(APP_DIR);
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::write(
+            app_dir.join(SETTINGS_FILE),
+            r#"{
+  "show_keyboard_shortcuts": false
+}"#,
+        )
+        .unwrap();
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
+
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &config_dir);
+        }
+
+        let actual = load_settings();
+
+        restore_var("XDG_CONFIG_HOME", previous_config_home);
+        let _ = fs::remove_dir_all(temp);
+        assert!(!actual.show_keyboard_shortcuts);
+        assert!(actual.close_after_copy);
+        assert!(actual.restore_recent_item);
+    }
+
+    #[test]
+    fn saves_loads_and_clears_recent_item() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = std::env::temp_dir().join(format!(
+            "bw-quick-access-config-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let config_dir = temp.join("config");
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
+
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &config_dir);
+        }
+
+        assert!(load_recent_item().is_none());
+        save_recent_item("item-123").unwrap();
+        let actual = load_recent_item().unwrap();
+        assert_eq!(actual.id, "item-123");
+        assert!(recent_item_is_fresh(&actual, std::time::Duration::from_secs(30)));
+
+        clear_recent_item().unwrap();
+        assert!(load_recent_item().is_none());
+
+        restore_var("XDG_CONFIG_HOME", previous_config_home);
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn recent_item_freshness_respects_ttl() {
+        let fresh = RecentItem {
+            id: "item-123".into(),
+            saved_at_unix_ms: unix_millis_now().saturating_sub(10_000),
+        };
+        let stale = RecentItem {
+            id: "item-123".into(),
+            saved_at_unix_ms: unix_millis_now().saturating_sub(31_000),
+        };
+        let future = RecentItem {
+            id: "item-123".into(),
+            saved_at_unix_ms: unix_millis_now().saturating_add(1_000),
+        };
+
+        assert!(recent_item_is_fresh(
+            &fresh,
+            std::time::Duration::from_secs(30)
+        ));
+        assert!(!recent_item_is_fresh(
+            &stale,
+            std::time::Duration::from_secs(30)
+        ));
+        assert!(!recent_item_is_fresh(
+            &future,
+            std::time::Duration::from_secs(30)
+        ));
     }
 
     fn restore_var(key: &str, value: Option<std::ffi::OsString>) {

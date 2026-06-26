@@ -67,6 +67,7 @@ pub fn draw_summary(
     state: &mut SummaryState,
 ) -> Option<SummaryAction> {
     let mut action = None;
+    let mut copied = false;
 
     if state.in_flight && state.detail.is_none() {
         ui.horizontal(|ui| {
@@ -139,7 +140,9 @@ pub fn draw_summary(
                     value: &str,
                     hidden: bool,
                     state: &mut SummaryState,
-                    idx: &mut usize| {
+                    idx: &mut usize|
+     -> bool {
+        let mut did_copy = false;
         let selected = *idx == state.selected_field;
         let bg = if selected {
             egui::Color32::from_rgb(50, 70, 110)
@@ -151,7 +154,7 @@ pub fn draw_summary(
             .inner_margin(egui::Margin::symmetric(6, 4))
             .corner_radius(4.0);
 
-        frame.show(ui, |ui| {
+        let frame_response = frame.show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.add_sized(
                     [92.0, 28.0],
@@ -197,6 +200,7 @@ pub fn draw_summary(
                 if copy_btn.clicked() || (selected && copy_selected) {
                     if clipboard::copy(value) {
                         state.copied_field = Some((label.to_string(), Instant::now()));
+                        did_copy = true;
                     }
                 }
 
@@ -205,23 +209,31 @@ pub fn draw_summary(
                 }
             });
         });
+        if selected {
+            ui.scroll_to_rect(frame_response.response.rect, Some(egui::Align::Center));
+        }
 
         *idx += 1;
+        did_copy
     };
 
-    let scroll_height = (ui.available_height() - 48.0).max(120.0);
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, true])
-        .max_height(scroll_height)
-        .show(ui, |ui| {
+    let scroll_height = (ui.available_height() - 56.0).max(120.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), scroll_height),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .max_height(scroll_height)
+                .show(ui, |ui| {
             if let Some(u) = &detail.username {
-                copyable(ui, "Username", u, false, state, &mut field_idx);
+                copied |= copyable(ui, "Username", u, false, state, &mut field_idx);
             }
             if let Some(p) = &detail.password {
-                copyable(ui, "Password", p, true, state, &mut field_idx);
+                copied |= copyable(ui, "Password", p, true, state, &mut field_idx);
             }
             for uri in &detail.uris {
-                copyable(ui, "URI", uri, false, state, &mut field_idx);
+                copied |= copyable(ui, "URI", uri, false, state, &mut field_idx);
             }
             if detail.totp.is_some() {
                 let totp_display = state.totp.clone().unwrap_or_else(|| "------".into());
@@ -237,7 +249,7 @@ pub fn draw_summary(
                     .inner_margin(egui::Margin::symmetric(6, 4))
                     .corner_radius(4.0);
 
-                frame.show(ui, |ui| {
+                let frame_response = frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.add_sized(
                             [92.0, 28.0],
@@ -267,8 +279,10 @@ pub fn draw_summary(
                         let copy_btn = ui.button("📋");
                         if copy_btn.clicked() || (selected && copy_selected) {
                             if !totp_display.is_empty() && totp_display != "------" {
-                                clipboard::copy(&totp_display);
-                                state.copied_field = Some(("TOTP".into(), Instant::now()));
+                                if clipboard::copy(&totp_display) {
+                                    state.copied_field = Some(("TOTP".into(), Instant::now()));
+                                    copied = true;
+                                }
                             }
                         }
                         if resp.clicked() {
@@ -276,10 +290,13 @@ pub fn draw_summary(
                         }
                     });
                 });
+                if selected {
+                    ui.scroll_to_rect(frame_response.response.rect, Some(egui::Align::Center));
+                }
                 field_idx += 1;
             }
             for cf in &detail.custom_fields {
-                copyable(
+                copied |= copyable(
                     ui,
                     &cf.name,
                     &cf.value,
@@ -289,9 +306,11 @@ pub fn draw_summary(
                 );
             }
             if let Some(notes) = &detail.notes {
-                copyable(ui, "Notes", notes, false, state, &mut field_idx);
+                copied |= copyable(ui, "Notes", notes, false, state, &mut field_idx);
             }
-        });
+                });
+        },
+    );
 
     // Copied indicator
     if let Some((label, t)) = &state.copied_field {
@@ -305,6 +324,10 @@ pub fn draw_summary(
 
     if let Some(e) = &state.error {
         ui.colored_label(egui::Color32::from_rgb(220, 80, 80), format!("⚠ {e}"));
+    }
+
+    if copied {
+        action = Some(SummaryAction::Copied);
     }
 
     action
@@ -332,4 +355,5 @@ fn totp_remaining(fetched_at: &Option<Instant>) -> Option<u64> {
 
 pub enum SummaryAction {
     Back,
+    Copied,
 }

@@ -168,6 +168,7 @@ impl AppBackend {
         match self {
             Self::Local(local) => {
                 config::clear_saved_session().map_err(|e| e.to_string())?;
+                let _ = config::clear_recent_item();
                 if let Ok(mut backend) = local.lock() {
                     backend.bw = BwClient::new();
                     backend.pending_two_factor = None;
@@ -177,6 +178,25 @@ impl AppBackend {
             Self::Remote(client) => match client.call(&RpcRequest::ClearSavedSession) {
                 Ok(RpcResponse::ClearSavedSession(result)) => result,
                 Ok(_) => Err("unexpected daemon forget-user response".into()),
+                Err(e) => Err(e),
+            },
+        }
+    }
+
+    pub fn lock_vault(&self) -> Result<(), String> {
+        match self {
+            Self::Local(local) => {
+                let mut backend = local
+                    .lock()
+                    .map_err(|_| "session lock poisoned".to_string())?;
+                backend.bw = BwClient::new();
+                backend.pending_two_factor = None;
+                let _ = config::clear_recent_item();
+                Ok(())
+            }
+            Self::Remote(client) => match client.call(&RpcRequest::LockVault) {
+                Ok(RpcResponse::LockVault(result)) => result,
+                Ok(_) => Err("unexpected daemon lock-vault response".into()),
                 Err(e) => Err(e),
             },
         }
