@@ -1,6 +1,6 @@
 use crate::backend::{AppBackend, BackendError};
 use crate::config::{self, AppSettings};
-use crate::model::{BwItem, BwItemDetail, SshAgentStatus, SyncStatus};
+use crate::model::{BwItem, BwItemDetail, SshAgentStatus, SshApprovalStatus, SyncStatus};
 use crate::ui::auth::{draw_auth, AuthAction, AuthState};
 use crate::ui::footer::draw_footer;
 use crate::ui::search::{
@@ -46,6 +46,10 @@ enum BwResponse {
     },
     Detail(Result<BwItemDetail, BackendError>),
     Totp(Result<String, BackendError>),
+    SshApprovalDecision {
+        result: Result<SshApprovalStatus, String>,
+        auto_hide: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,6 +207,22 @@ impl App {
         });
     }
 
+    fn spawn_ssh_approval_decision(
+        &self,
+        decision: crate::model::SshApprovalDecision,
+        auto_hide: bool,
+    ) {
+        let tx = self.tx.clone();
+        let backend = self.backend.clone();
+        std::thread::spawn(move || {
+            let result = backend.decide_ssh_approval(decision);
+            let _ = tx.send(BwResponse::SshApprovalDecision {
+                result,
+                auto_hide,
+            });
+        });
+    }
+
     fn poll_responses(&mut self, ctx: &Context) {
         while let Ok(resp) = self.rx.try_recv() {
             match resp {
@@ -307,6 +327,29 @@ impl App {
                         }
                     }
                 }
+                BwResponse::SshApprovalDecision { result, auto_hide } => {
+                    match result {
+                        Ok(status) => {
+                            self.ssh_approval_state.status = Some(status);
+                            if auto_hide {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                std::process::exit(0);
+                            }
+                        }
+                        Err(e) => {
+                            if auto_hide {
+                                self.ssh_approval_state.error = Some(e);
+                                self.window_visible = true;
+                                self.screen = Screen::SshApproval;
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                            } else {
+                                self.search_state.warning =
+                                    Some(format!("could not resolve SSH approval: {e}"));
+                            }
+                        }
+                    }
+                }
             }
             ctx.request_repaint();
         }
@@ -392,6 +435,40 @@ impl App {
             self.hide_quick_access(ctx);
             return;
         }
+        if let Some((screen, summary_open)) = self.ssh_approval_return.take() {
+            self.screen = screen;
+            self.summary_open = summary_open;
+        } else {
+            self.screen = if self.backend.has_session() {
+                Screen::Search
+            } else {
+                Screen::Auth
+            };
+            self.summary_open = false;
+        }
+        self.focus_hide_enabled_at = Instant::now() + UNFOCUS_HIDE_GRACE;
+        self.unfocused_since = None;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    fn resolve_ssh_approval_optimistically(
+        &mut self,
+        ctx: &Context,
+        decision: crate::model::SshApprovalDecision,
+    ) {
+        let auto_hide = self.ssh_approval_state.auto_hide;
+        self.ssh_approval_state.request = None;
+        self.last_inner_size = None;
+        self.spawn_ssh_approval_decision(decision, auto_hide);
+
+        if auto_hide {
+            self.window_visible = false;
+            self.unfocused_since = None;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            return;
+        }
+
         if let Some((screen, summary_open)) = self.ssh_approval_return.take() {
             self.screen = screen;
             self.summary_open = summary_open;
@@ -737,15 +814,7 @@ impl eframe::App for App {
                         ) {
                             match action {
                                 SshApprovalAction::Decide(decision) => {
-                                    match self.backend.decide_ssh_approval(decision) {
-                                        Ok(status) => {
-                                            self.ssh_approval_state.status = Some(status);
-                                            self.leave_ssh_approval(ctx);
-                                        }
-                                        Err(e) => {
-                                            self.ssh_approval_state.error = Some(e);
-                                        }
-                                    }
+                                    self.resolve_ssh_approval_optimistically(ctx, decision);
                                 }
                                 SshApprovalAction::Back => {
                                     self.leave_ssh_approval(ctx);

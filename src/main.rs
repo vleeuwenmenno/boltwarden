@@ -76,7 +76,7 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
         ssh_agent_status: ssh_agent::disabled_status(),
         ssh_approvals: ssh_approvals.clone(),
     }));
-    let rpc_socket = start_vault_rpc_listener(vault.clone());
+    let rpc_socket = start_vault_rpc_listener(vault.clone(), ssh_approvals.clone());
 
     start_tray(tx.clone());
     start_activation_listener(listener, tx.clone());
@@ -183,13 +183,17 @@ fn start_approval_popup_listener(
     });
 }
 
-fn start_vault_rpc_listener(vault: Arc<Mutex<VaultState>>) -> Option<PathBuf> {
+fn start_vault_rpc_listener(
+    vault: Arc<Mutex<VaultState>>,
+    ssh_approvals: SshApprovalService,
+) -> Option<PathBuf> {
     match rpc::prepare_listener() {
         Ok((path, listener)) => {
             std::thread::spawn(move || {
                 for stream in listener.incoming().flatten() {
                     let vault = vault.clone();
-                    std::thread::spawn(move || handle_rpc_stream(stream, vault));
+                    let ssh_approvals = ssh_approvals.clone();
+                    std::thread::spawn(move || handle_rpc_stream(stream, vault, ssh_approvals));
                 }
             });
             Some(path)
@@ -201,13 +205,17 @@ fn start_vault_rpc_listener(vault: Arc<Mutex<VaultState>>) -> Option<PathBuf> {
     }
 }
 
-fn handle_rpc_stream(mut stream: UnixStream, vault: Arc<Mutex<VaultState>>) {
+fn handle_rpc_stream(
+    mut stream: UnixStream,
+    vault: Arc<Mutex<VaultState>>,
+    ssh_approvals: SshApprovalService,
+) {
     let mut request_body = String::new();
     let response = if stream.read_to_string(&mut request_body).is_err() {
         RpcResponse::ClearSavedSession(Err("could not read daemon request".into()))
     } else {
         match serde_json::from_str::<RpcRequest>(&request_body) {
-            Ok(request) => handle_rpc_request(request, &vault),
+            Ok(request) => handle_rpc_request(request, &vault, &ssh_approvals),
             Err(e) => RpcResponse::ClearSavedSession(Err(format!(
                 "could not decode daemon request: {e}"
             ))),
@@ -219,7 +227,26 @@ fn handle_rpc_stream(mut stream: UnixStream, vault: Arc<Mutex<VaultState>>) {
     }
 }
 
-fn handle_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>) -> RpcResponse {
+fn handle_rpc_request(
+    request: RpcRequest,
+    vault: &Arc<Mutex<VaultState>>,
+    ssh_approvals: &SshApprovalService,
+) -> RpcResponse {
+    match request {
+        RpcRequest::GetSshApproval => return RpcResponse::SshApproval(ssh_approvals.active_request()),
+        RpcRequest::DecideSshApproval(decision) => {
+            return RpcResponse::SshApprovalDecided(ssh_approvals.decide(decision));
+        }
+        RpcRequest::GetSshApprovalStatus => {
+            return RpcResponse::SshApprovalStatus(ssh_approvals.recent_status());
+        }
+        request => {
+            return handle_vault_rpc_request(request, vault);
+        }
+    }
+}
+
+fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>) -> RpcResponse {
     let Ok(mut state) = vault.lock() else {
         return RpcResponse::ClearSavedSession(Err("vault state lock poisoned".into()));
     };
@@ -269,15 +296,6 @@ fn handle_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>) -> Rp
             let status = apply_ssh_agent_settings(&mut state);
             RpcResponse::SshAgentStatus(status)
         }
-        RpcRequest::GetSshApproval => {
-            RpcResponse::SshApproval(state.ssh_approvals.active_request())
-        }
-        RpcRequest::DecideSshApproval(decision) => {
-            RpcResponse::SshApprovalDecided(state.ssh_approvals.decide(decision))
-        }
-        RpcRequest::GetSshApprovalStatus => {
-            RpcResponse::SshApprovalStatus(state.ssh_approvals.recent_status())
-        }
         RpcRequest::LockVault => {
             state.bw = BwClient::new();
             state.pending_two_factor = None;
@@ -297,6 +315,9 @@ fn handle_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>) -> Rp
             }
             RpcResponse::ClearSavedSession(result)
         }
+        RpcRequest::GetSshApproval
+        | RpcRequest::DecideSshApproval(_)
+        | RpcRequest::GetSshApprovalStatus => unreachable!("SSH approval RPC bypasses vault lock"),
     }
 }
 
