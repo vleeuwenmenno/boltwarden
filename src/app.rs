@@ -1,6 +1,6 @@
 use crate::backend::{AppBackend, BackendError};
 use crate::config::{self, AppSettings};
-use crate::model::{BwItem, BwItemDetail, SshAgentStatus, SshApprovalStatus, SyncStatus};
+use crate::model::{BwItem, BwItemDetail, SshAgentStatus, SyncStatus};
 use crate::ui::auth::{draw_auth, AuthAction, AuthState};
 use crate::ui::footer::draw_footer;
 use crate::ui::search::{
@@ -26,7 +26,6 @@ const SUMMARY_WINDOW_HEIGHT: f32 = 640.0;
 const SUMMARY_OUTER_MARGIN: f32 = 14.0;
 const SUMMARY_FOOTER_GAP: f32 = 6.0;
 const SUMMARY_FOOTER_TOTAL_HEIGHT: f32 = 34.0;
-const EXIT_AFTER_HIDE_DELAY: Duration = Duration::from_millis(150);
 
 #[derive(Debug, Clone, PartialEq)]
 enum Screen {
@@ -47,10 +46,7 @@ enum BwResponse {
     },
     Detail(Result<BwItemDetail, BackendError>),
     Totp(Result<String, BackendError>),
-    SshApprovalDecision {
-        result: Result<SshApprovalStatus, String>,
-        auto_hide: bool,
-    },
+    SshApprovalDecision(Result<(), String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,8 +103,7 @@ impl App {
                     self.enter_ssh_approval(ctx, auto_hide);
                 }
                 PopupCommand::Quit => {
-                    Self::hide_viewport_now(ctx);
-                    Self::exit_after(Duration::from_millis(50));
+                    Self::exit_now();
                 }
             }
         }
@@ -211,16 +206,14 @@ impl App {
     fn spawn_ssh_approval_decision(
         &self,
         decision: crate::model::SshApprovalDecision,
-        auto_hide: bool,
     ) {
         let tx = self.tx.clone();
         let backend = self.backend.clone();
         std::thread::spawn(move || {
-            let result = backend.decide_ssh_approval(decision);
-            let _ = tx.send(BwResponse::SshApprovalDecision {
-                result,
-                auto_hide,
-            });
+            let result = backend
+                .decide_ssh_approval(decision)
+                .map(|_| ());
+            let _ = tx.send(BwResponse::SshApprovalDecision(result));
         });
     }
 
@@ -328,26 +321,10 @@ impl App {
                         }
                     }
                 }
-                BwResponse::SshApprovalDecision { result, auto_hide } => {
-                    match result {
-                        Ok(status) => {
-                            self.ssh_approval_state.status = Some(status);
-                            if auto_hide {
-                                std::process::exit(0);
-                            }
-                        }
-                        Err(e) => {
-                            if auto_hide {
-                                self.ssh_approval_state.error = Some(e);
-                                self.window_visible = true;
-                                self.screen = Screen::SshApproval;
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                            } else {
-                                self.search_state.warning =
-                                    Some(format!("could not resolve SSH approval: {e}"));
-                            }
-                        }
+                BwResponse::SshApprovalDecision(result) => {
+                    if let Err(e) = result {
+                        self.search_state.warning =
+                            Some(format!("could not resolve SSH approval: {e}"));
                     }
                 }
             }
@@ -358,26 +335,11 @@ impl App {
     fn hide_quick_access(&mut self, ctx: &Context) {
         debug_log("hide quick access");
         Self::hide_viewport_now(ctx);
-        let recent_item_to_save =
-            if self.settings.restore_recent_item && self.summary_open {
-                self.summary_state.detail_id.clone()
-            } else {
-                None
-            };
-        let should_clear_recent = !self.settings.restore_recent_item;
         self.window_visible = false;
         self.summary_open = false;
         self.unfocused_since = None;
         self.summary_state.reveal_fields.clear();
-        std::thread::spawn(move || {
-            if should_clear_recent {
-                let _ = config::clear_recent_item();
-            } else if let Some(id) = recent_item_to_save {
-                let _ = config::save_recent_item(&id);
-            }
-            std::thread::sleep(EXIT_AFTER_HIDE_DELAY);
-            std::process::exit(0);
-        });
+        Self::exit_now();
     }
 
     fn hide_viewport_now(ctx: &Context) {
@@ -386,11 +348,10 @@ impl App {
         ctx.request_repaint();
     }
 
-    fn exit_after(delay: Duration) {
-        std::thread::spawn(move || {
-            std::thread::sleep(delay);
-            std::process::exit(0);
-        });
+    fn exit_now() -> ! {
+        unsafe {
+            libc::_exit(0);
+        }
     }
 
     fn show_quick_access(&mut self, ctx: &Context) {
@@ -434,26 +395,6 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
-    fn refresh_ssh_approval(&mut self) {
-        if self.screen != Screen::SshApproval {
-            return;
-        }
-        let request = self.backend.ssh_approval();
-        if request.as_ref().map(|request| &request.id)
-            != self
-                .ssh_approval_state
-                .request
-                .as_ref()
-                .map(|request| &request.id)
-        {
-            self.ssh_approval_state.request = request;
-            self.ssh_approval_state.selected_action = 0;
-        }
-        if self.ssh_approval_state.request.is_none() {
-            self.ssh_approval_state.status = self.backend.ssh_approval_status();
-        }
-    }
-
     fn leave_ssh_approval(&mut self, ctx: &Context) {
         let auto_hide = self.ssh_approval_state.auto_hide;
         self.ssh_approval_state.request = None;
@@ -486,14 +427,14 @@ impl App {
         let auto_hide = self.ssh_approval_state.auto_hide;
         self.ssh_approval_state.request = None;
         self.last_inner_size = None;
-        self.spawn_ssh_approval_decision(decision, auto_hide);
 
         if auto_hide {
-            self.window_visible = false;
-            self.unfocused_since = None;
             Self::hide_viewport_now(ctx);
-            return;
+            let _ = self.backend.send_ssh_approval_decision(decision);
+            Self::exit_now();
         }
+
+        self.spawn_ssh_approval_decision(decision);
 
         if let Some((screen, summary_open)) = self.ssh_approval_return.take() {
             self.screen = screen;
@@ -647,9 +588,10 @@ impl App {
 
     fn open_result(&mut self, idx: usize) {
         if let Some(item) = self.search_state.results.get(idx) {
+            let item_id = item.id.clone();
             self.summary_state.detail = None;
             self.summary_state.in_flight = true;
-            self.summary_state.detail_id = Some(item.id.clone());
+            self.summary_state.detail_id = Some(item_id.clone());
             self.summary_state.totp = None;
             self.summary_state.totp_fetched_at = None;
             self.summary_state.totp_in_flight = false;
@@ -657,7 +599,13 @@ impl App {
             self.summary_open = true;
             self.unfocused_since = None;
             self.last_inner_size = None;
-            self.spawn_detail(item.id.clone());
+            if self.settings.restore_recent_item {
+                let recent_id = item_id.clone();
+                std::thread::spawn(move || {
+                    let _ = config::save_recent_item(&recent_id);
+                });
+            }
+            self.spawn_detail(item_id);
         }
     }
 
@@ -670,19 +618,6 @@ impl App {
         self.unfocused_since = None;
         self.last_inner_size = None;
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-    }
-
-    fn save_recent_item_for_restore(&self) {
-        if !self.settings.restore_recent_item {
-            let _ = config::clear_recent_item();
-            return;
-        }
-        if !self.summary_open {
-            return;
-        }
-        if let Some(id) = self.summary_state.detail_id.as_deref() {
-            let _ = config::save_recent_item(id);
-        }
     }
 
     fn restore_recent_item_on_start(&mut self) {
@@ -743,12 +678,10 @@ impl eframe::App for App {
 
         if ctx.input(|i| i.viewport().close_requested()) {
             debug_log("viewport close requested");
-            self.save_recent_item_for_restore();
-            std::process::exit(0);
+            Self::exit_now();
         }
 
         self.poll_responses(ctx);
-        self.refresh_ssh_approval();
 
         if self.window_visible
             && !self.summary_open

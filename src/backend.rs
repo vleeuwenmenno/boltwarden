@@ -253,6 +253,13 @@ impl AppBackend {
         }
     }
 
+    pub fn send_ssh_approval_decision(&self, decision: SshApprovalDecision) -> Result<(), String> {
+        match self {
+            Self::Local(_) => Err("SSH approval is only available in daemon mode".into()),
+            Self::Remote(client) => client.send(&RpcRequest::DecideSshApproval(decision)),
+        }
+    }
+
     pub fn ssh_approval_status(&self) -> Option<SshApprovalStatus> {
         match self {
             Self::Local(_) => None,

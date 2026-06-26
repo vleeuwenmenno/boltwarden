@@ -101,6 +101,18 @@ impl RpcClient {
         serde_json::from_str(&response)
             .map_err(|e| format!("could not decode daemon response: {e}"))
     }
+
+    pub fn send(&self, request: &RpcRequest) -> Result<(), String> {
+        let mut stream = UnixStream::connect(&self.socket_path)
+            .map_err(|e| format!("could not connect to daemon: {e}"))?;
+        let payload = serde_json::to_vec(request)
+            .map_err(|e| format!("could not encode daemon request: {e}"))?;
+        stream
+            .write_all(&payload)
+            .map_err(|e| format!("could not send daemon request: {e}"))?;
+        let _ = stream.shutdown(Shutdown::Write);
+        Ok(())
+    }
 }
 
 pub fn prepare_listener() -> io::Result<(PathBuf, UnixListener)> {
