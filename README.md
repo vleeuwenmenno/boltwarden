@@ -21,6 +21,7 @@ shell out to the `bw` CLI.
 - Title-prioritized search results
 - Entry detail view with username, password, URI, notes, custom fields, and TOTP
 - Copy selected fields from the keyboard or mouse
+- Optional SSH agent socket for official Bitwarden/Vaultwarden SSH key items
 - Auto-hide on Escape and focus loss
 
 ## Install
@@ -112,6 +113,27 @@ After a successful login, the app stores the refresh session in:
 
 The daemon keeps the unlocked vault in memory while it is running. The popup can
 close and reopen without forcing another master-password prompt.
+
+## SSH Agent
+
+The built-in SSH agent is disabled by default. Open the `Settings` quick command
+inside the popup to enable it and configure the socket path. The default is:
+
+```text
+$HOME/.bitwarden-ssh.sock
+```
+
+When enabled, the daemon creates the socket only while the vault is unlocked and
+exposes official SSH key vault items through its own Bitwarden/Vaultwarden API
+sync; Bitwarden Desktop is not required. Configure your shell or desktop session
+to use it:
+
+```bash
+export SSH_AUTH_SOCK="$HOME/.bitwarden-ssh.sock"
+```
+
+SSH key items can be searched and viewed in the popup, including the public key
+and Bitwarden fingerprint/signature value.
 
 ## Service Management
 

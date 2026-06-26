@@ -19,6 +19,10 @@ pub struct AppSettings {
     pub close_after_copy: bool,
     #[serde(default = "default_true")]
     pub restore_recent_item: bool,
+    #[serde(default)]
+    pub ssh_agent_enabled: bool,
+    #[serde(default = "default_ssh_agent_socket_path")]
+    pub ssh_agent_socket_path: String,
 }
 
 impl Default for AppSettings {
@@ -27,12 +31,53 @@ impl Default for AppSettings {
             show_keyboard_shortcuts: true,
             close_after_copy: true,
             restore_recent_item: true,
+            ssh_agent_enabled: false,
+            ssh_agent_socket_path: default_ssh_agent_socket_path(),
         }
     }
 }
 
 fn default_true() -> bool {
     true
+}
+
+pub fn default_ssh_agent_socket_path() -> String {
+    "$HOME/.bitwarden-ssh.sock".to_string()
+}
+
+pub fn expand_ssh_agent_socket_path(path: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("SSH agent path cannot be empty".into());
+    }
+
+    let expanded = if trimmed == "~" {
+        home_dir().ok_or_else(|| "HOME is not set".to_string())?
+    } else if let Some(rest) = trimmed.strip_prefix("~/") {
+        home_dir()
+            .ok_or_else(|| "HOME is not set".to_string())?
+            .join(rest)
+    } else if let Some(rest) = trimmed.strip_prefix("$HOME/") {
+        home_dir()
+            .ok_or_else(|| "HOME is not set".to_string())?
+            .join(rest)
+    } else if trimmed == "$HOME" {
+        home_dir().ok_or_else(|| "HOME is not set".to_string())?
+    } else {
+        PathBuf::from(trimmed)
+    };
+
+    if !expanded.is_absolute() {
+        return Err("SSH agent path must be absolute".into());
+    }
+    if expanded.is_dir() {
+        return Err("SSH agent path must point to a socket file, not a directory".into());
+    }
+    Ok(expanded)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -360,6 +405,8 @@ mod tests {
         assert!(actual.show_keyboard_shortcuts);
         assert!(actual.close_after_copy);
         assert!(actual.restore_recent_item);
+        assert!(!actual.ssh_agent_enabled);
+        assert_eq!(actual.ssh_agent_socket_path, default_ssh_agent_socket_path());
     }
 
     #[test]
@@ -380,23 +427,31 @@ mod tests {
             show_keyboard_shortcuts: false,
             close_after_copy: false,
             restore_recent_item: false,
+            ssh_agent_enabled: true,
+            ssh_agent_socket_path: "$HOME/custom-agent.sock".into(),
         })
         .unwrap();
         let actual = load_settings();
         assert!(!actual.show_keyboard_shortcuts);
         assert!(!actual.close_after_copy);
         assert!(!actual.restore_recent_item);
+        assert!(actual.ssh_agent_enabled);
+        assert_eq!(actual.ssh_agent_socket_path, "$HOME/custom-agent.sock");
 
         save_settings(&AppSettings {
             show_keyboard_shortcuts: true,
             close_after_copy: true,
             restore_recent_item: true,
+            ssh_agent_enabled: false,
+            ssh_agent_socket_path: "$HOME/.bitwarden-ssh.sock".into(),
         })
         .unwrap();
         let actual = load_settings();
         assert!(actual.show_keyboard_shortcuts);
         assert!(actual.close_after_copy);
         assert!(actual.restore_recent_item);
+        assert!(!actual.ssh_agent_enabled);
+        assert_eq!(actual.ssh_agent_socket_path, default_ssh_agent_socket_path());
 
         restore_var("XDG_CONFIG_HOME", previous_config_home);
         let _ = fs::remove_dir_all(temp);
@@ -432,6 +487,31 @@ mod tests {
         assert!(!actual.show_keyboard_shortcuts);
         assert!(actual.close_after_copy);
         assert!(actual.restore_recent_item);
+        assert!(!actual.ssh_agent_enabled);
+        assert_eq!(actual.ssh_agent_socket_path, default_ssh_agent_socket_path());
+    }
+
+    #[test]
+    fn expands_and_validates_ssh_agent_socket_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", "/tmp/bwqa-home");
+        }
+
+        assert_eq!(
+            expand_ssh_agent_socket_path("$HOME/.bitwarden-ssh.sock").unwrap(),
+            PathBuf::from("/tmp/bwqa-home/.bitwarden-ssh.sock")
+        );
+        assert_eq!(
+            expand_ssh_agent_socket_path("~/.bitwarden-ssh.sock").unwrap(),
+            PathBuf::from("/tmp/bwqa-home/.bitwarden-ssh.sock")
+        );
+        assert!(expand_ssh_agent_socket_path("").is_err());
+        assert!(expand_ssh_agent_socket_path("relative.sock").is_err());
+        assert!(expand_ssh_agent_socket_path("/tmp").is_err());
+
+        restore_var("HOME", previous_home);
     }
 
     #[test]

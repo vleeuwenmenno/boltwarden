@@ -1,11 +1,15 @@
 use crate::backend::{AppBackend, BackendError};
 use crate::config::{self, AppSettings};
-use crate::model::{BwItem, BwItemDetail, SyncStatus};
+use crate::model::{BwItem, BwItemDetail, SshAgentStatus, SyncStatus};
 use crate::ui::auth::{draw_auth, AuthAction, AuthState};
 use crate::ui::footer::draw_footer;
 use crate::ui::search::{
     draw_search_panel, search_window_height, SearchAction, SearchState, SearchView, SEARCH_HEIGHT,
     SEARCH_WIDTH,
+};
+use crate::ui::ssh_approval::{
+    draw_ssh_approval, SshApprovalAction, SshApprovalUiState, SSH_APPROVAL_HEIGHT,
+    SSH_APPROVAL_WIDTH,
 };
 use crate::ui::summary::{draw_summary, SummaryAction, SummaryState};
 use crate::ui::two_factor::{draw_two_factor, TwoFactorAction, TwoFactorState};
@@ -28,6 +32,7 @@ enum Screen {
     Auth,
     TwoFactor,
     Search,
+    SshApproval,
 }
 
 enum BwResponse {
@@ -48,6 +53,7 @@ pub enum PopupCommand {
     Show,
     Hide,
     Toggle,
+    SshApproval { auto_hide: bool },
     Quit,
 }
 
@@ -57,11 +63,14 @@ pub struct App {
     auth_state: AuthState,
     two_factor_state: TwoFactorState,
     search_state: SearchState,
+    ssh_approval_state: SshApprovalUiState,
+    ssh_approval_return: Option<(Screen, bool)>,
     summary_state: SummaryState,
     rx: mpsc::Receiver<BwResponse>,
     tx: mpsc::Sender<BwResponse>,
     popup_rx: mpsc::Receiver<PopupCommand>,
     settings: AppSettings,
+    ssh_agent_status: SshAgentStatus,
     last_inner_size: Option<egui::Vec2>,
     window_visible: bool,
     summary_open: bool,
@@ -89,6 +98,9 @@ impl App {
                         self.show_quick_access(ctx);
                     }
                 }
+                PopupCommand::SshApproval { auto_hide } => {
+                    self.enter_ssh_approval(ctx, auto_hide);
+                }
                 PopupCommand::Quit => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     std::process::exit(0);
@@ -105,17 +117,21 @@ impl App {
             Screen::Auth
         };
         let settings = config::load_settings();
+        let ssh_agent_status = backend.ssh_agent_status(&settings);
         let mut app = Self {
             backend,
             screen,
             auth_state: AuthState::default(),
             two_factor_state: TwoFactorState::default(),
             search_state: SearchState::default(),
+            ssh_approval_state: SshApprovalUiState::default(),
+            ssh_approval_return: None,
             summary_state: SummaryState::default(),
             rx,
             tx,
             popup_rx,
             settings,
+            ssh_agent_status,
             last_inner_size: None,
             window_visible: true,
             summary_open: false,
@@ -200,6 +216,7 @@ impl App {
                             self.auth_state.password.clear();
                             self.auth_state.error = None;
                             self.search_state.reset_for_reopen();
+                            self.ssh_agent_status = self.backend.ssh_agent_status(&self.settings);
                         }
                         Err(e) => {
                             match e {
@@ -227,6 +244,7 @@ impl App {
                             self.two_factor_state.token.clear();
                             self.two_factor_state.error = None;
                             self.search_state.reset_for_reopen();
+                            self.ssh_agent_status = self.backend.ssh_agent_status(&self.settings);
                         }
                         Err(e) => {
                             self.two_factor_state.error = Some(e.to_string());
@@ -324,6 +342,72 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
+    fn enter_ssh_approval(&mut self, ctx: &Context, auto_hide: bool) {
+        debug_log("show SSH approval");
+        self.window_visible = true;
+        self.focus_hide_enabled_at = Instant::now() + UNFOCUS_HIDE_GRACE;
+        self.unfocused_since = None;
+        self.last_inner_size = None;
+        if self.screen != Screen::SshApproval {
+            self.ssh_approval_return = Some((self.screen.clone(), self.summary_open));
+        }
+        let request = self.backend.ssh_approval();
+        self.ssh_approval_state
+            .reset_for_request(request, auto_hide);
+        if self.ssh_approval_state.request.is_none() {
+            self.ssh_approval_state.status = self.backend.ssh_approval_status();
+        }
+        self.screen = Screen::SshApproval;
+        self.summary_open = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    fn refresh_ssh_approval(&mut self) {
+        if self.screen != Screen::SshApproval {
+            return;
+        }
+        let request = self.backend.ssh_approval();
+        if request.as_ref().map(|request| &request.id)
+            != self
+                .ssh_approval_state
+                .request
+                .as_ref()
+                .map(|request| &request.id)
+        {
+            self.ssh_approval_state.request = request;
+            self.ssh_approval_state.selected_action = 0;
+        }
+        if self.ssh_approval_state.request.is_none() {
+            self.ssh_approval_state.status = self.backend.ssh_approval_status();
+        }
+    }
+
+    fn leave_ssh_approval(&mut self, ctx: &Context) {
+        let auto_hide = self.ssh_approval_state.auto_hide;
+        self.ssh_approval_state.request = None;
+        self.last_inner_size = None;
+        if auto_hide {
+            self.hide_quick_access(ctx);
+            return;
+        }
+        if let Some((screen, summary_open)) = self.ssh_approval_return.take() {
+            self.screen = screen;
+            self.summary_open = summary_open;
+        } else {
+            self.screen = if self.backend.has_session() {
+                Screen::Search
+            } else {
+                Screen::Auth
+            };
+            self.summary_open = false;
+        }
+        self.focus_hide_enabled_at = Instant::now() + UNFOCUS_HIDE_GRACE;
+        self.unfocused_since = None;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
     fn escape_pressed(ctx: &Context) -> bool {
         ctx.input(|i| {
             i.key_pressed(egui::Key::Escape)
@@ -354,6 +438,7 @@ impl App {
 
     fn should_hide_after_focus_loss(&mut self, ctx: &Context) -> bool {
         if !self.window_visible
+            || self.screen == Screen::SshApproval
             || self.summary_open
             || self.search_state.view == SearchView::Settings
             || Instant::now() < self.focus_hide_enabled_at
@@ -399,6 +484,7 @@ impl App {
                 }
             }
             Screen::TwoFactor => egui::vec2(620.0, 260.0),
+            Screen::SshApproval => egui::vec2(SSH_APPROVAL_WIDTH, SSH_APPROVAL_HEIGHT),
             Screen::Search if self.summary_open => {
                 let shortcut_height = if self.settings.show_keyboard_shortcuts {
                     SUMMARY_FOOTER_GAP + SUMMARY_FOOTER_TOTAL_HEIGHT
@@ -527,6 +613,20 @@ impl App {
             }
         }
     }
+
+    fn save_and_apply_settings(&mut self) {
+        self.last_inner_size = None;
+        match self.backend.apply_settings(&self.settings) {
+            Ok(status) => {
+                self.ssh_agent_status = status;
+                self.search_state.warning = None;
+            }
+            Err(e) => {
+                self.search_state.warning = Some(format!("could not save settings: {e}"));
+                self.ssh_agent_status = self.backend.ssh_agent_status(&self.settings);
+            }
+        }
+    }
 }
 
 impl eframe::App for App {
@@ -545,8 +645,13 @@ impl eframe::App for App {
         }
 
         self.poll_responses(ctx);
+        self.refresh_ssh_approval();
 
-        if self.window_visible && !self.summary_open && Self::escape_pressed(ctx) {
+        if self.window_visible
+            && !self.summary_open
+            && self.screen != Screen::SshApproval
+            && Self::escape_pressed(ctx)
+        {
             debug_log("hide because escape was pressed");
             self.hide_quick_access(ctx);
             return;
@@ -622,6 +727,31 @@ impl eframe::App for App {
                             }
                         }
                         draw_footer(ui, &[("⏎", "Verify"), ("Esc", "Hide")]);
+                    }
+                    Screen::SshApproval => {
+                        if let Some(action) = draw_ssh_approval(
+                            ctx,
+                            ui,
+                            &mut self.ssh_approval_state,
+                            self.settings.show_keyboard_shortcuts,
+                        ) {
+                            match action {
+                                SshApprovalAction::Decide(decision) => {
+                                    match self.backend.decide_ssh_approval(decision) {
+                                        Ok(status) => {
+                                            self.ssh_approval_state.status = Some(status);
+                                            self.leave_ssh_approval(ctx);
+                                        }
+                                        Err(e) => {
+                                            self.ssh_approval_state.error = Some(e);
+                                        }
+                                    }
+                                }
+                                SshApprovalAction::Back => {
+                                    self.leave_ssh_approval(ctx);
+                                }
+                            }
+                        }
                     }
                     Screen::Search => {
                         if self.summary_open {
@@ -717,6 +847,9 @@ impl eframe::App for App {
                             self.settings.show_keyboard_shortcuts,
                             self.settings.close_after_copy,
                             self.settings.restore_recent_item,
+                            self.settings.ssh_agent_enabled,
+                            &self.settings.ssh_agent_socket_path,
+                            &self.ssh_agent_status,
                         ) {
                             match action {
                                 SearchAction::OpenResult(idx) => {
@@ -724,36 +857,26 @@ impl eframe::App for App {
                                 }
                                 SearchAction::SetKeyboardShortcuts(show) => {
                                     self.settings.show_keyboard_shortcuts = show;
-                                    self.last_inner_size = None;
-                                    if let Err(e) = config::save_settings(&self.settings) {
-                                        self.search_state.warning =
-                                            Some(format!("could not save settings: {e}"));
-                                    } else {
-                                        self.search_state.warning = None;
-                                    }
+                                    self.save_and_apply_settings();
                                 }
                                 SearchAction::SetCloseAfterCopy(close) => {
                                     self.settings.close_after_copy = close;
-                                    self.last_inner_size = None;
-                                    if let Err(e) = config::save_settings(&self.settings) {
-                                        self.search_state.warning =
-                                            Some(format!("could not save settings: {e}"));
-                                    } else {
-                                        self.search_state.warning = None;
-                                    }
+                                    self.save_and_apply_settings();
                                 }
                                 SearchAction::SetRestoreRecentItem(restore) => {
                                     self.settings.restore_recent_item = restore;
-                                    self.last_inner_size = None;
                                     if !restore {
                                         let _ = config::clear_recent_item();
                                     }
-                                    if let Err(e) = config::save_settings(&self.settings) {
-                                        self.search_state.warning =
-                                            Some(format!("could not save settings: {e}"));
-                                    } else {
-                                        self.search_state.warning = None;
-                                    }
+                                    self.save_and_apply_settings();
+                                }
+                                SearchAction::SetSshAgentEnabled(enabled) => {
+                                    self.settings.ssh_agent_enabled = enabled;
+                                    self.save_and_apply_settings();
+                                }
+                                SearchAction::SetSshAgentSocketPath(path) => {
+                                    self.settings.ssh_agent_socket_path = path;
+                                    self.save_and_apply_settings();
                                 }
                                 SearchAction::LockVault => {
                                     if let Err(e) = self.backend.lock_vault() {
@@ -768,6 +891,8 @@ impl eframe::App for App {
                                         self.summary_open = false;
                                         self.summary_state.reveal_fields.clear();
                                         self.last_inner_size = None;
+                                        self.ssh_agent_status =
+                                            self.backend.ssh_agent_status(&self.settings);
                                     }
                                 }
                                 SearchAction::Quit => {
@@ -791,8 +916,12 @@ impl eframe::App for App {
         if self.summary_open && self.summary_state.totp_fetched_at.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
+        if self.screen == Screen::SshApproval {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
         if self.window_visible
             && !self.summary_open
+            && self.screen != Screen::SshApproval
             && self.search_state.view != SearchView::Settings
             && Self::viewport_focused(ctx) == Some(false)
             && Instant::now() >= self.focus_hide_enabled_at
@@ -812,6 +941,7 @@ impl App {
             Screen::Search => egui::Color32::TRANSPARENT,
             Screen::Auth if self.auth_state.has_saved_session => egui::Color32::TRANSPARENT,
             Screen::Auth | Screen::TwoFactor => egui::Color32::from_rgb(12, 15, 20),
+            Screen::SshApproval => egui::Color32::TRANSPARENT,
         }
     }
 }

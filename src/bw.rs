@@ -1,6 +1,6 @@
 use crate::config;
 use crate::config::{SavedKdf, SavedSession};
-use crate::model::{BwItem, BwItemDetail, CustomField, SyncStatus};
+use crate::model::{BwItem, BwItemDetail, CustomField, SshKey, SyncStatus};
 use aes::Aes256;
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
@@ -17,6 +17,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(12);
+const CLIENT_NAME: &str = "bw-quick-access";
+// Vaultwarden gates newer cipher types, including SSH keys, on this Bitwarden client header.
+const SYNC_COMPAT_CLIENT_VERSION: &str = "2024.12.0";
 
 type Aes256CbcDec = cbc::Decryptor<Aes256>;
 type HmacSha256 = Hmac<Sha256>;
@@ -341,6 +344,15 @@ impl BwClient {
         generate_totp(seed)
     }
 
+    pub fn ssh_keys(&self) -> Result<Vec<SshKey>, BwError> {
+        self.require_unlocked()?;
+        Ok(self
+            .items
+            .iter()
+            .filter_map(|item| item.ssh_key.clone())
+            .collect())
+    }
+
     fn require_unlocked(&self) -> Result<(), BwError> {
         if self.has_session() {
             Ok(())
@@ -486,9 +498,19 @@ impl BwClient {
         self.client
             .get(url)
             .bearer_auth(token)
+            .header(sync_client_name_header().0, sync_client_name_header().1)
+            .header(sync_client_version_header().0, sync_client_version_header().1)
             .send()
             .map_err(|e| BwError::Cli(format!("sync request failed: {e}")))
     }
+}
+
+fn sync_client_name_header() -> (&'static str, &'static str) {
+    ("Bitwarden-Client-Name", CLIENT_NAME)
+}
+
+fn sync_client_version_header() -> (&'static str, &'static str) {
+    ("Bitwarden-Client-Version", SYNC_COMPAT_CLIENT_VERSION)
 }
 
 fn decrypt_skip_warning(count: usize, first_error: Option<String>) -> Option<String> {
@@ -598,9 +620,25 @@ fn secondary_matches_search(item: &BwItemDetail, needle: &str) -> bool {
         || text_matches(&item.item_type, needle)
         || item.notes.as_deref().is_some_and(|value| text_matches(value, needle))
         || item.uris.iter().any(|value| text_matches(value, needle))
+        || item
+            .ssh_key
+            .as_ref()
+            .is_some_and(|ssh_key| ssh_key_matches_search(ssh_key, needle))
         || item.custom_fields.iter().any(|field| {
             text_matches(&field.name, needle) || text_matches(&field.value, needle)
         })
+}
+
+fn ssh_key_matches_search(ssh_key: &SshKey, needle: &str) -> bool {
+    text_matches("ssh key", needle)
+        || text_matches("public key", needle)
+        || text_matches("fingerprint", needle)
+        || text_matches("signature", needle)
+        || text_matches(&ssh_key.public_key, needle)
+        || ssh_key
+            .fingerprint
+            .as_deref()
+            .is_some_and(|value| text_matches(value, needle))
 }
 
 fn text_matches(value: &str, needle: &str) -> bool {
@@ -824,6 +862,8 @@ struct CipherResponse {
     card: Option<CardResponse>,
     #[serde(default, alias = "Identity")]
     identity: Option<IdentityResponse>,
+    #[serde(default, alias = "SshKey", alias = "SSHKey")]
+    ssh_key: Option<SshKeyResponse>,
     #[serde(default, alias = "Key")]
     key: Option<String>,
     #[serde(default, alias = "DeletedDate")]
@@ -911,6 +951,17 @@ struct IdentityResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SshKeyResponse {
+    #[serde(default, alias = "PrivateKey")]
+    private_key: Option<String>,
+    #[serde(default, alias = "PublicKey")]
+    public_key: Option<String>,
+    #[serde(default, alias = "KeyFingerprint", alias = "Fingerprint")]
+    key_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CipherDataResponse {
     #[serde(default, alias = "Name")]
     name: Option<String>,
@@ -958,6 +1009,14 @@ struct CipherDataResponse {
     postal_code: Option<String>,
     #[serde(default, alias = "Country")]
     country: Option<String>,
+    #[serde(default, alias = "SshKey", alias = "SSHKey")]
+    ssh_key: Option<SshKeyResponse>,
+    #[serde(default, alias = "PrivateKey")]
+    private_key: Option<String>,
+    #[serde(default, alias = "PublicKey")]
+    public_key: Option<String>,
+    #[serde(default, alias = "KeyFingerprint", alias = "Fingerprint")]
+    key_fingerprint: Option<String>,
 }
 
 fn decrypt_folders(
@@ -1021,12 +1080,32 @@ fn decrypt_cipher(
     let mut password = None;
     let mut uris = Vec::new();
     let mut totp = None;
+    let mut ssh_key = None;
 
     if let Some(data) = data {
         username = decrypt_opt_string(data.username.as_deref(), &item_key)?;
         password = decrypt_opt_string(data.password.as_deref(), &item_key)?;
         totp = decrypt_opt_string(data.totp.as_deref(), &item_key)?;
         uris = decrypt_uris(data.uris.as_deref(), &item_key)?;
+        if let Some(ssh_response) = data.ssh_key.as_ref() {
+            ssh_key = decrypt_ssh_key_data(
+                cipher.id.as_str(),
+                &name,
+                ssh_response.private_key.as_deref(),
+                ssh_response.public_key.as_deref(),
+                ssh_response.key_fingerprint.as_deref(),
+                &item_key,
+            )?;
+        } else {
+            ssh_key = decrypt_ssh_key_data(
+                cipher.id.as_str(),
+                &name,
+                data.private_key.as_deref(),
+                data.public_key.as_deref(),
+                data.key_fingerprint.as_deref(),
+                &item_key,
+            )?;
+        }
     }
 
     if let Some(login) = cipher.login {
@@ -1034,6 +1113,17 @@ fn decrypt_cipher(
         password = decrypt_opt_string(login.password.as_deref(), &item_key)?;
         totp = decrypt_opt_string(login.totp.as_deref(), &item_key)?;
         uris = decrypt_uris(login.uris.as_deref(), &item_key)?;
+    }
+
+    if let Some(ssh_response) = cipher.ssh_key {
+        ssh_key = decrypt_ssh_key_data(
+            cipher.id.as_str(),
+            &name,
+            ssh_response.private_key.as_deref(),
+            ssh_response.public_key.as_deref(),
+            ssh_response.key_fingerprint.as_deref(),
+            &item_key,
+        )?;
     }
 
     let field_responses = data
@@ -1096,7 +1186,32 @@ fn decrypt_cipher(
             .folder_id
             .and_then(|id| folders.get(&id).cloned().or(Some(id))),
         item_type: item_type_name(cipher.item_type).to_string(),
+        ssh_key,
     })
+}
+
+fn decrypt_ssh_key_data(
+    id: &str,
+    name: &str,
+    encrypted_private_key: Option<&str>,
+    encrypted_public_key: Option<&str>,
+    encrypted_fingerprint: Option<&str>,
+    key: &[u8],
+) -> Result<Option<SshKey>, BwError> {
+    let Some(private_key) = decrypt_opt_string(encrypted_private_key, key)? else {
+        return Ok(None);
+    };
+    let Some(public_key) = decrypt_opt_string(encrypted_public_key, key)? else {
+        return Ok(None);
+    };
+    let fingerprint = decrypt_opt_string(encrypted_fingerprint, key)?;
+    Ok(Some(SshKey {
+        id: id.to_string(),
+        name: name.to_string(),
+        public_key,
+        private_key,
+        fingerprint,
+    }))
 }
 
 fn push_card_field(
@@ -1228,6 +1343,7 @@ fn item_type_name(item_type: i64) -> &'static str {
         2 => "secureNote",
         3 => "card",
         4 => "identity",
+        5 => "sshKey",
         _ => "other",
     }
 }
@@ -1664,6 +1780,7 @@ mod tests {
             login: None,
             card: None,
             identity: None,
+            ssh_key: None,
             key: None,
             deleted_date: None,
             archived_date: None,
@@ -1814,6 +1931,7 @@ mod tests {
             login: None,
             card: None,
             identity: None,
+            ssh_key: None,
             key: None,
             deleted_date: None,
             archived_date: None,
@@ -1847,6 +1965,10 @@ mod tests {
                 state: None,
                 postal_code: None,
                 country: None,
+                ssh_key: None,
+                private_key: None,
+                public_key: None,
+                key_fingerprint: None,
             }),
         };
 
@@ -1859,6 +1981,122 @@ mod tests {
         assert!(item_matches_search(&item, "telegram"));
         assert!(item_matches_search(&item, "bermcs"));
         assert!(item_matches_search(&item, "paper-key"));
+    }
+
+    #[test]
+    fn decrypts_official_ssh_key_cipher() {
+        let user_key = [9u8; 64];
+        let cipher = CipherResponse {
+            id: "ssh-key-1".into(),
+            organization_id: None,
+            folder_id: None,
+            item_type: 5,
+            name: Some(encrypt_string("GitHub deploy key", &user_key)),
+            notes: None,
+            fields: None,
+            login: None,
+            card: None,
+            identity: None,
+            ssh_key: Some(SshKeyResponse {
+                private_key: Some(encrypt_string("-----BEGIN OPENSSH PRIVATE KEY-----", &user_key)),
+                public_key: Some(encrypt_string("ssh-ed25519 AAAATEST", &user_key)),
+                key_fingerprint: Some(encrypt_string("SHA256:test", &user_key)),
+            }),
+            key: None,
+            deleted_date: None,
+            archived_date: None,
+            data: None,
+        };
+
+        let item = decrypt_cipher(cipher, &user_key, &HashMap::new(), &HashMap::new()).unwrap();
+        assert_eq!(item.item_type, "sshKey");
+        let ssh_key = item.ssh_key.as_ref().unwrap();
+        assert_eq!(ssh_key.id, "ssh-key-1");
+        assert_eq!(ssh_key.name, "GitHub deploy key");
+        assert_eq!(ssh_key.public_key, "ssh-ed25519 AAAATEST");
+        assert_eq!(ssh_key.fingerprint.as_deref(), Some("SHA256:test"));
+        assert!(item_matches_search(&item, "aaaatest"));
+        assert!(item_matches_search(&item, "sha256:test"));
+        assert!(item_matches_search(&item, "public key"));
+        assert!(item_matches_search(&item, "fingerprint"));
+        assert!(item_matches_search(&item, "signature"));
+    }
+
+    #[test]
+    fn sync_request_uses_ssh_key_compatible_client_metadata() {
+        assert_eq!(
+            sync_client_name_header(),
+            ("Bitwarden-Client-Name", "bw-quick-access")
+        );
+        assert_eq!(
+            sync_client_version_header(),
+            ("Bitwarden-Client-Version", "2024.12.0")
+        );
+    }
+
+    #[test]
+    fn decrypts_nested_data_ssh_key_cipher() {
+        let user_key = [7u8; 64];
+        let cipher = CipherResponse {
+            id: "ssh-key-data-1".into(),
+            organization_id: None,
+            folder_id: None,
+            item_type: 5,
+            name: None,
+            notes: None,
+            fields: None,
+            login: None,
+            card: None,
+            identity: None,
+            ssh_key: None,
+            key: None,
+            deleted_date: None,
+            archived_date: None,
+            data: Some(CipherDataResponse {
+                name: Some(encrypt_string("Nested SSH key", &user_key)),
+                notes: None,
+                fields: None,
+                username: None,
+                password: None,
+                uris: None,
+                totp: None,
+                cardholder_name: None,
+                number: None,
+                code: None,
+                brand: None,
+                exp_month: None,
+                exp_year: None,
+                first_name: None,
+                middle_name: None,
+                last_name: None,
+                email: None,
+                phone: None,
+                address1: None,
+                city: None,
+                state: None,
+                postal_code: None,
+                country: None,
+                ssh_key: Some(SshKeyResponse {
+                    private_key: Some(encrypt_string(
+                        "-----BEGIN OPENSSH PRIVATE KEY-----",
+                        &user_key,
+                    )),
+                    public_key: Some(encrypt_string("ssh-ed25519 AAAANESTED", &user_key)),
+                    key_fingerprint: Some(encrypt_string("SHA256:nested", &user_key)),
+                }),
+                private_key: None,
+                public_key: None,
+                key_fingerprint: None,
+            }),
+        };
+
+        let item = decrypt_cipher(cipher, &user_key, &HashMap::new(), &HashMap::new()).unwrap();
+        assert_eq!(item.item_type, "sshKey");
+        let ssh_key = item.ssh_key.unwrap();
+        assert_eq!(ssh_key.id, "ssh-key-data-1");
+        assert_eq!(ssh_key.name, "Nested SSH key");
+        assert_eq!(ssh_key.public_key, "ssh-ed25519 AAAANESTED");
+        assert_eq!(ssh_key.fingerprint.as_deref(), Some("SHA256:nested"));
     }
 
     #[test]
@@ -1943,6 +2181,7 @@ mod tests {
             }],
             folder: Some("Infrastructure".into()),
             item_type: "login".into(),
+            ssh_key: None,
         };
 
         assert!(item_matches_search(&item, "production"));
@@ -1992,6 +2231,7 @@ mod tests {
             custom_fields: Vec::new(),
             folder: None,
             item_type: "login".into(),
+            ssh_key: None,
         }
     }
 

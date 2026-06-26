@@ -6,6 +6,7 @@ mod config;
 mod instance;
 mod model;
 mod rpc;
+mod ssh_agent;
 mod tray;
 mod ui;
 
@@ -14,7 +15,9 @@ use backend::AppBackend;
 use bw::{BwClient, BwError, TwoFactorChallenge};
 use eframe::egui;
 use instance::LaunchCommand;
+use model::SshAgentStatus;
 use rpc::{RpcError, RpcRequest, RpcResponse, SearchPayload};
+use ssh_agent::{SshAgentHandle, SshApprovalService};
 use ui::search::{search_window_height, SEARCH_WIDTH};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -41,6 +44,9 @@ type PopupChild = Arc<Mutex<Option<PopupProcess>>>;
 struct VaultState {
     bw: BwClient,
     pending_two_factor: Option<TwoFactorChallenge>,
+    ssh_agent: Option<SshAgentHandle>,
+    ssh_agent_status: SshAgentStatus,
+    ssh_approvals: SshApprovalService,
 }
 
 fn main() -> eframe::Result<()> {
@@ -60,15 +66,21 @@ fn main() -> eframe::Result<()> {
 
 fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Result<()> {
     let (tx, rx) = mpsc::channel();
+    let (approval_show_tx, approval_show_rx) = mpsc::channel();
     let popup = Arc::new(Mutex::new(None));
+    let ssh_approvals = SshApprovalService::new(approval_show_tx);
     let vault = Arc::new(Mutex::new(VaultState {
         bw: BwClient::new(),
         pending_two_factor: None,
+        ssh_agent: None,
+        ssh_agent_status: ssh_agent::disabled_status(),
+        ssh_approvals: ssh_approvals.clone(),
     }));
-    let rpc_socket = start_vault_rpc_listener(vault);
+    let rpc_socket = start_vault_rpc_listener(vault.clone());
 
     start_tray(tx.clone());
     start_activation_listener(listener, tx.clone());
+    start_approval_popup_listener(approval_show_rx, popup.clone(), rpc_socket.clone());
     let _daemon_tx_keepalive = tx;
 
     if show_on_start {
@@ -81,6 +93,10 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
             DaemonCommand::Toggle => toggle_popup(&popup, rpc_socket.as_deref()),
             DaemonCommand::Quit => {
                 quit_popup(&popup);
+                if let Ok(mut state) = vault.lock() {
+                    stop_ssh_agent(&mut state);
+                    state.ssh_approvals.clear_all("daemon quit");
+                }
                 break;
             }
         }
@@ -151,6 +167,18 @@ fn start_activation_listener(listener: Option<UnixListener>, tx: mpsc::Sender<Da
                 LaunchCommand::Daemon => continue,
             };
             let _ = tx.send(command);
+        }
+    });
+}
+
+fn start_approval_popup_listener(
+    rx: mpsc::Receiver<()>,
+    popup: PopupChild,
+    rpc_socket: Option<PathBuf>,
+) {
+    std::thread::spawn(move || {
+        while rx.recv().is_ok() {
+            show_approval_popup(&popup, rpc_socket.as_deref());
         }
     });
 }
@@ -231,9 +259,30 @@ fn handle_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>) -> Rp
         RpcRequest::GetTotp { id } => {
             RpcResponse::Totp(state.bw.get_totp(&id).map_err(rpc_error_from_bw))
         }
+        RpcRequest::ApplySettings(settings) => {
+            let result = config::save_settings(&settings)
+                .map_err(|e| e.to_string())
+                .map(|_| apply_ssh_agent_settings(&mut state));
+            RpcResponse::SettingsApplied(result)
+        }
+        RpcRequest::GetSshAgentStatus => {
+            let status = apply_ssh_agent_settings(&mut state);
+            RpcResponse::SshAgentStatus(status)
+        }
+        RpcRequest::GetSshApproval => {
+            RpcResponse::SshApproval(state.ssh_approvals.active_request())
+        }
+        RpcRequest::DecideSshApproval(decision) => {
+            RpcResponse::SshApprovalDecided(state.ssh_approvals.decide(decision))
+        }
+        RpcRequest::GetSshApprovalStatus => {
+            RpcResponse::SshApprovalStatus(state.ssh_approvals.recent_status())
+        }
         RpcRequest::LockVault => {
             state.bw = BwClient::new();
             state.pending_two_factor = None;
+            stop_ssh_agent(&mut state);
+            state.ssh_approvals.clear_all("vault locked");
             let _ = config::clear_recent_item();
             RpcResponse::LockVault(Ok(()))
         }
@@ -242,6 +291,8 @@ fn handle_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>) -> Rp
             if result.is_ok() {
                 state.bw = BwClient::new();
                 state.pending_two_factor = None;
+                stop_ssh_agent(&mut state);
+                state.ssh_approvals.clear_all("saved session cleared");
                 let _ = config::clear_recent_item();
             }
             RpcResponse::ClearSavedSession(result)
@@ -269,6 +320,7 @@ fn login_vault(
     match result {
         Ok(()) => {
             state.pending_two_factor = None;
+            apply_ssh_agent_settings(state);
             Ok(())
         }
         Err(BwError::TwoFactorRequired(challenge)) => {
@@ -295,10 +347,75 @@ fn complete_vault_two_factor(
     {
         Ok(()) => {
             state.pending_two_factor = None;
+            apply_ssh_agent_settings(state);
             Ok(())
         }
         Err(e) => Err(rpc_error_from_bw(e)),
     }
+}
+
+fn apply_ssh_agent_settings(state: &mut VaultState) -> SshAgentStatus {
+    let settings = config::load_settings();
+    if !settings.ssh_agent_enabled {
+        stop_ssh_agent(state);
+        state.ssh_approvals.clear_all("SSH agent disabled");
+        state.ssh_agent_status = ssh_agent::disabled_status();
+        return state.ssh_agent_status.clone();
+    }
+
+    if !state.bw.has_session() {
+        stop_ssh_agent(state);
+        state.ssh_approvals.clear_all("waiting for vault unlock");
+        state.ssh_agent_status = ssh_agent::waiting_for_unlock_status(&settings);
+        return state.ssh_agent_status.clone();
+    }
+
+    let desired_path = match config::expand_ssh_agent_socket_path(&settings.ssh_agent_socket_path) {
+        Ok(path) => path,
+        Err(e) => {
+            stop_ssh_agent(state);
+            state.ssh_approvals.clear_all("invalid SSH agent socket path");
+            state.ssh_agent_status = ssh_agent::error_status(&settings, e);
+            return state.ssh_agent_status.clone();
+        }
+    };
+
+    if state
+        .ssh_agent
+        .as_ref()
+        .is_some_and(|agent| agent.path() == desired_path)
+    {
+        state.ssh_agent_status = state
+            .ssh_agent
+            .as_ref()
+            .map(|agent| agent.status())
+            .unwrap_or_else(ssh_agent::disabled_status);
+        return state.ssh_agent_status.clone();
+    }
+
+    stop_ssh_agent(state);
+    match state.bw.ssh_keys() {
+        Ok(keys) => match ssh_agent::start(&settings, &keys, state.ssh_approvals.clone()) {
+            Ok(agent) => {
+                state.ssh_agent_status = agent.status();
+                state.ssh_agent = Some(agent);
+            }
+            Err(e) => {
+                state.ssh_agent_status = ssh_agent::error_status(&settings, e);
+            }
+        },
+        Err(e) => {
+            state.ssh_agent_status = ssh_agent::error_status(&settings, e.to_string());
+        }
+    }
+    state.ssh_agent_status.clone()
+}
+
+fn stop_ssh_agent(state: &mut VaultState) {
+    if let Some(agent) = state.ssh_agent.take() {
+        agent.stop();
+    }
+    state.ssh_approvals.clear_all("SSH agent stopped");
 }
 
 fn rpc_error_from_bw(error: BwError) -> RpcError {
@@ -321,6 +438,19 @@ fn popup_rpc_socket_arg() -> Option<PathBuf> {
 }
 
 fn show_popup(popup: &PopupChild, rpc_socket: Option<&Path>) {
+    show_popup_with_command(popup, rpc_socket, "show\n", "show\n");
+}
+
+fn show_approval_popup(popup: &PopupChild, rpc_socket: Option<&Path>) {
+    show_popup_with_command(popup, rpc_socket, "ssh-approval return\n", "ssh-approval auto\n");
+}
+
+fn show_popup_with_command(
+    popup: &PopupChild,
+    rpc_socket: Option<&Path>,
+    existing_command: &str,
+    new_command: &str,
+) {
     let Ok(mut child_slot) = popup.lock() else {
         return;
     };
@@ -331,7 +461,7 @@ fn show_popup(popup: &PopupChild, rpc_socket: Option<&Path>) {
                 *child_slot = None;
             }
             Ok(None) => {
-                send_popup_command(process, "show\n");
+                send_popup_command(process, existing_command);
                 return;
             }
             Err(_) => {
@@ -354,7 +484,9 @@ fn show_popup(popup: &PopupChild, rpc_socket: Option<&Path>) {
     }) {
         Ok(mut child) => {
             if let Some(stdin) = child.stdin.take() {
-                *child_slot = Some(PopupProcess { child, stdin });
+                let mut process = PopupProcess { child, stdin };
+                send_popup_command(&mut process, new_command);
+                *child_slot = Some(process);
             } else {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -466,6 +598,10 @@ fn start_popup_stdin_listener(tx: mpsc::Sender<PopupCommand>) {
                         "show" => Some(PopupCommand::Show),
                         "hide" => Some(PopupCommand::Hide),
                         "toggle" => Some(PopupCommand::Toggle),
+                        "ssh-approval auto" => Some(PopupCommand::SshApproval { auto_hide: true }),
+                        "ssh-approval return" => {
+                            Some(PopupCommand::SshApproval { auto_hide: false })
+                        }
                         "quit" => Some(PopupCommand::Quit),
                         _ => None,
                     };

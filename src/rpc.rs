@@ -1,5 +1,9 @@
 use crate::bw::TwoFactorProvider;
-use crate::model::{BwItem, BwItemDetail, SyncStatus};
+use crate::config::AppSettings;
+use crate::model::{
+    BwItem, BwItemDetail, SshAgentStatus, SshApprovalDecision, SshApprovalRequest,
+    SshApprovalStatus, SyncStatus,
+};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
@@ -31,6 +35,11 @@ pub enum RpcRequest {
     GetTotp {
         id: String,
     },
+    ApplySettings(AppSettings),
+    GetSshAgentStatus,
+    GetSshApproval,
+    DecideSshApproval(SshApprovalDecision),
+    GetSshApprovalStatus,
     LockVault,
     ClearSavedSession,
 }
@@ -43,6 +52,11 @@ pub enum RpcResponse {
     Search(Result<SearchPayload, RpcError>),
     Detail(Result<BwItemDetail, RpcError>),
     Totp(Result<String, RpcError>),
+    SettingsApplied(Result<SshAgentStatus, String>),
+    SshAgentStatus(SshAgentStatus),
+    SshApproval(Option<SshApprovalRequest>),
+    SshApprovalDecided(Result<SshApprovalStatus, String>),
+    SshApprovalStatus(Option<SshApprovalStatus>),
     LockVault(Result<(), String>),
     ClearSavedSession(Result<(), String>),
 }

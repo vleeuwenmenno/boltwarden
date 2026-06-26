@@ -1,6 +1,9 @@
 use crate::bw::{BwClient, BwError, TwoFactorChallenge, TwoFactorProvider};
-use crate::config;
-use crate::model::{BwItem, BwItemDetail, SyncStatus};
+use crate::config::{self, AppSettings};
+use crate::model::{
+    BwItem, BwItemDetail, SshAgentStatus, SshApprovalDecision, SshApprovalRequest,
+    SshApprovalStatus, SyncStatus,
+};
 use crate::rpc::{RpcClient, RpcError, RpcRequest, RpcResponse};
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -200,6 +203,81 @@ impl AppBackend {
                 Err(e) => Err(e),
             },
         }
+    }
+
+    pub fn apply_settings(&self, settings: &AppSettings) -> Result<SshAgentStatus, String> {
+        match self {
+            Self::Local(_) => {
+                config::save_settings(settings).map_err(|e| e.to_string())?;
+                Ok(local_ssh_agent_status(settings))
+            }
+            Self::Remote(client) => match client.call(&RpcRequest::ApplySettings(settings.clone())) {
+                Ok(RpcResponse::SettingsApplied(result)) => result,
+                Ok(_) => Err("unexpected daemon settings response".into()),
+                Err(e) => Err(e),
+            },
+        }
+    }
+
+    pub fn ssh_agent_status(&self, settings: &AppSettings) -> SshAgentStatus {
+        match self {
+            Self::Local(_) => local_ssh_agent_status(settings),
+            Self::Remote(client) => match client.call(&RpcRequest::GetSshAgentStatus) {
+                Ok(RpcResponse::SshAgentStatus(status)) => status,
+                _ => local_ssh_agent_status(settings),
+            },
+        }
+    }
+
+    pub fn ssh_approval(&self) -> Option<SshApprovalRequest> {
+        match self {
+            Self::Local(_) => None,
+            Self::Remote(client) => match client.call(&RpcRequest::GetSshApproval) {
+                Ok(RpcResponse::SshApproval(request)) => request,
+                _ => None,
+            },
+        }
+    }
+
+    pub fn decide_ssh_approval(
+        &self,
+        decision: SshApprovalDecision,
+    ) -> Result<SshApprovalStatus, String> {
+        match self {
+            Self::Local(_) => Err("SSH approval is only available in daemon mode".into()),
+            Self::Remote(client) => match client.call(&RpcRequest::DecideSshApproval(decision)) {
+                Ok(RpcResponse::SshApprovalDecided(result)) => result,
+                Ok(_) => Err("unexpected daemon SSH approval response".into()),
+                Err(e) => Err(e),
+            },
+        }
+    }
+
+    pub fn ssh_approval_status(&self) -> Option<SshApprovalStatus> {
+        match self {
+            Self::Local(_) => None,
+            Self::Remote(client) => match client.call(&RpcRequest::GetSshApprovalStatus) {
+                Ok(RpcResponse::SshApprovalStatus(status)) => status,
+                _ => None,
+            },
+        }
+    }
+}
+
+fn local_ssh_agent_status(settings: &AppSettings) -> SshAgentStatus {
+    SshAgentStatus {
+        enabled: settings.ssh_agent_enabled,
+        active: false,
+        socket_path: config::expand_ssh_agent_socket_path(&settings.ssh_agent_socket_path)
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| settings.ssh_agent_socket_path.clone()),
+        identity_count: 0,
+        skipped_count: 0,
+        message: if settings.ssh_agent_enabled {
+            "SSH agent is only available in daemon mode".into()
+        } else {
+            "SSH agent disabled".into()
+        },
     }
 }
 

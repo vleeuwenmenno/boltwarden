@@ -1,4 +1,5 @@
-use crate::model::{BwItem, SyncStatus};
+use crate::config;
+use crate::model::{BwItem, SshAgentStatus, SyncStatus};
 use egui::{Context, Ui};
 
 pub const SEARCH_WIDTH: f32 = 673.0;
@@ -12,7 +13,7 @@ const DROPDOWN_STATIC_HEIGHT: f32 = 23.0;
 const SHORTCUT_BAR_HEIGHT: f32 = 34.0;
 const SHORTCUT_BAR_BODY_HEIGHT: f32 = 24.0;
 const DROPDOWN_MAX_STATUS_HEIGHT: f32 = 44.0;
-const SETTINGS_PANEL_HEIGHT: f32 = 168.0;
+const SETTINGS_PANEL_HEIGHT: f32 = 278.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchView {
@@ -62,6 +63,7 @@ pub struct SearchState {
     pub last_query_time: Option<std::time::Instant>,
     pub sync_status: Option<SyncStatus>,
     pub view: SearchView,
+    pub ssh_agent_path_input: String,
 }
 
 impl Default for SearchState {
@@ -78,6 +80,7 @@ impl Default for SearchState {
             last_query_time: None,
             sync_status: None,
             view: SearchView::Results,
+            ssh_agent_path_input: String::new(),
         }
     }
 }
@@ -134,6 +137,7 @@ impl SearchState {
         self.in_flight = false;
         self.sync_status = None;
         self.view = SearchView::Results;
+        self.ssh_agent_path_input.clear();
         self.force_refresh();
         self.focus_search = true;
     }
@@ -271,6 +275,9 @@ pub fn draw_search(
     show_keyboard_shortcuts: bool,
     close_after_copy: bool,
     restore_recent_item: bool,
+    ssh_agent_enabled: bool,
+    ssh_agent_socket_path: &str,
+    ssh_agent_status: &SshAgentStatus,
 ) -> Option<SearchAction> {
     let mut action = None;
 
@@ -406,6 +413,9 @@ pub fn draw_search(
             show_keyboard_shortcuts,
             close_after_copy,
             restore_recent_item,
+            ssh_agent_enabled,
+            ssh_agent_socket_path,
+            ssh_agent_status,
         ) {
             action = Some(dropdown_action);
         }
@@ -421,6 +431,9 @@ pub fn draw_search_panel(
     show_keyboard_shortcuts: bool,
     close_after_copy: bool,
     restore_recent_item: bool,
+    ssh_agent_enabled: bool,
+    ssh_agent_socket_path: &str,
+    ssh_agent_status: &SshAgentStatus,
 ) -> Option<SearchAction> {
     draw_search(
         ctx,
@@ -429,6 +442,9 @@ pub fn draw_search_panel(
         show_keyboard_shortcuts,
         close_after_copy,
         restore_recent_item,
+        ssh_agent_enabled,
+        ssh_agent_socket_path,
+        ssh_agent_status,
     )
 }
 
@@ -438,6 +454,9 @@ fn draw_search_dropdown(
     show_keyboard_shortcuts: bool,
     close_after_copy: bool,
     restore_recent_item: bool,
+    ssh_agent_enabled: bool,
+    ssh_agent_socket_path: &str,
+    ssh_agent_status: &SshAgentStatus,
 ) -> Option<SearchAction> {
     let mut action = None;
     let panel_width = ui.available_width();
@@ -475,9 +494,13 @@ fn draw_search_dropdown(
                     if state.view == SearchView::Settings {
                         if let Some(settings_action) = draw_settings_panel(
                             ui,
+                            state,
                             show_keyboard_shortcuts,
                             close_after_copy,
                             restore_recent_item,
+                            ssh_agent_enabled,
+                            ssh_agent_socket_path,
+                            ssh_agent_status,
                         ) {
                             action = Some(settings_action);
                         }
@@ -644,9 +667,13 @@ fn draw_command_row(
 
 fn draw_settings_panel(
     ui: &mut Ui,
+    state: &mut SearchState,
     show_keyboard_shortcuts: bool,
     close_after_copy: bool,
     restore_recent_item: bool,
+    ssh_agent_enabled: bool,
+    ssh_agent_socket_path: &str,
+    ssh_agent_status: &SshAgentStatus,
 ) -> Option<SearchAction> {
     let mut action = None;
     ui.allocate_ui_with_layout(
@@ -697,6 +724,56 @@ fn draw_settings_panel(
                 egui::RichText::new("Reopens the last item for 30 seconds after hiding.")
                     .small()
                     .color(egui::Color32::from_rgb(126, 136, 152)),
+            );
+            ui.add_space(10.0);
+
+            let mut ssh_enabled = ssh_agent_enabled;
+            let response = ui.checkbox(&mut ssh_enabled, "Enable SSH agent");
+            if response.changed() {
+                action = Some(SearchAction::SetSshAgentEnabled(ssh_enabled));
+            }
+            ui.add_space(6.0);
+
+            if state.ssh_agent_path_input.is_empty() {
+                state.ssh_agent_path_input = ssh_agent_socket_path.to_string();
+            }
+            ui.add_enabled_ui(ssh_agent_enabled, |ui| {
+                let response = ui.add_sized(
+                    [ui.available_width(), 24.0],
+                    TextEdit::singleline(&mut state.ssh_agent_path_input)
+                        .hint_text("$HOME/.bitwarden-ssh.sock")
+                        .font(egui::FontId::monospace(13.0)),
+                );
+                if response.changed()
+                    && config::expand_ssh_agent_socket_path(&state.ssh_agent_path_input).is_ok()
+                {
+                    action = Some(SearchAction::SetSshAgentSocketPath(
+                        state.ssh_agent_path_input.clone(),
+                    ));
+                }
+            });
+            ui.add_space(5.0);
+            match config::expand_ssh_agent_socket_path(&state.ssh_agent_path_input) {
+                Ok(path) => ui.label(
+                    egui::RichText::new(format!("Set SSH_AUTH_SOCK={}", path.display()))
+                        .small()
+                        .color(egui::Color32::from_rgb(126, 136, 152)),
+                ),
+                Err(e) => ui.label(
+                    egui::RichText::new(e)
+                        .small()
+                        .color(egui::Color32::from_rgb(245, 110, 110)),
+                ),
+            };
+            ui.add_space(5.0);
+            ui.label(
+                egui::RichText::new(&ssh_agent_status.message)
+                    .small()
+                    .color(if ssh_agent_status.active {
+                        egui::Color32::from_rgb(116, 214, 143)
+                    } else {
+                        egui::Color32::from_rgb(126, 136, 152)
+                    }),
             );
         },
     );
@@ -770,6 +847,7 @@ fn item_icon(item_type: &str) -> &'static str {
         "secureNote" => "📝",
         "card" => "💳",
         "identity" => "👤",
+        "sshKey" => "🔐",
         _ => "📦",
     }
 }
@@ -1055,6 +1133,8 @@ pub enum SearchAction {
     SetKeyboardShortcuts(bool),
     SetCloseAfterCopy(bool),
     SetRestoreRecentItem(bool),
+    SetSshAgentEnabled(bool),
+    SetSshAgentSocketPath(String),
     LockVault,
     Quit,
 }

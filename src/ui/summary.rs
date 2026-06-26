@@ -40,6 +40,10 @@ impl SummaryState {
             if d.username.is_some() { n += 1; }
             if d.password.is_some() { n += 1; }
             n += d.uris.len();
+            if let Some(ssh_key) = &d.ssh_key {
+                n += 2;
+                if ssh_key.fingerprint.is_some() { n += 1; }
+            }
             if d.totp.is_some() { n += 1; }
             if d.notes.is_some() { n += 1; }
             n += d.custom_fields.len();
@@ -92,6 +96,7 @@ pub fn draw_summary(
             "secureNote" => "📝",
             "card" => "💳",
             "identity" => "👤",
+            "sshKey" => "🔐",
             _ => "📦",
         };
         ui.label(icon);
@@ -234,6 +239,34 @@ pub fn draw_summary(
             }
             for uri in &detail.uris {
                 copied |= copyable(ui, "URI", uri, false, state, &mut field_idx);
+            }
+            if let Some(ssh_key) = &detail.ssh_key {
+                copied |= copyable(
+                    ui,
+                    "Public key",
+                    &ssh_key.public_key,
+                    false,
+                    state,
+                    &mut field_idx,
+                );
+                if let Some(fingerprint) = &ssh_key.fingerprint {
+                    copied |= copyable(
+                        ui,
+                        "Fingerprint / signature",
+                        fingerprint,
+                        false,
+                        state,
+                        &mut field_idx,
+                    );
+                }
+                copied |= copyable(
+                    ui,
+                    "Private key",
+                    &ssh_key.private_key,
+                    true,
+                    state,
+                    &mut field_idx,
+                );
             }
             if detail.totp.is_some() {
                 let totp_display = state.totp.clone().unwrap_or_else(|| "------".into());
