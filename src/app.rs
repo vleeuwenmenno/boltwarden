@@ -26,6 +26,7 @@ const SUMMARY_WINDOW_HEIGHT: f32 = 640.0;
 const SUMMARY_OUTER_MARGIN: f32 = 14.0;
 const SUMMARY_FOOTER_GAP: f32 = 6.0;
 const SUMMARY_FOOTER_TOTAL_HEIGHT: f32 = 34.0;
+const EXIT_AFTER_HIDE_DELAY: Duration = Duration::from_millis(150);
 
 #[derive(Debug, Clone, PartialEq)]
 enum Screen {
@@ -106,8 +107,8 @@ impl App {
                     self.enter_ssh_approval(ctx, auto_hide);
                 }
                 PopupCommand::Quit => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    std::process::exit(0);
+                    Self::hide_viewport_now(ctx);
+                    Self::exit_after(Duration::from_millis(50));
                 }
             }
         }
@@ -332,7 +333,6 @@ impl App {
                         Ok(status) => {
                             self.ssh_approval_state.status = Some(status);
                             if auto_hide {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                                 std::process::exit(0);
                             }
                         }
@@ -357,13 +357,40 @@ impl App {
 
     fn hide_quick_access(&mut self, ctx: &Context) {
         debug_log("hide quick access");
-        self.save_recent_item_for_restore();
+        Self::hide_viewport_now(ctx);
+        let recent_item_to_save =
+            if self.settings.restore_recent_item && self.summary_open {
+                self.summary_state.detail_id.clone()
+            } else {
+                None
+            };
+        let should_clear_recent = !self.settings.restore_recent_item;
         self.window_visible = false;
         self.summary_open = false;
         self.unfocused_since = None;
         self.summary_state.reveal_fields.clear();
-        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        std::process::exit(0);
+        std::thread::spawn(move || {
+            if should_clear_recent {
+                let _ = config::clear_recent_item();
+            } else if let Some(id) = recent_item_to_save {
+                let _ = config::save_recent_item(&id);
+            }
+            std::thread::sleep(EXIT_AFTER_HIDE_DELAY);
+            std::process::exit(0);
+        });
+    }
+
+    fn hide_viewport_now(ctx: &Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        ctx.request_repaint();
+    }
+
+    fn exit_after(delay: Duration) {
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            std::process::exit(0);
+        });
     }
 
     fn show_quick_access(&mut self, ctx: &Context) {
@@ -464,8 +491,7 @@ impl App {
         if auto_hide {
             self.window_visible = false;
             self.unfocused_since = None;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            Self::hide_viewport_now(ctx);
             return;
         }
 
