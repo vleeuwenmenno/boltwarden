@@ -23,6 +23,12 @@ pub struct AppSettings {
     pub ssh_agent_enabled: bool,
     #[serde(default = "default_ssh_agent_socket_path")]
     pub ssh_agent_socket_path: String,
+    #[serde(default = "default_true")]
+    pub lock_on_system_lock: bool,
+    #[serde(default = "default_true")]
+    pub lock_after_idle_timeout: bool,
+    #[serde(default = "default_idle_lock_timeout_minutes")]
+    pub idle_lock_timeout_minutes: u64,
 }
 
 impl Default for AppSettings {
@@ -33,6 +39,9 @@ impl Default for AppSettings {
             restore_recent_item: true,
             ssh_agent_enabled: false,
             ssh_agent_socket_path: default_ssh_agent_socket_path(),
+            lock_on_system_lock: true,
+            lock_after_idle_timeout: true,
+            idle_lock_timeout_minutes: default_idle_lock_timeout_minutes(),
         }
     }
 }
@@ -43,6 +52,10 @@ fn default_true() -> bool {
 
 pub fn default_ssh_agent_socket_path() -> String {
     "$HOME/.bitwarden-ssh.sock".to_string()
+}
+
+pub fn default_idle_lock_timeout_minutes() -> u64 {
+    60
 }
 
 pub fn expand_ssh_agent_socket_path(path: &str) -> Result<PathBuf, String> {
@@ -407,6 +420,9 @@ mod tests {
         assert!(actual.restore_recent_item);
         assert!(!actual.ssh_agent_enabled);
         assert_eq!(actual.ssh_agent_socket_path, default_ssh_agent_socket_path());
+        assert!(actual.lock_on_system_lock);
+        assert!(actual.lock_after_idle_timeout);
+        assert_eq!(actual.idle_lock_timeout_minutes, 60);
     }
 
     #[test]
@@ -429,6 +445,9 @@ mod tests {
             restore_recent_item: false,
             ssh_agent_enabled: true,
             ssh_agent_socket_path: "$HOME/custom-agent.sock".into(),
+            lock_on_system_lock: false,
+            lock_after_idle_timeout: false,
+            idle_lock_timeout_minutes: 15,
         })
         .unwrap();
         let actual = load_settings();
@@ -437,6 +456,9 @@ mod tests {
         assert!(!actual.restore_recent_item);
         assert!(actual.ssh_agent_enabled);
         assert_eq!(actual.ssh_agent_socket_path, "$HOME/custom-agent.sock");
+        assert!(!actual.lock_on_system_lock);
+        assert!(!actual.lock_after_idle_timeout);
+        assert_eq!(actual.idle_lock_timeout_minutes, 15);
 
         save_settings(&AppSettings {
             show_keyboard_shortcuts: true,
@@ -444,6 +466,9 @@ mod tests {
             restore_recent_item: true,
             ssh_agent_enabled: false,
             ssh_agent_socket_path: "$HOME/.bitwarden-ssh.sock".into(),
+            lock_on_system_lock: true,
+            lock_after_idle_timeout: true,
+            idle_lock_timeout_minutes: 60,
         })
         .unwrap();
         let actual = load_settings();
@@ -452,6 +477,9 @@ mod tests {
         assert!(actual.restore_recent_item);
         assert!(!actual.ssh_agent_enabled);
         assert_eq!(actual.ssh_agent_socket_path, default_ssh_agent_socket_path());
+        assert!(actual.lock_on_system_lock);
+        assert!(actual.lock_after_idle_timeout);
+        assert_eq!(actual.idle_lock_timeout_minutes, 60);
 
         restore_var("XDG_CONFIG_HOME", previous_config_home);
         let _ = fs::remove_dir_all(temp);
@@ -489,6 +517,9 @@ mod tests {
         assert!(actual.restore_recent_item);
         assert!(!actual.ssh_agent_enabled);
         assert_eq!(actual.ssh_agent_socket_path, default_ssh_agent_socket_path());
+        assert!(actual.lock_on_system_lock);
+        assert!(actual.lock_after_idle_timeout);
+        assert_eq!(actual.idle_lock_timeout_minutes, 60);
     }
 
     #[test]

@@ -13,7 +13,7 @@ const DROPDOWN_STATIC_HEIGHT: f32 = 23.0;
 const SHORTCUT_BAR_HEIGHT: f32 = 34.0;
 const SHORTCUT_BAR_BODY_HEIGHT: f32 = 24.0;
 const DROPDOWN_MAX_STATUS_HEIGHT: f32 = 44.0;
-const SETTINGS_PANEL_HEIGHT: f32 = 278.0;
+const SETTINGS_PANEL_HEIGHT: f32 = 392.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchView {
@@ -275,6 +275,9 @@ pub fn draw_search(
     show_keyboard_shortcuts: bool,
     close_after_copy: bool,
     restore_recent_item: bool,
+    lock_on_system_lock: bool,
+    lock_after_idle_timeout: bool,
+    idle_lock_timeout_minutes: u64,
     ssh_agent_enabled: bool,
     ssh_agent_socket_path: &str,
     ssh_agent_status: &SshAgentStatus,
@@ -413,6 +416,9 @@ pub fn draw_search(
             show_keyboard_shortcuts,
             close_after_copy,
             restore_recent_item,
+            lock_on_system_lock,
+            lock_after_idle_timeout,
+            idle_lock_timeout_minutes,
             ssh_agent_enabled,
             ssh_agent_socket_path,
             ssh_agent_status,
@@ -431,6 +437,9 @@ pub fn draw_search_panel(
     show_keyboard_shortcuts: bool,
     close_after_copy: bool,
     restore_recent_item: bool,
+    lock_on_system_lock: bool,
+    lock_after_idle_timeout: bool,
+    idle_lock_timeout_minutes: u64,
     ssh_agent_enabled: bool,
     ssh_agent_socket_path: &str,
     ssh_agent_status: &SshAgentStatus,
@@ -442,6 +451,9 @@ pub fn draw_search_panel(
         show_keyboard_shortcuts,
         close_after_copy,
         restore_recent_item,
+        lock_on_system_lock,
+        lock_after_idle_timeout,
+        idle_lock_timeout_minutes,
         ssh_agent_enabled,
         ssh_agent_socket_path,
         ssh_agent_status,
@@ -454,6 +466,9 @@ fn draw_search_dropdown(
     show_keyboard_shortcuts: bool,
     close_after_copy: bool,
     restore_recent_item: bool,
+    lock_on_system_lock: bool,
+    lock_after_idle_timeout: bool,
+    idle_lock_timeout_minutes: u64,
     ssh_agent_enabled: bool,
     ssh_agent_socket_path: &str,
     ssh_agent_status: &SshAgentStatus,
@@ -498,6 +513,9 @@ fn draw_search_dropdown(
                             show_keyboard_shortcuts,
                             close_after_copy,
                             restore_recent_item,
+                            lock_on_system_lock,
+                            lock_after_idle_timeout,
+                            idle_lock_timeout_minutes,
                             ssh_agent_enabled,
                             ssh_agent_socket_path,
                             ssh_agent_status,
@@ -671,6 +689,9 @@ fn draw_settings_panel(
     show_keyboard_shortcuts: bool,
     close_after_copy: bool,
     restore_recent_item: bool,
+    lock_on_system_lock: bool,
+    lock_after_idle_timeout: bool,
+    idle_lock_timeout_minutes: u64,
     ssh_agent_enabled: bool,
     ssh_agent_socket_path: &str,
     ssh_agent_status: &SshAgentStatus,
@@ -722,6 +743,52 @@ fn draw_settings_panel(
             ui.add_space(6.0);
             ui.label(
                 egui::RichText::new("Reopens the last item for 30 seconds after hiding.")
+                    .small()
+                    .color(egui::Color32::from_rgb(126, 136, 152)),
+            );
+            ui.add_space(10.0);
+
+            let mut lock_screen_value = lock_on_system_lock;
+            let response = ui.checkbox(&mut lock_screen_value, "Lock when screen locks");
+            if response.changed() {
+                action = Some(SearchAction::SetLockOnSystemLock(lock_screen_value));
+            }
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("Locks the vault when the desktop session reports a lock screen.")
+                    .small()
+                    .color(egui::Color32::from_rgb(126, 136, 152)),
+            );
+            ui.add_space(10.0);
+
+            let mut idle_value = lock_after_idle_timeout;
+            let response = ui.checkbox(&mut idle_value, "Lock after idle timeout");
+            if response.changed() {
+                action = Some(SearchAction::SetLockAfterIdleTimeout(idle_value));
+            }
+            ui.add_space(6.0);
+            ui.add_enabled_ui(lock_after_idle_timeout, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Idle timeout")
+                            .small()
+                            .color(egui::Color32::from_rgb(164, 172, 186)),
+                    );
+                    let mut minutes = idle_lock_timeout_minutes.clamp(1, 1440);
+                    let response = ui.add(
+                        egui::DragValue::new(&mut minutes)
+                            .range(1..=1440)
+                            .speed(1)
+                            .suffix(" min"),
+                    );
+                    if response.changed() {
+                        action = Some(SearchAction::SetIdleLockTimeoutMinutes(minutes));
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("Uses the desktop session idle state; default is 60 minutes.")
                     .small()
                     .color(egui::Color32::from_rgb(126, 136, 152)),
             );
@@ -1133,6 +1200,9 @@ pub enum SearchAction {
     SetKeyboardShortcuts(bool),
     SetCloseAfterCopy(bool),
     SetRestoreRecentItem(bool),
+    SetLockOnSystemLock(bool),
+    SetLockAfterIdleTimeout(bool),
+    SetIdleLockTimeoutMinutes(u64),
     SetSshAgentEnabled(bool),
     SetSshAgentSocketPath(String),
     LockVault,

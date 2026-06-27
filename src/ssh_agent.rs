@@ -26,6 +26,7 @@ const SSH_AGENT_RSA_SHA2_256: u32 = 2;
 const SSH_AGENT_RSA_SHA2_512: u32 = 4;
 pub const SSH_APPROVAL_TIMEOUT: Duration = Duration::from_secs(30);
 pub const SSH_APPROVAL_TTL: Duration = Duration::from_secs(15 * 60);
+pub const SSH_UNLOCK_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone)]
 pub struct SshApprovalService {
@@ -216,6 +217,84 @@ impl CachedApproval {
     }
 }
 
+#[derive(Clone)]
+pub struct SshKeyStore {
+    inner: Arc<(Mutex<SshKeyStoreState>, Condvar)>,
+    notify_unlock: mpsc::Sender<()>,
+}
+
+#[derive(Default)]
+struct SshKeyStoreState {
+    unlocked: bool,
+    keys: Vec<SshKey>,
+    prompt_pending: bool,
+}
+
+impl SshKeyStore {
+    pub fn new(notify_unlock: mpsc::Sender<()>) -> Self {
+        Self {
+            inner: Arc::new((Mutex::new(SshKeyStoreState::default()), Condvar::new())),
+            notify_unlock,
+        }
+    }
+
+    pub fn set_unlocked(&self, keys: Vec<SshKey>) {
+        let (lock, changed) = &*self.inner;
+        let Ok(mut state) = lock.lock() else {
+            return;
+        };
+        state.unlocked = true;
+        state.keys = keys;
+        state.prompt_pending = false;
+        changed.notify_all();
+    }
+
+    pub fn set_locked(&self) {
+        let (lock, changed) = &*self.inner;
+        let Ok(mut state) = lock.lock() else {
+            return;
+        };
+        state.unlocked = false;
+        state.keys.clear();
+        state.prompt_pending = false;
+        changed.notify_all();
+    }
+
+    fn load_keys_or_prompt(&self) -> Result<Vec<SshKey>, String> {
+        let (lock, changed) = &*self.inner;
+        let mut state = lock
+            .lock()
+            .map_err(|_| "SSH key store lock poisoned".to_string())?;
+        if state.unlocked {
+            return Ok(state.keys.clone());
+        }
+
+        if !state.prompt_pending {
+            state.prompt_pending = true;
+            let _ = self.notify_unlock.send(());
+        }
+
+        let deadline = std::time::Instant::now() + SSH_UNLOCK_TIMEOUT;
+        loop {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                state.prompt_pending = false;
+                return Err("vault unlock timed out".into());
+            };
+            let (next_state, wait_result) = changed
+                .wait_timeout(state, remaining)
+                .map_err(|_| "SSH key store wait failed".to_string())?;
+            state = next_state;
+            if state.unlocked {
+                return Ok(state.keys.clone());
+            }
+            if wait_result.timed_out() {
+                state.prompt_pending = false;
+                return Err("vault unlock timed out".into());
+            }
+        }
+    }
+}
+
 pub struct SshAgentHandle {
     path: PathBuf,
     stop_tx: Option<mpsc::Sender<()>>,
@@ -277,11 +356,11 @@ pub fn disabled_status() -> SshAgentStatus {
 pub fn waiting_for_unlock_status(settings: &AppSettings) -> SshAgentStatus {
     SshAgentStatus {
         enabled: settings.ssh_agent_enabled,
-        active: false,
+        active: true,
         socket_path: expand_status_path(&settings.ssh_agent_socket_path),
         identity_count: 0,
         skipped_count: 0,
-        message: "Waiting for vault unlock".into(),
+        message: "Listening; vault is locked and SSH use will prompt to unlock".into(),
     }
 }
 
@@ -298,11 +377,10 @@ pub fn error_status(settings: &AppSettings, message: impl Into<String>) -> SshAg
 
 pub fn start(
     settings: &AppSettings,
-    vault_keys: &[SshKey],
+    key_store: SshKeyStore,
     approvals: SshApprovalService,
 ) -> Result<SshAgentHandle, String> {
     let path = expand_ssh_agent_socket_path(&settings.ssh_agent_socket_path)?;
-    let (keys, skipped) = prepare_agent_keys(vault_keys);
     prepare_socket_path(&path)?;
     let listener = UnixListener::bind(&path).map_err(|e| format!("could not bind socket: {e}"))?;
     secure_bound_socket(&path)?;
@@ -310,10 +388,9 @@ pub fn start(
         .set_nonblocking(true)
         .map_err(|e| format!("could not configure socket: {e}"))?;
 
-    let keys = Arc::new(keys);
     let (stop_tx, stop_rx) = mpsc::channel();
     let thread_path = path.clone();
-    let thread_keys = keys.clone();
+    let thread_key_store = key_store.clone();
     let thread_approvals = approvals.clone();
     let join = thread::spawn(move || {
         loop {
@@ -322,9 +399,9 @@ pub fn start(
             }
             match listener.accept() {
                 Ok((stream, _)) => {
-                    let keys = thread_keys.clone();
+                    let key_store = thread_key_store.clone();
                     let approvals = thread_approvals.clone();
-                    thread::spawn(move || handle_stream(stream, keys, approvals));
+                    thread::spawn(move || handle_stream(stream, key_store, approvals));
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(25));
@@ -336,15 +413,6 @@ pub fn start(
         let _ = remove_owned_socket_if_present(&thread_path);
     });
 
-    let message = if skipped == 0 {
-        format!("Listening at {}; approval required for signing", path.display())
-    } else {
-        format!(
-            "Listening at {}; approval required for signing; skipped {skipped} unsupported key(s)",
-            path.display()
-        )
-    };
-
     Ok(SshAgentHandle {
         path: path.clone(),
         stop_tx: Some(stop_tx),
@@ -353,9 +421,12 @@ pub fn start(
             enabled: true,
             active: true,
             socket_path: path.display().to_string(),
-            identity_count: keys.len(),
-            skipped_count: skipped,
-            message,
+            identity_count: 0,
+            skipped_count: 0,
+            message: format!(
+                "Listening at {}; vault unlock required before listing or signing",
+                path.display()
+            ),
         },
     })
 }
@@ -418,6 +489,11 @@ fn current_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+pub fn prepared_key_counts(vault_keys: &[SshKey]) -> (usize, usize) {
+    let (keys, skipped) = prepare_agent_keys(vault_keys);
+    (keys.len(), skipped)
+}
+
 fn prepare_agent_keys(vault_keys: &[SshKey]) -> (Vec<AgentKey>, usize) {
     let mut keys = Vec::new();
     let mut skipped = 0;
@@ -448,10 +524,10 @@ fn prepare_agent_key(key: &SshKey) -> Result<AgentKey, String> {
     })
 }
 
-fn handle_stream(mut stream: UnixStream, keys: Arc<Vec<AgentKey>>, approvals: SshApprovalService) {
+fn handle_stream(mut stream: UnixStream, key_store: SshKeyStore, approvals: SshApprovalService) {
     let client = peer_client_info(&stream).ok();
     while let Ok(message) = read_agent_message(&mut stream) {
-        let response = handle_message(&message, &keys, &approvals, client.clone())
+        let response = handle_message(&message, &key_store, &approvals, client.clone())
             .unwrap_or_else(|_| vec![SSH_AGENT_FAILURE]);
         if write_agent_message(&mut stream, &response).is_err() {
             break;
@@ -461,7 +537,7 @@ fn handle_stream(mut stream: UnixStream, keys: Arc<Vec<AgentKey>>, approvals: Ss
 
 fn handle_message(
     message: &[u8],
-    keys: &[AgentKey],
+    key_store: &SshKeyStore,
     approvals: &SshApprovalService,
     client: Option<SshAgentClientInfo>,
 ) -> Result<Vec<u8>, String> {
@@ -469,10 +545,22 @@ fn handle_message(
         return Ok(vec![SSH_AGENT_FAILURE]);
     };
     match kind {
-        SSH_AGENTC_REQUEST_IDENTITIES => identities_answer(keys),
-        SSH_AGENTC_SIGN_REQUEST => sign_response(body, keys, approvals, client),
+        SSH_AGENTC_REQUEST_IDENTITIES => {
+            let keys = prepare_keys_from_store(key_store)?;
+            identities_answer(&keys)
+        }
+        SSH_AGENTC_SIGN_REQUEST => {
+            let keys = prepare_keys_from_store(key_store)?;
+            sign_response(body, &keys, approvals, client)
+        }
         _ => Ok(vec![SSH_AGENT_FAILURE]),
     }
+}
+
+fn prepare_keys_from_store(key_store: &SshKeyStore) -> Result<Vec<AgentKey>, String> {
+    let vault_keys = key_store.load_keys_or_prompt()?;
+    let (keys, _) = prepare_agent_keys(&vault_keys);
+    Ok(keys)
 }
 
 fn identities_answer(keys: &[AgentKey]) -> Result<Vec<u8>, String> {
@@ -843,9 +931,10 @@ mod tests {
                 .to_string(),
             fingerprint: None,
         };
+        let (key_store, _) = key_store(vec![vault_key]);
         let (approvals, rx) = approval_service();
         let approve = approvals.clone();
-        let agent = match start(&settings, &[vault_key], approvals) {
+        let agent = match start(&settings, key_store, approvals) {
             Ok(agent) => agent,
             Err(e) if e.contains("Operation not permitted") => return,
             Err(e) => panic!("could not start SSH agent: {e}"),
@@ -897,8 +986,9 @@ mod tests {
             ..AppSettings::default()
         };
 
+        let (key_store, _) = key_store(Vec::new());
         let (approvals, _) = approval_service();
-        let err = match start(&settings, &[], approvals) {
+        let err = match start(&settings, key_store, approvals) {
             Ok(agent) => {
                 agent.stop();
                 panic!("agent should not start when path is a regular file");
@@ -925,14 +1015,14 @@ mod tests {
                 .to_string(),
             fingerprint: None,
         };
-        let (keys, skipped) = prepare_agent_keys(&[vault_key]);
-        assert_eq!(skipped, 0);
+        let (key_store, unlock_rx) = key_store(vec![vault_key]);
 
         let (approvals, rx) = approval_service();
         let response =
-            handle_message(&[SSH_AGENTC_REQUEST_IDENTITIES], &keys, &approvals, None).unwrap();
+            handle_message(&[SSH_AGENTC_REQUEST_IDENTITIES], &key_store, &approvals, None).unwrap();
         assert_eq!(response[0], SSH_AGENT_IDENTITIES_ANSWER);
         assert!(rx.try_recv().is_err());
+        assert!(unlock_rx.try_recv().is_err());
         let mut reader = AgentReader::new(&response[1..]);
         assert_eq!(reader.read_u32().unwrap(), 1);
         assert_eq!(reader.read_string().unwrap(), public_blob.as_slice());
@@ -945,7 +1035,7 @@ mod tests {
         write_u32(&mut request, 0);
         let approve = approvals.clone();
         std::thread::spawn(move || approve_next_request(approve, rx, true, SshApprovalRemember::Once));
-        let response = handle_message(&request, &keys, &approvals, Some(fake_client_info())).unwrap();
+        let response = handle_message(&request, &key_store, &approvals, Some(fake_client_info())).unwrap();
         assert_eq!(response[0], SSH_AGENT_SIGN_RESPONSE);
         let mut reader = AgentReader::new(&response[1..]);
         let signature_blob = reader.read_string().unwrap();
@@ -968,8 +1058,7 @@ mod tests {
                 .to_string(),
             fingerprint: None,
         };
-        let (keys, skipped) = prepare_agent_keys(&[vault_key]);
-        assert_eq!(skipped, 0);
+        let (key_store, _) = key_store(vec![vault_key]);
         let (approvals, rx) = approval_service();
         let approve = approvals.clone();
         std::thread::spawn(move || {
@@ -980,7 +1069,7 @@ mod tests {
         write_string(&mut request, &public_blob);
         write_string(&mut request, b"sign me");
         write_u32(&mut request, 0);
-        let response = handle_message(&request, &keys, &approvals, Some(fake_client_info())).unwrap();
+        let response = handle_message(&request, &key_store, &approvals, Some(fake_client_info())).unwrap();
 
         assert_eq!(response, vec![SSH_AGENT_FAILURE]);
     }
@@ -1000,8 +1089,7 @@ mod tests {
                 .to_string(),
             fingerprint: None,
         };
-        let (keys, skipped) = prepare_agent_keys(&[vault_key]);
-        assert_eq!(skipped, 0);
+        let (key_store, _) = key_store(vec![vault_key]);
         let (approvals, rx) = approval_service();
         let approve = approvals.clone();
         std::thread::spawn(move || {
@@ -1012,7 +1100,7 @@ mod tests {
         write_string(&mut request, &public_blob);
         write_string(&mut request, b"first");
         write_u32(&mut request, 0);
-        let first = handle_message(&request, &keys, &approvals, Some(fake_client_info())).unwrap();
+        let first = handle_message(&request, &key_store, &approvals, Some(fake_client_info())).unwrap();
         assert_eq!(first[0], SSH_AGENT_SIGN_RESPONSE);
 
         let mut second_request = vec![SSH_AGENTC_SIGN_REQUEST];
@@ -1020,11 +1108,50 @@ mod tests {
         write_string(&mut second_request, b"second");
         write_u32(&mut second_request, 0);
         let second =
-            handle_message(&second_request, &keys, &approvals, Some(fake_client_info())).unwrap();
+            handle_message(&second_request, &key_store, &approvals, Some(fake_client_info())).unwrap();
         assert_eq!(second[0], SSH_AGENT_SIGN_RESPONSE);
         assert!(approvals
             .recent_status()
             .is_some_and(|status| status.kind == SshApprovalStatusKind::AutoApproved));
+    }
+
+    #[test]
+    fn locked_key_store_prompts_before_listing_identities() {
+        let private_key = fixture_private_key();
+        let public_key = PublicKey::from(&private_key);
+        let public_blob = encode_ssh(public_key.key_data()).unwrap();
+        let vault_key = SshKey {
+            id: "ssh-1".into(),
+            name: "test-key".into(),
+            public_key: public_key.to_string(),
+            private_key: private_key
+                .to_openssh(ssh_key::LineEnding::LF)
+                .unwrap()
+                .to_string(),
+            fingerprint: None,
+        };
+        let (key_store, unlock_rx) = key_store(Vec::new());
+        key_store.set_locked();
+        let (approvals, _) = approval_service();
+        let waiter_store = key_store.clone();
+        let waiter = thread::spawn(move || {
+            handle_message(
+                &[SSH_AGENTC_REQUEST_IDENTITIES],
+                &waiter_store,
+                &approvals,
+                None,
+            )
+            .unwrap()
+        });
+
+        unlock_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        key_store.set_unlocked(vec![vault_key]);
+        let response = waiter.join().unwrap();
+        assert_eq!(response[0], SSH_AGENT_IDENTITIES_ANSWER);
+        let mut reader = AgentReader::new(&response[1..]);
+        assert_eq!(reader.read_u32().unwrap(), 1);
+        assert_eq!(reader.read_string().unwrap(), public_blob.as_slice());
+        assert_eq!(reader.read_string().unwrap(), b"test-key");
     }
 
     fn wait_for_socket(path: &Path) {
@@ -1040,6 +1167,13 @@ mod tests {
     fn approval_service() -> (SshApprovalService, Receiver<()>) {
         let (tx, rx) = mpsc::channel();
         (SshApprovalService::new(tx), rx)
+    }
+
+    fn key_store(keys: Vec<SshKey>) -> (SshKeyStore, Receiver<()>) {
+        let (tx, rx) = mpsc::channel();
+        let store = SshKeyStore::new(tx);
+        store.set_unlocked(keys);
+        (store, rx)
     }
 
     fn approve_next_request(

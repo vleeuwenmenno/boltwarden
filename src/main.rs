@@ -1,3 +1,4 @@
+mod auto_lock;
 mod backend;
 mod app;
 mod bw;
@@ -17,14 +18,17 @@ use eframe::egui;
 use instance::LaunchCommand;
 use model::SshAgentStatus;
 use rpc::{RpcError, RpcRequest, RpcResponse, SearchPayload};
-use ssh_agent::{SshAgentHandle, SshApprovalService};
+use ssh_agent::{SshAgentHandle, SshApprovalService, SshKeyStore};
 use ui::search::{search_window_height, SEARCH_WIDTH};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
 use tray::TrayCommand;
+
+const AUTO_LOCK_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonCommand {
@@ -47,6 +51,7 @@ struct VaultState {
     ssh_agent: Option<SshAgentHandle>,
     ssh_agent_status: SshAgentStatus,
     ssh_approvals: SshApprovalService,
+    ssh_key_store: SshKeyStore,
 }
 
 fn main() -> eframe::Result<()> {
@@ -67,21 +72,30 @@ fn main() -> eframe::Result<()> {
 fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Result<()> {
     let (tx, rx) = mpsc::channel();
     let (approval_show_tx, approval_show_rx) = mpsc::channel();
+    let (unlock_show_tx, unlock_show_rx) = mpsc::channel();
     let popup = Arc::new(Mutex::new(None));
     let ssh_approvals = SshApprovalService::new(approval_show_tx);
+    let ssh_key_store = SshKeyStore::new(unlock_show_tx);
     let vault = Arc::new(Mutex::new(VaultState {
         bw: BwClient::new(),
         pending_two_factor: None,
         ssh_agent: None,
         ssh_agent_status: ssh_agent::disabled_status(),
         ssh_approvals: ssh_approvals.clone(),
+        ssh_key_store,
     }));
     let rpc_socket = start_vault_rpc_listener(vault.clone(), ssh_approvals.clone());
 
     start_tray(tx.clone());
     start_activation_listener(listener, tx.clone());
     start_approval_popup_listener(approval_show_rx, popup.clone(), rpc_socket.clone());
+    start_unlock_popup_listener(unlock_show_rx, popup.clone(), rpc_socket.clone());
+    start_auto_lock_monitor(vault.clone());
     let _daemon_tx_keepalive = tx;
+
+    if let Ok(mut state) = vault.lock() {
+        apply_ssh_agent_settings(&mut state);
+    }
 
     if show_on_start {
         show_popup(&popup, rpc_socket.as_deref());
@@ -103,6 +117,69 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
     }
 
     Ok(())
+}
+
+fn start_auto_lock_monitor(vault: Arc<Mutex<VaultState>>) {
+    std::thread::spawn(move || {
+        let mut idle_seen_at: Option<Instant> = None;
+        loop {
+            let settings = config::load_settings();
+            if !settings.lock_on_system_lock && !settings.lock_after_idle_timeout {
+                idle_seen_at = None;
+                std::thread::sleep(AUTO_LOCK_POLL_INTERVAL);
+                continue;
+            }
+
+            let has_session = vault
+                .lock()
+                .map(|state| state.bw.has_session())
+                .unwrap_or(false);
+            if !has_session {
+                idle_seen_at = None;
+                std::thread::sleep(AUTO_LOCK_POLL_INTERVAL);
+                continue;
+            }
+
+            let session_state = match auto_lock::current_session_state() {
+                Ok(state) => state,
+                Err(e) => {
+                    debug_log(&format!("auto-lock monitor unavailable: {e}"));
+                    std::thread::sleep(AUTO_LOCK_POLL_INTERVAL);
+                    continue;
+                }
+            };
+
+            let lock_reason = if settings.lock_on_system_lock && session_state.locked {
+                idle_seen_at = None;
+                Some("screen locked")
+            } else if settings.lock_after_idle_timeout && session_state.idle {
+                if idle_seen_at.is_none() {
+                    idle_seen_at = Some(Instant::now());
+                }
+                let observed_idle_for = idle_seen_at.map(|seen| seen.elapsed());
+                let idle_for = session_state.idle_for.or(observed_idle_for);
+                if idle_for.is_some_and(|idle_for| idle_for >= idle_lock_timeout(&settings)) {
+                    Some("idle timeout")
+                } else {
+                    None
+                }
+            } else {
+                idle_seen_at = None;
+                None
+            };
+
+            if let Some(reason) = lock_reason {
+                if let Ok(mut state) = vault.lock() {
+                    if state.bw.has_session() {
+                        lock_vault_state(&mut state, reason);
+                    }
+                }
+                idle_seen_at = None;
+            }
+
+            std::thread::sleep(AUTO_LOCK_POLL_INTERVAL);
+        }
+    });
 }
 
 fn run_popup() -> eframe::Result<()> {
@@ -179,6 +256,18 @@ fn start_approval_popup_listener(
     std::thread::spawn(move || {
         while rx.recv().is_ok() {
             show_approval_popup(&popup, rpc_socket.as_deref());
+        }
+    });
+}
+
+fn start_unlock_popup_listener(
+    rx: mpsc::Receiver<()>,
+    popup: PopupChild,
+    rpc_socket: Option<PathBuf>,
+) {
+    std::thread::spawn(move || {
+        while rx.recv().is_ok() {
+            show_unlock_popup(&popup, rpc_socket.as_deref());
         }
     });
 }
@@ -297,11 +386,7 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
             RpcResponse::SshAgentStatus(status)
         }
         RpcRequest::LockVault => {
-            state.bw = BwClient::new();
-            state.pending_two_factor = None;
-            stop_ssh_agent(&mut state);
-            state.ssh_approvals.clear_all("vault locked");
-            let _ = config::clear_recent_item();
+            lock_vault_state(&mut state, "vault locked");
             RpcResponse::LockVault(Ok(()))
         }
         RpcRequest::ClearSavedSession => {
@@ -309,8 +394,9 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
             if result.is_ok() {
                 state.bw = BwClient::new();
                 state.pending_two_factor = None;
-                stop_ssh_agent(&mut state);
+                state.ssh_key_store.set_locked();
                 state.ssh_approvals.clear_all("saved session cleared");
+                apply_ssh_agent_settings(&mut state);
                 let _ = config::clear_recent_item();
             }
             RpcResponse::ClearSavedSession(result)
@@ -341,6 +427,7 @@ fn login_vault(
     match result {
         Ok(()) => {
             state.pending_two_factor = None;
+            refresh_ssh_key_store_from_vault(state);
             apply_ssh_agent_settings(state);
             Ok(())
         }
@@ -368,6 +455,7 @@ fn complete_vault_two_factor(
     {
         Ok(()) => {
             state.pending_two_factor = None;
+            refresh_ssh_key_store_from_vault(state);
             apply_ssh_agent_settings(state);
             Ok(())
         }
@@ -379,15 +467,9 @@ fn apply_ssh_agent_settings(state: &mut VaultState) -> SshAgentStatus {
     let settings = config::load_settings();
     if !settings.ssh_agent_enabled {
         stop_ssh_agent(state);
+        state.ssh_key_store.set_locked();
         state.ssh_approvals.clear_all("SSH agent disabled");
         state.ssh_agent_status = ssh_agent::disabled_status();
-        return state.ssh_agent_status.clone();
-    }
-
-    if !state.bw.has_session() {
-        stop_ssh_agent(state);
-        state.ssh_approvals.clear_all("waiting for vault unlock");
-        state.ssh_agent_status = ssh_agent::waiting_for_unlock_status(&settings);
         return state.ssh_agent_status.clone();
     }
 
@@ -395,38 +477,40 @@ fn apply_ssh_agent_settings(state: &mut VaultState) -> SshAgentStatus {
         Ok(path) => path,
         Err(e) => {
             stop_ssh_agent(state);
+            state.ssh_key_store.set_locked();
             state.ssh_approvals.clear_all("invalid SSH agent socket path");
             state.ssh_agent_status = ssh_agent::error_status(&settings, e);
             return state.ssh_agent_status.clone();
         }
     };
 
+    if state.bw.has_session() {
+        refresh_ssh_key_store_from_vault(state);
+    } else {
+        state.ssh_key_store.set_locked();
+    }
+
     if state
         .ssh_agent
         .as_ref()
         .is_some_and(|agent| agent.path() == desired_path)
     {
-        state.ssh_agent_status = state
-            .ssh_agent
-            .as_ref()
-            .map(|agent| agent.status())
-            .unwrap_or_else(ssh_agent::disabled_status);
+        state.ssh_agent_status = ssh_agent_status_for_state(&settings, state);
         return state.ssh_agent_status.clone();
     }
 
     stop_ssh_agent(state);
-    match state.bw.ssh_keys() {
-        Ok(keys) => match ssh_agent::start(&settings, &keys, state.ssh_approvals.clone()) {
-            Ok(agent) => {
-                state.ssh_agent_status = agent.status();
-                state.ssh_agent = Some(agent);
-            }
-            Err(e) => {
-                state.ssh_agent_status = ssh_agent::error_status(&settings, e);
-            }
-        },
+    match ssh_agent::start(
+        &settings,
+        state.ssh_key_store.clone(),
+        state.ssh_approvals.clone(),
+    ) {
+        Ok(agent) => {
+            state.ssh_agent = Some(agent);
+            state.ssh_agent_status = ssh_agent_status_for_state(&settings, state);
+        }
         Err(e) => {
-            state.ssh_agent_status = ssh_agent::error_status(&settings, e.to_string());
+            state.ssh_agent_status = ssh_agent::error_status(&settings, e);
         }
     }
     state.ssh_agent_status.clone()
@@ -437,6 +521,59 @@ fn stop_ssh_agent(state: &mut VaultState) {
         agent.stop();
     }
     state.ssh_approvals.clear_all("SSH agent stopped");
+}
+
+fn lock_vault_state(state: &mut VaultState, reason: &str) {
+    state.bw = BwClient::new();
+    state.pending_two_factor = None;
+    state.ssh_key_store.set_locked();
+    state.ssh_approvals.clear_all(reason);
+    apply_ssh_agent_settings(state);
+    let _ = config::clear_recent_item();
+}
+
+fn refresh_ssh_key_store_from_vault(state: &mut VaultState) {
+    match state.bw.ssh_keys() {
+        Ok(keys) => state.ssh_key_store.set_unlocked(keys),
+        Err(_) => state.ssh_key_store.set_locked(),
+    }
+}
+
+fn ssh_agent_status_for_state(
+    settings: &config::AppSettings,
+    state: &VaultState,
+) -> SshAgentStatus {
+    let Some(agent) = state.ssh_agent.as_ref() else {
+        return ssh_agent::disabled_status();
+    };
+    if !state.bw.has_session() {
+        return ssh_agent::waiting_for_unlock_status(settings);
+    }
+    match state.bw.ssh_keys() {
+        Ok(keys) => {
+            let (identity_count, skipped_count) = ssh_agent::prepared_key_counts(&keys);
+            let mut status = agent.status();
+            status.identity_count = identity_count;
+            status.skipped_count = skipped_count;
+            status.message = if skipped_count == 0 {
+                format!(
+                    "Listening at {}; approval required for signing",
+                    status.socket_path
+                )
+            } else {
+                format!(
+                    "Listening at {}; approval required for signing; skipped {skipped_count} unsupported key(s)",
+                    status.socket_path
+                )
+            };
+            status
+        }
+        Err(e) => ssh_agent::error_status(settings, e.to_string()),
+    }
+}
+
+fn idle_lock_timeout(settings: &config::AppSettings) -> Duration {
+    Duration::from_secs(settings.idle_lock_timeout_minutes.max(1).saturating_mul(60))
 }
 
 fn rpc_error_from_bw(error: BwError) -> RpcError {
@@ -466,6 +603,10 @@ fn show_approval_popup(popup: &PopupChild, rpc_socket: Option<&Path>) {
     show_popup_with_command(popup, rpc_socket, "ssh-approval return\n", "ssh-approval auto\n");
 }
 
+fn show_unlock_popup(popup: &PopupChild, rpc_socket: Option<&Path>) {
+    show_popup_with_command(popup, rpc_socket, "unlock ssh\n", "unlock ssh\n");
+}
+
 fn show_popup_with_command(
     popup: &PopupChild,
     rpc_socket: Option<&Path>,
@@ -482,8 +623,15 @@ fn show_popup_with_command(
                 *child_slot = None;
             }
             Ok(None) => {
-                send_popup_command(process, existing_command);
-                return;
+                match send_popup_command(process, existing_command) {
+                    Ok(()) => return,
+                    Err(e) => {
+                        debug_log(&format!("discarding stale popup process: {e}"));
+                        let _ = process.child.kill();
+                        let _ = process.child.wait();
+                        *child_slot = None;
+                    }
+                }
             }
             Err(_) => {
                 *child_slot = None;
@@ -506,8 +654,16 @@ fn show_popup_with_command(
         Ok(mut child) => {
             if let Some(stdin) = child.stdin.take() {
                 let mut process = PopupProcess { child, stdin };
-                send_popup_command(&mut process, new_command);
-                *child_slot = Some(process);
+                match send_popup_command(&mut process, new_command) {
+                    Ok(()) => {
+                        *child_slot = Some(process);
+                    }
+                    Err(e) => {
+                        let _ = process.child.kill();
+                        let _ = process.child.wait();
+                        eprintln!("could not send popup command: {e}");
+                    }
+                }
             } else {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -531,7 +687,7 @@ fn hide_popup(popup: &PopupChild) {
                 *child_slot = None;
             }
             Ok(None) => {
-                send_popup_command(process, "hide\n");
+                let _ = send_popup_command(process, "hide\n");
                 wait_or_kill_popup(process);
                 *child_slot = None;
             }
@@ -554,7 +710,7 @@ fn toggle_popup(popup: &PopupChild, rpc_socket: Option<&Path>) {
                 false
             }
             Ok(None) => {
-                send_popup_command(process, "hide\n");
+                let _ = send_popup_command(process, "hide\n");
                 wait_or_kill_popup(process);
                 *child_slot = None;
                 true
@@ -589,9 +745,9 @@ fn quit_popup(popup: &PopupChild) {
     *child_slot = None;
 }
 
-fn send_popup_command(process: &mut PopupProcess, command: &str) {
-    let _ = process.stdin.write_all(command.as_bytes());
-    let _ = process.stdin.flush();
+fn send_popup_command(process: &mut PopupProcess, command: &str) -> std::io::Result<()> {
+    process.stdin.write_all(command.as_bytes())?;
+    process.stdin.flush()
 }
 
 fn wait_or_kill_popup(process: &mut PopupProcess) {
@@ -623,6 +779,18 @@ fn start_popup_stdin_listener(tx: mpsc::Sender<PopupCommand>) {
                         "ssh-approval return" => {
                             Some(PopupCommand::SshApproval { auto_hide: false })
                         }
+                        "unlock auto" => Some(PopupCommand::Unlock {
+                            auto_hide: true,
+                            inhibit_focus_hide: true,
+                        }),
+                        "unlock return" => Some(PopupCommand::Unlock {
+                            auto_hide: false,
+                            inhibit_focus_hide: false,
+                        }),
+                        "unlock ssh" => Some(PopupCommand::Unlock {
+                            auto_hide: false,
+                            inhibit_focus_hide: true,
+                        }),
                         "quit" => Some(PopupCommand::Quit),
                         _ => None,
                     };

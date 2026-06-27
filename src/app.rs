@@ -55,6 +55,10 @@ pub enum PopupCommand {
     Hide,
     Toggle,
     SshApproval { auto_hide: bool },
+    Unlock {
+        auto_hide: bool,
+        inhibit_focus_hide: bool,
+    },
     Quit,
 }
 
@@ -70,6 +74,8 @@ pub struct App {
     rx: mpsc::Receiver<BwResponse>,
     tx: mpsc::Sender<BwResponse>,
     popup_rx: mpsc::Receiver<PopupCommand>,
+    auth_auto_hide: bool,
+    auth_inhibit_focus_hide: bool,
     settings: AppSettings,
     ssh_agent_status: SshAgentStatus,
     last_inner_size: Option<egui::Vec2>,
@@ -102,6 +108,12 @@ impl App {
                 PopupCommand::SshApproval { auto_hide } => {
                     self.enter_ssh_approval(ctx, auto_hide);
                 }
+                PopupCommand::Unlock {
+                    auto_hide,
+                    inhibit_focus_hide,
+                } => {
+                    self.enter_unlock_prompt(ctx, auto_hide, inhibit_focus_hide);
+                }
                 PopupCommand::Quit => {
                     Self::exit_now();
                 }
@@ -130,6 +142,8 @@ impl App {
             rx,
             tx,
             popup_rx,
+            auth_auto_hide: false,
+            auth_inhibit_focus_hide: false,
             settings,
             ssh_agent_status,
             last_inner_size: None,
@@ -229,8 +243,15 @@ impl App {
                             self.last_inner_size = None;
                             self.auth_state.password.clear();
                             self.auth_state.error = None;
+                            self.auth_state.notice = None;
+                            self.auth_inhibit_focus_hide = false;
                             self.search_state.reset_for_reopen();
                             self.ssh_agent_status = self.backend.ssh_agent_status(&self.settings);
+                            if self.auth_auto_hide {
+                                self.auth_auto_hide = false;
+                                self.hide_quick_access(ctx);
+                                return;
+                            }
                         }
                         Err(e) => {
                             match e {
@@ -255,10 +276,17 @@ impl App {
                             self.summary_open = false;
                             self.last_inner_size = None;
                             self.auth_state.password.clear();
+                            self.auth_state.notice = None;
+                            self.auth_inhibit_focus_hide = false;
                             self.two_factor_state.token.clear();
                             self.two_factor_state.error = None;
                             self.search_state.reset_for_reopen();
                             self.ssh_agent_status = self.backend.ssh_agent_status(&self.settings);
+                            if self.auth_auto_hide {
+                                self.auth_auto_hide = false;
+                                self.hide_quick_access(ctx);
+                                return;
+                            }
                         }
                         Err(e) => {
                             self.two_factor_state.error = Some(e.to_string());
@@ -357,6 +385,8 @@ impl App {
     fn show_quick_access(&mut self, ctx: &Context) {
         debug_log("show quick access");
         self.window_visible = true;
+        self.auth_auto_hide = false;
+        self.auth_inhibit_focus_hide = false;
         self.last_inner_size = None;
         self.focus_hide_enabled_at = Instant::now() + UNFOCUS_HIDE_GRACE;
         self.unfocused_since = None;
@@ -376,6 +406,8 @@ impl App {
     fn enter_ssh_approval(&mut self, ctx: &Context, auto_hide: bool) {
         debug_log("show SSH approval");
         self.window_visible = true;
+        self.auth_auto_hide = false;
+        self.auth_inhibit_focus_hide = false;
         self.focus_hide_enabled_at = Instant::now() + UNFOCUS_HIDE_GRACE;
         self.unfocused_since = None;
         self.last_inner_size = None;
@@ -390,6 +422,30 @@ impl App {
         }
         self.screen = Screen::SshApproval;
         self.summary_open = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    fn enter_unlock_prompt(
+        &mut self,
+        ctx: &Context,
+        auto_hide: bool,
+        inhibit_focus_hide: bool,
+    ) {
+        debug_log("show SSH unlock prompt");
+        self.window_visible = true;
+        self.auth_auto_hide = auto_hide;
+        self.auth_inhibit_focus_hide = inhibit_focus_hide;
+        self.focus_hide_enabled_at = Instant::now() + UNFOCUS_HIDE_GRACE;
+        self.unfocused_since = None;
+        self.last_inner_size = None;
+        self.screen = Screen::Auth;
+        self.summary_open = false;
+        self.auth_state = AuthState::default();
+        self.auth_state.notice = Some(
+            "Vault is locked. Unlock to let the SSH agent list or use your keys.".into(),
+        );
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -483,6 +539,8 @@ impl App {
     fn should_hide_after_focus_loss(&mut self, ctx: &Context) -> bool {
         if !self.window_visible
             || self.screen == Screen::SshApproval
+            || self.auth_auto_hide
+            || self.auth_inhibit_focus_hide
             || self.summary_open
             || self.search_state.view == SearchView::Settings
             || Instant::now() < self.focus_hide_enabled_at
@@ -522,7 +580,12 @@ impl App {
                     } else {
                         0.0
                     };
-                    egui::vec2(SEARCH_WIDTH, SEARCH_HEIGHT + error_height)
+                    let notice_height = if self.auth_state.notice.is_some() {
+                        24.0
+                    } else {
+                        0.0
+                    };
+                    egui::vec2(SEARCH_WIDTH, SEARCH_HEIGHT + error_height + notice_height)
                 } else {
                     egui::vec2(SEARCH_WIDTH, 540.0)
                 }
@@ -875,6 +938,9 @@ impl eframe::App for App {
                             self.settings.show_keyboard_shortcuts,
                             self.settings.close_after_copy,
                             self.settings.restore_recent_item,
+                            self.settings.lock_on_system_lock,
+                            self.settings.lock_after_idle_timeout,
+                            self.settings.idle_lock_timeout_minutes,
                             self.settings.ssh_agent_enabled,
                             &self.settings.ssh_agent_socket_path,
                             &self.ssh_agent_status,
@@ -896,6 +962,18 @@ impl eframe::App for App {
                                     if !restore {
                                         let _ = config::clear_recent_item();
                                     }
+                                    self.save_and_apply_settings();
+                                }
+                                SearchAction::SetLockOnSystemLock(lock) => {
+                                    self.settings.lock_on_system_lock = lock;
+                                    self.save_and_apply_settings();
+                                }
+                                SearchAction::SetLockAfterIdleTimeout(lock) => {
+                                    self.settings.lock_after_idle_timeout = lock;
+                                    self.save_and_apply_settings();
+                                }
+                                SearchAction::SetIdleLockTimeoutMinutes(minutes) => {
+                                    self.settings.idle_lock_timeout_minutes = minutes.clamp(1, 1440);
                                     self.save_and_apply_settings();
                                 }
                                 SearchAction::SetSshAgentEnabled(enabled) => {

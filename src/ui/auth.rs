@@ -12,6 +12,7 @@ pub struct AuthState {
     pub has_saved_session: bool,
     pub confirm_forget: bool,
     pub focus_password: bool,
+    pub notice: Option<String>,
 }
 
 impl Default for AuthState {
@@ -39,6 +40,7 @@ impl Default for AuthState {
             has_saved_session,
             confirm_forget: false,
             focus_password: true,
+            notice: None,
         }
     }
 }
@@ -57,6 +59,7 @@ impl AuthState {
         self.has_saved_session = false;
         self.confirm_forget = false;
         self.focus_password = true;
+        self.notice = None;
     }
 }
 
@@ -93,6 +96,14 @@ pub fn draw_auth(ctx: &Context, ui: &mut Ui, state: &mut AuthState) -> Option<Au
                 ui.set_width(560.0);
                 ui.vertical_centered(|ui| {
                     ui.heading("🔐 Bitwarden");
+                    if let Some(notice) = &state.notice {
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(notice)
+                                .small()
+                                .color(egui::Color32::from_rgb(162, 174, 192)),
+                        );
+                    }
                     ui.add_space(22.0);
 
                     ui.set_max_width(460.0);
@@ -222,6 +233,18 @@ fn draw_saved_session_unlock(
                 });
             });
     });
+
+    if let Some(notice) = &state.notice {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space(SEARCH_HORIZONTAL_MARGIN + 6.0);
+            ui.label(
+                egui::RichText::new(notice)
+                    .small()
+                    .color(egui::Color32::from_rgb(162, 174, 192)),
+            );
+        });
+    }
 
     if ui.input(|i| i.key_pressed(egui::Key::Enter))
         && !state.email.is_empty()
