@@ -1,0 +1,64 @@
+name: Release Build
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  linux-x86_64:
+    name: Build Linux x86_64 release
+    runs-on: x86_64-linux
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check flake
+        run: nix flake check
+
+      - name: Package release artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${{ github.event.release.tag_name }}"
+          artifact="bw-quick-access-${tag}-x86_64-linux"
+          bundle_link="${RUNNER_TEMP:-/tmp}/${artifact}"
+
+          mkdir -p "dist/${artifact}"
+          rm -f "${bundle_link}"
+
+          nix bundle .#packages.x86_64-linux.default --out-link "${bundle_link}"
+          install -m 0755 "$(readlink -f "${bundle_link}")" "dist/${artifact}/bw-quick-access"
+          rm -f "${bundle_link}"
+
+          tar -C dist -czf "dist/${artifact}.tar.gz" "${artifact}"
+          sha256sum "dist/${artifact}.tar.gz" > "dist/${artifact}.tar.gz.sha256"
+          rm -rf "dist/${artifact}"
+
+      - name: Upload release assets
+        shell: bash
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITEA_API_URL: ${{ gitea.api_url }}
+          GITEA_REPOSITORY: ${{ github.repository }}
+          GITEA_RELEASE_ID: ${{ github.event.release.id }}
+        run: |
+          set -euo pipefail
+
+          shopt -s nullglob
+          files=(dist/*)
+
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No release assets found in dist/"
+            exit 0
+          fi
+
+          for file in "${files[@]}"; do
+            name="$(basename "$file")"
+            curl -fsS \
+              -H "Authorization: token ${GITEA_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@${file}" \
+              "${GITEA_API_URL}/repos/${GITEA_REPOSITORY}/releases/${GITEA_RELEASE_ID}/assets?name=${name}"
+          done

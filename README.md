@@ -59,6 +59,35 @@ The service runs:
 `--daemon` starts the tray icon, activation socket, and in-memory vault session
 without opening the popup immediately.
 
+## Nix
+
+Build and run directly from the flake:
+
+```bash
+nix run git+ssh://git@git.mvl.sh/vleeuwenmenno/bw-quick-access.git
+```
+
+Use it as a flake input:
+
+```nix
+{
+  inputs.bw-quick-access.url = "git+ssh://git@git.mvl.sh/vleeuwenmenno/bw-quick-access.git";
+}
+```
+
+The default package installs the `bw-quick-access` binary and a desktop launcher
+named `Bitwarden Quick Access Daemon`. The launcher starts:
+
+```bash
+bw-quick-access --daemon
+```
+
+This is useful on desktops where you prefer launching the daemon manually instead
+of installing the systemd user service.
+
+Published Gitea releases include an `x86_64-linux` tarball with a bundled
+executable and a `.sha256` checksum.
+
 ## Usage
 
 Open the quick access popup:
