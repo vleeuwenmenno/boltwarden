@@ -12,6 +12,7 @@ pub struct SshApprovalUiState {
     pub request: Option<SshApprovalRequest>,
     pub status: Option<SshApprovalStatus>,
     pub selected_action: usize,
+    pub selected_remember_duration: usize,
     pub error: Option<String>,
     pub auto_hide: bool,
 }
@@ -21,10 +22,20 @@ impl SshApprovalUiState {
         self.request = request;
         self.status = None;
         self.selected_action = 0;
+        self.selected_remember_duration = 0;
         self.error = None;
         self.auto_hide = auto_hide;
     }
 }
+
+const REMEMBER_DURATIONS: &[(&str, u64)] = &[
+    ("15 minutes", 15 * 60),
+    ("30 minutes", 30 * 60),
+    ("1 hour", 60 * 60),
+    ("2 hours", 2 * 60 * 60),
+    ("4 hours", 4 * 60 * 60),
+    ("8 hours", 8 * 60 * 60),
+];
 
 pub enum SshApprovalAction {
     Decide(SshApprovalDecision),
@@ -97,7 +108,7 @@ fn draw_pending_request(
         ui.vertical(|ui| {
             ui.heading("Allow SSH key use?");
             ui.label(
-                egui::RichText::new("A process wants to sign with a vault SSH key.")
+                egui::RichText::new("Approve once, or remember this command in this directory.")
                     .color(egui::Color32::from_rgb(154, 164, 180)),
             );
         });
@@ -123,24 +134,65 @@ fn draw_pending_request(
     ui.add_space(14.0);
     ui.horizontal(|ui| {
         let spacing = ui.spacing().item_spacing.x;
-        let button_width = ((ui.available_width() - spacing * 3.0) / 4.0).clamp(92.0, 126.0);
-        let choices = [
-            ("Approve once", SshApprovalRemember::Once),
-            ("15 min process", SshApprovalRemember::Process),
-            ("15 min parent", SshApprovalRemember::Parent),
-        ];
-        for (idx, (label, remember)) in choices.iter().enumerate() {
-            let button = egui::Button::new(*label)
-                .fill(if state.selected_action == idx {
-                    egui::Color32::from_rgb(54, 106, 172)
-                } else {
-                    egui::Color32::from_rgb(35, 40, 50)
-                })
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 82, 100)));
-            if ui.add_sized([button_width, 30.0], button).clicked() {
-                action = Some(decision(request, true, *remember));
-            }
+        let button_width = ((ui.available_width() - spacing * 3.0) / 4.0).clamp(112.0, 150.0);
+        let selected_duration = REMEMBER_DURATIONS
+            .get(state.selected_remember_duration)
+            .copied()
+            .unwrap_or(REMEMBER_DURATIONS[0]);
+
+        let approve_once = egui::Button::new("Approve once")
+            .fill(if state.selected_action == 0 {
+                egui::Color32::from_rgb(54, 106, 172)
+            } else {
+                egui::Color32::from_rgb(35, 40, 50)
+            })
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 82, 100)));
+        if ui.add_sized([button_width, 30.0], approve_once).clicked() {
+            action = Some(decision(request, true, SshApprovalRemember::Once));
         }
+
+        let remember = egui::Button::new("Approve + remember")
+            .fill(if state.selected_action == 1 {
+                egui::Color32::from_rgb(54, 106, 172)
+            } else {
+                egui::Color32::from_rgb(35, 40, 50)
+            })
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 82, 100)));
+        if ui
+            .add_sized([button_width + 20.0, 30.0], remember)
+            .clicked()
+        {
+            action = Some(decision(
+                request,
+                true,
+                SshApprovalRemember::CommandInCwd {
+                    duration_seconds: selected_duration.1,
+                },
+            ));
+        }
+
+        ui.scope(|ui| {
+            ui.spacing_mut().interact_size.y = 30.0;
+            ui.visuals_mut().widgets.inactive.bg_fill = egui::Color32::from_rgb(35, 40, 50);
+            ui.visuals_mut().widgets.inactive.bg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 82, 100));
+            ui.visuals_mut().widgets.hovered.bg_fill = egui::Color32::from_rgb(42, 48, 60);
+            ui.visuals_mut().widgets.hovered.bg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(86, 100, 122));
+            ui.visuals_mut().widgets.active.bg_fill = egui::Color32::from_rgb(54, 106, 172);
+            ui.visuals_mut().widgets.active.bg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 82, 100));
+
+            egui::ComboBox::from_id_salt("ssh-approval-remember-duration")
+                .selected_text(selected_duration.0)
+                .width(104.0)
+                .show_ui(ui, |ui| {
+                    for (idx, (label, _seconds)) in REMEMBER_DURATIONS.iter().enumerate() {
+                        ui.selectable_value(&mut state.selected_remember_duration, idx, *label);
+                    }
+                });
+        });
+
         let deny = egui::Button::new("Deny")
             .fill(egui::Color32::from_rgb(70, 38, 46))
             .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(112, 58, 72)));
@@ -172,17 +224,24 @@ fn handle_keys(
                 }
                 egui::Key::Enter => {
                     let remember = match state.selected_action {
-                        1 => SshApprovalRemember::Process,
-                        2 => SshApprovalRemember::Parent,
+                        1 => {
+                            let duration = REMEMBER_DURATIONS
+                                .get(state.selected_remember_duration)
+                                .copied()
+                                .unwrap_or(REMEMBER_DURATIONS[0]);
+                            SshApprovalRemember::CommandInCwd {
+                                duration_seconds: duration.1,
+                            }
+                        }
                         _ => SshApprovalRemember::Once,
                     };
                     *action = Some(decision(request, true, remember));
                 }
                 egui::Key::ArrowRight | egui::Key::Tab => {
-                    state.selected_action = (state.selected_action + 1) % 3;
+                    state.selected_action = (state.selected_action + 1) % 2;
                 }
                 egui::Key::ArrowLeft => {
-                    state.selected_action = (state.selected_action + 2) % 3;
+                    state.selected_action = (state.selected_action + 1) % 2;
                 }
                 _ => {}
             }
@@ -210,9 +269,27 @@ fn draw_key_glyph(ui: &mut Ui) {
     let stroke = egui::Stroke::new(2.0, color);
     let center = rect.center() + egui::vec2(-5.0, 0.0);
     painter.circle_stroke(center, 4.5, stroke);
-    painter.line_segment([center + egui::vec2(4.5, 0.0), center + egui::vec2(16.0, 0.0)], stroke);
-    painter.line_segment([center + egui::vec2(11.0, 0.0), center + egui::vec2(11.0, 5.0)], stroke);
-    painter.line_segment([center + egui::vec2(15.5, 0.0), center + egui::vec2(15.5, 4.0)], stroke);
+    painter.line_segment(
+        [
+            center + egui::vec2(4.5, 0.0),
+            center + egui::vec2(16.0, 0.0),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            center + egui::vec2(11.0, 0.0),
+            center + egui::vec2(11.0, 5.0),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            center + egui::vec2(15.5, 0.0),
+            center + egui::vec2(15.5, 4.0),
+        ],
+        stroke,
+    );
 }
 
 fn detail_grid(ui: &mut Ui, request: &SshApprovalRequest) {
@@ -241,13 +318,25 @@ fn detail_grid(ui: &mut Ui, request: &SshApprovalRequest) {
     detail(
         ui,
         "Executable",
-        request.client.executable.as_deref().unwrap_or("Unavailable"),
+        request
+            .client
+            .executable
+            .as_deref()
+            .unwrap_or("Unavailable"),
     );
-    detail(ui, "CWD", request.client.cwd.as_deref().unwrap_or("Unavailable"));
+    detail(
+        ui,
+        "CWD",
+        request.client.cwd.as_deref().unwrap_or("Unavailable"),
+    );
     detail(
         ui,
         "Parent",
-        request.client.parent_name.as_deref().unwrap_or("Unavailable"),
+        request
+            .client
+            .parent_name
+            .as_deref()
+            .unwrap_or("Unavailable"),
     );
 }
 
@@ -262,16 +351,26 @@ fn detail(ui: &mut Ui, label: &str, value: &str) {
             ),
         );
         let value_width = (ui.available_width() - 2.0).max(80.0);
-        ui.add_sized(
-            [value_width, 20.0],
-            egui::Label::new(
-                egui::RichText::new(value)
-                    .monospace()
-                    .color(egui::Color32::from_rgb(224, 230, 240)),
+        let response = ui
+            .allocate_ui_with_layout(
+                egui::vec2(value_width, 20.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    egui::ScrollArea::horizontal()
+                        .id_salt(("ssh-approval-detail", label))
+                        .max_height(20.0)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(value)
+                                    .monospace()
+                                    .color(egui::Color32::from_rgb(224, 230, 240)),
+                            );
+                        });
+                },
             )
-            .truncate(),
-        )
-        .on_hover_text(value);
+            .response;
+        response.on_hover_text(value);
     });
     ui.add_space(5.0);
 }
@@ -293,7 +392,7 @@ fn draw_status(ui: &mut Ui, state: &SshApprovalUiState) {
                     status.key_name,
                     status.process_name.as_deref().unwrap_or("unknown process")
                 ))
-                    .color(egui::Color32::from_rgb(154, 164, 180)),
+                .color(egui::Color32::from_rgb(154, 164, 180)),
             );
         }
     });

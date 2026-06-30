@@ -59,6 +59,8 @@ struct CachedApproval {
     start_time_ticks: Option<u64>,
     parent_pid: Option<u32>,
     parent_start_time_ticks: Option<u64>,
+    command: Option<String>,
+    cwd: Option<String>,
     expires_at_unix_ms: u64,
 }
 
@@ -74,11 +76,12 @@ impl SshApprovalService {
     }
 
     pub fn active_request(&self) -> Option<SshApprovalRequest> {
-        self.inner
-            .state
-            .lock()
-            .ok()
-            .and_then(|state| state.pending.as_ref().map(|pending| pending.request.clone()))
+        self.inner.state.lock().ok().and_then(|state| {
+            state
+                .pending
+                .as_ref()
+                .map(|pending| pending.request.clone())
+        })
     }
 
     pub fn recent_status(&self) -> Option<SshApprovalStatus> {
@@ -119,10 +122,9 @@ impl SshApprovalService {
         let Ok(mut state) = self.inner.state.lock() else {
             return;
         };
-        let recent = state
-            .pending
-            .as_ref()
-            .map(|pending| approval_status_with_message(&pending.request, SshApprovalStatusKind::Cleared, message));
+        let recent = state.pending.as_ref().map(|pending| {
+            approval_status_with_message(&pending.request, SshApprovalStatusKind::Cleared, message)
+        });
         state.pending = None;
         state.cached.clear();
         if let Some(recent) = recent {
@@ -161,7 +163,8 @@ impl SshApprovalService {
             let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
                 return self.timeout_pending(&mut state, &request);
             };
-            let (next_state, wait_result) = match self.inner.changed.wait_timeout(state, remaining) {
+            let (next_state, wait_result) = match self.inner.changed.wait_timeout(state, remaining)
+            {
                 Ok(result) => result,
                 Err(_) => return false,
             };
@@ -175,8 +178,10 @@ impl SshApprovalService {
             if let Some(decision) = pending.decision.take() {
                 state.pending = None;
                 if decision.approved {
-                    if decision.remember != SshApprovalRemember::Once {
-                        state.cached.push(CachedApproval::from_request(&request, decision.remember));
+                    if let Some(approval) =
+                        CachedApproval::from_request(&request, decision.remember)
+                    {
+                        state.cached.push(approval);
                     }
                     state.recent = Some(approval_status(&request, SshApprovalStatusKind::Approved));
                     return true;
@@ -204,16 +209,30 @@ impl SshApprovalService {
 }
 
 impl CachedApproval {
-    fn from_request(request: &SshApprovalRequest, scope: SshApprovalRemember) -> Self {
-        Self {
+    fn from_request(request: &SshApprovalRequest, scope: SshApprovalRemember) -> Option<Self> {
+        if scope == SshApprovalRemember::Once {
+            return None;
+        }
+        let (command, cwd) = match scope {
+            SshApprovalRemember::CommandInCwd { .. } => {
+                let command = approval_command(request)?;
+                let cwd = request.client.cwd.clone()?;
+                (Some(command), Some(cwd))
+            }
+            _ => (None, None),
+        };
+        Some(Self {
             key_id: request.key_id.clone(),
             scope,
             pid: request.client.pid,
             start_time_ticks: request.client.start_time_ticks,
             parent_pid: request.client.parent_pid,
             parent_start_time_ticks: request.client.parent_start_time_ticks,
-            expires_at_unix_ms: unix_millis_now().saturating_add(duration_millis(SSH_APPROVAL_TTL)),
-        }
+            command,
+            cwd,
+            expires_at_unix_ms: unix_millis_now()
+                .saturating_add(duration_millis(remember_duration(scope))),
+        })
     }
 }
 
@@ -471,8 +490,8 @@ fn remove_owned_socket_if_present(path: &Path) -> Result<(), String> {
 fn secure_bound_socket(path: &Path) -> Result<(), String> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
         .map_err(|e| format!("could not set SSH agent socket permissions: {e}"))?;
-    let metadata =
-        fs::symlink_metadata(path).map_err(|e| format!("could not inspect SSH agent socket: {e}"))?;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|e| format!("could not inspect SSH agent socket: {e}"))?;
     if metadata.uid() != current_uid() {
         return Err("SSH agent socket is not owned by the current user".into());
     }
@@ -698,8 +717,34 @@ fn cached_approval_matches(cached: &[CachedApproval], request: &SshApprovalReque
                     && approval.parent_pid == request.client.parent_pid
                     && approval.parent_start_time_ticks == request.client.parent_start_time_ticks
             }
+            SshApprovalRemember::CommandInCwd { .. } => {
+                approval.command.as_deref() == approval_command(request).as_deref()
+                    && approval.cwd.as_deref() == request.client.cwd.as_deref()
+            }
         }
     })
+}
+
+fn remember_duration(scope: SshApprovalRemember) -> Duration {
+    match scope {
+        SshApprovalRemember::CommandInCwd { duration_seconds } => {
+            Duration::from_secs(duration_seconds)
+        }
+        SshApprovalRemember::Once | SshApprovalRemember::Process | SshApprovalRemember::Parent => {
+            SSH_APPROVAL_TTL
+        }
+    }
+}
+
+fn approval_command(request: &SshApprovalRequest) -> Option<String> {
+    request
+        .client
+        .parent_name
+        .as_deref()
+        .or(request.client.process_name.as_deref())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn peer_client_info(stream: &UnixStream) -> Result<SshAgentClientInfo, String> {
@@ -808,7 +853,10 @@ fn read_agent_message(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
     stream.read_exact(&mut len)?;
     let len = u32::from_be_bytes(len) as usize;
     if len > 256 * 1024 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "agent message too large"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "agent message too large",
+        ));
     }
     let mut message = vec![0u8; len];
     stream.read_exact(&mut message)?;
@@ -958,7 +1006,9 @@ mod tests {
         write_string(&mut request, &public_blob);
         write_string(&mut request, data);
         write_u32(&mut request, 0);
-        std::thread::spawn(move || approve_next_request(approve, rx, true, SshApprovalRemember::Once));
+        std::thread::spawn(move || {
+            approve_next_request(approve, rx, true, SshApprovalRemember::Once)
+        });
         write_agent_message(&mut stream, &request).unwrap();
         let response = read_agent_message(&mut stream).unwrap();
         assert_eq!(response[0], SSH_AGENT_SIGN_RESPONSE);
@@ -1018,8 +1068,13 @@ mod tests {
         let (key_store, unlock_rx) = key_store(vec![vault_key]);
 
         let (approvals, rx) = approval_service();
-        let response =
-            handle_message(&[SSH_AGENTC_REQUEST_IDENTITIES], &key_store, &approvals, None).unwrap();
+        let response = handle_message(
+            &[SSH_AGENTC_REQUEST_IDENTITIES],
+            &key_store,
+            &approvals,
+            None,
+        )
+        .unwrap();
         assert_eq!(response[0], SSH_AGENT_IDENTITIES_ANSWER);
         assert!(rx.try_recv().is_err());
         assert!(unlock_rx.try_recv().is_err());
@@ -1034,8 +1089,11 @@ mod tests {
         write_string(&mut request, data);
         write_u32(&mut request, 0);
         let approve = approvals.clone();
-        std::thread::spawn(move || approve_next_request(approve, rx, true, SshApprovalRemember::Once));
-        let response = handle_message(&request, &key_store, &approvals, Some(fake_client_info())).unwrap();
+        std::thread::spawn(move || {
+            approve_next_request(approve, rx, true, SshApprovalRemember::Once)
+        });
+        let response =
+            handle_message(&request, &key_store, &approvals, Some(fake_client_info())).unwrap();
         assert_eq!(response[0], SSH_AGENT_SIGN_RESPONSE);
         let mut reader = AgentReader::new(&response[1..]);
         let signature_blob = reader.read_string().unwrap();
@@ -1069,7 +1127,8 @@ mod tests {
         write_string(&mut request, &public_blob);
         write_string(&mut request, b"sign me");
         write_u32(&mut request, 0);
-        let response = handle_message(&request, &key_store, &approvals, Some(fake_client_info())).unwrap();
+        let response =
+            handle_message(&request, &key_store, &approvals, Some(fake_client_info())).unwrap();
 
         assert_eq!(response, vec![SSH_AGENT_FAILURE]);
     }
@@ -1100,19 +1159,157 @@ mod tests {
         write_string(&mut request, &public_blob);
         write_string(&mut request, b"first");
         write_u32(&mut request, 0);
-        let first = handle_message(&request, &key_store, &approvals, Some(fake_client_info())).unwrap();
+        let first =
+            handle_message(&request, &key_store, &approvals, Some(fake_client_info())).unwrap();
         assert_eq!(first[0], SSH_AGENT_SIGN_RESPONSE);
 
         let mut second_request = vec![SSH_AGENTC_SIGN_REQUEST];
         write_string(&mut second_request, &public_blob);
         write_string(&mut second_request, b"second");
         write_u32(&mut second_request, 0);
-        let second =
-            handle_message(&second_request, &key_store, &approvals, Some(fake_client_info())).unwrap();
+        let second = handle_message(
+            &second_request,
+            &key_store,
+            &approvals,
+            Some(fake_client_info()),
+        )
+        .unwrap();
         assert_eq!(second[0], SSH_AGENT_SIGN_RESPONSE);
         assert!(approvals
             .recent_status()
             .is_some_and(|status| status.kind == SshApprovalStatusKind::AutoApproved));
+    }
+
+    #[test]
+    fn command_cwd_approval_skips_next_prompt_for_same_command_and_directory() {
+        let private_key = fixture_private_key();
+        let public_key = PublicKey::from(&private_key);
+        let public_blob = encode_ssh(public_key.key_data()).unwrap();
+        let vault_key = SshKey {
+            id: "ssh-1".into(),
+            name: "test-key".into(),
+            public_key: public_key.to_string(),
+            private_key: private_key
+                .to_openssh(ssh_key::LineEnding::LF)
+                .unwrap()
+                .to_string(),
+            fingerprint: None,
+        };
+        let (key_store, _) = key_store(vec![vault_key]);
+        let (approvals, rx) = approval_service();
+        let approve = approvals.clone();
+        std::thread::spawn(move || {
+            approve_next_request(
+                approve,
+                rx,
+                true,
+                SshApprovalRemember::CommandInCwd {
+                    duration_seconds: 15 * 60,
+                },
+            )
+        });
+
+        let mut request = vec![SSH_AGENTC_SIGN_REQUEST];
+        write_string(&mut request, &public_blob);
+        write_string(&mut request, b"first");
+        write_u32(&mut request, 0);
+        let first =
+            handle_message(&request, &key_store, &approvals, Some(fake_client_info())).unwrap();
+        assert_eq!(first[0], SSH_AGENT_SIGN_RESPONSE);
+
+        let mut second_client = fake_client_info();
+        second_client.pid = 99;
+        second_client.start_time_ticks = Some(200);
+        let mut second_request = vec![SSH_AGENTC_SIGN_REQUEST];
+        write_string(&mut second_request, &public_blob);
+        write_string(&mut second_request, b"second");
+        write_u32(&mut second_request, 0);
+        let second =
+            handle_message(&second_request, &key_store, &approvals, Some(second_client)).unwrap();
+        assert_eq!(second[0], SSH_AGENT_SIGN_RESPONSE);
+        assert!(approvals
+            .recent_status()
+            .is_some_and(|status| status.kind == SshApprovalStatusKind::AutoApproved));
+    }
+
+    #[test]
+    fn command_cwd_approval_does_not_match_different_directory() {
+        let private_key = fixture_private_key();
+        let public_key = PublicKey::from(&private_key);
+        let public_blob = encode_ssh(public_key.key_data()).unwrap();
+        let vault_key = SshKey {
+            id: "ssh-1".into(),
+            name: "test-key".into(),
+            public_key: public_key.to_string(),
+            private_key: private_key
+                .to_openssh(ssh_key::LineEnding::LF)
+                .unwrap()
+                .to_string(),
+            fingerprint: None,
+        };
+        let (key_store, _) = key_store(vec![vault_key]);
+        let (approvals, rx) = approval_service();
+
+        let mut request = vec![SSH_AGENTC_SIGN_REQUEST];
+        write_string(&mut request, &public_blob);
+        write_string(&mut request, b"first");
+        write_u32(&mut request, 0);
+        let first_key_store = key_store.clone();
+        let first_approvals = approvals.clone();
+        let first = thread::spawn(move || {
+            handle_message(
+                &request,
+                &first_key_store,
+                &first_approvals,
+                Some(fake_client_info()),
+            )
+            .unwrap()
+        });
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let first_request = approvals.active_request().unwrap();
+        approvals
+            .decide(SshApprovalDecision {
+                request_id: first_request.id,
+                approved: true,
+                remember: SshApprovalRemember::CommandInCwd {
+                    duration_seconds: 15 * 60,
+                },
+            })
+            .unwrap();
+        let first = first.join().unwrap();
+        assert_eq!(first[0], SSH_AGENT_SIGN_RESPONSE);
+
+        let mut second_client = fake_client_info();
+        second_client.cwd = Some("/other".into());
+        let mut second_request = vec![SSH_AGENTC_SIGN_REQUEST];
+        write_string(&mut second_request, &public_blob);
+        write_string(&mut second_request, b"second");
+        write_u32(&mut second_request, 0);
+        let second_key_store = key_store.clone();
+        let second_approvals = approvals.clone();
+        let second = thread::spawn(move || {
+            handle_message(
+                &second_request,
+                &second_key_store,
+                &second_approvals,
+                Some(second_client),
+            )
+            .unwrap()
+        });
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let second_request = approvals.active_request().unwrap();
+        approvals
+            .decide(SshApprovalDecision {
+                request_id: second_request.id,
+                approved: false,
+                remember: SshApprovalRemember::Once,
+            })
+            .unwrap();
+        let second = second.join().unwrap();
+        assert_eq!(second, vec![SSH_AGENT_FAILURE]);
+        assert!(approvals
+            .recent_status()
+            .is_some_and(|status| status.kind == SshApprovalStatusKind::Denied));
     }
 
     #[test]

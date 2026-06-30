@@ -78,6 +78,7 @@ pub enum SshApprovalRemember {
     Once,
     Process,
     Parent,
+    CommandInCwd { duration_seconds: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
