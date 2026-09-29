@@ -1,5 +1,6 @@
 use crate::bw::{BwClient, BwError, TwoFactorChallenge, TwoFactorProvider};
 use crate::config::{self, AppSettings};
+use crate::demo::DemoBackend;
 use crate::model::{
     BwItem, BwItemDetail, SshAgentStatus, SshApprovalDecision, SshApprovalRequest,
     SshApprovalStatus, SyncStatus, TotpCode,
@@ -12,6 +13,7 @@ use std::sync::{Arc, Mutex};
 pub enum AppBackend {
     Local(Arc<Mutex<LocalBackend>>),
     Remote(RpcClient),
+    Demo(Arc<DemoBackend>),
 }
 
 pub struct LocalBackend {
@@ -43,12 +45,17 @@ impl AppBackend {
         Self::Remote(client)
     }
 
+    pub fn demo() -> Self {
+        Self::Demo(Arc::new(DemoBackend::new()))
+    }
+
     pub fn has_session(&self) -> bool {
         match self {
             Self::Local(local) => local
                 .lock()
                 .map(|backend| backend.bw.has_session())
                 .unwrap_or(false),
+            Self::Demo(demo) => demo.has_session(),
             Self::Remote(client) => match client.call(&RpcRequest::HasSession) {
                 Ok(RpcResponse::HasSession(has_session)) => has_session,
                 _ => false,
@@ -68,6 +75,7 @@ impl AppBackend {
                 .lock()
                 .map_err(|_| BackendError::Message("session lock poisoned".into()))?
                 .login(server_url, email, password, remember),
+            Self::Demo(demo) => demo.login(password),
             Self::Remote(client) => match client.call(&RpcRequest::Login {
                 server_url: server_url.to_string(),
                 email: email.to_string(),
@@ -75,7 +83,9 @@ impl AppBackend {
                 remember,
             }) {
                 Ok(RpcResponse::Login(result)) => result.map_err(BackendError::from),
-                Ok(_) => Err(BackendError::Message("unexpected daemon login response".into())),
+                Ok(_) => Err(BackendError::Message(
+                    "unexpected daemon login response".into(),
+                )),
                 Err(e) => Err(BackendError::Message(e)),
             },
         }
@@ -92,6 +102,7 @@ impl AppBackend {
                 .lock()
                 .map_err(|_| BackendError::Message("session lock poisoned".into()))?
                 .complete_two_factor(provider, token, remember),
+            Self::Demo(demo) => demo.complete_two_factor(),
             Self::Remote(client) => match client.call(&RpcRequest::CompleteTwoFactor {
                 provider,
                 token: token.to_string(),
@@ -119,6 +130,7 @@ impl AppBackend {
                     status: backend.bw.sync_status(),
                 })
             }
+            Self::Demo(demo) => demo.list_items(query),
             Self::Remote(client) => match client.call(&RpcRequest::ListItems {
                 query: query.to_string(),
             }) {
@@ -129,7 +141,9 @@ impl AppBackend {
                         status: payload.status,
                     })
                     .map_err(BackendError::from),
-                Ok(_) => Err(BackendError::Message("unexpected daemon search response".into())),
+                Ok(_) => Err(BackendError::Message(
+                    "unexpected daemon search response".into(),
+                )),
                 Err(e) => Err(BackendError::Message(e)),
             },
         }
@@ -143,9 +157,12 @@ impl AppBackend {
                 .bw
                 .get_item(id)
                 .map_err(BackendError::from),
+            Self::Demo(demo) => demo.get_item(id),
             Self::Remote(client) => match client.call(&RpcRequest::GetItem { id: id.into() }) {
                 Ok(RpcResponse::Detail(result)) => result.map_err(BackendError::from),
-                Ok(_) => Err(BackendError::Message("unexpected daemon detail response".into())),
+                Ok(_) => Err(BackendError::Message(
+                    "unexpected daemon detail response".into(),
+                )),
                 Err(e) => Err(BackendError::Message(e)),
             },
         }
@@ -159,9 +176,12 @@ impl AppBackend {
                 .bw
                 .get_totp(id)
                 .map_err(BackendError::from),
+            Self::Demo(demo) => demo.get_totp(),
             Self::Remote(client) => match client.call(&RpcRequest::GetTotp { id: id.into() }) {
                 Ok(RpcResponse::Totp(result)) => result.map_err(BackendError::from),
-                Ok(_) => Err(BackendError::Message("unexpected daemon TOTP response".into())),
+                Ok(_) => Err(BackendError::Message(
+                    "unexpected daemon TOTP response".into(),
+                )),
                 Err(e) => Err(BackendError::Message(e)),
             },
         }
@@ -176,6 +196,10 @@ impl AppBackend {
                     backend.bw = BwClient::new();
                     backend.pending_two_factor = None;
                 }
+                Ok(())
+            }
+            Self::Demo(demo) => {
+                demo.lock();
                 Ok(())
             }
             Self::Remote(client) => match client.call(&RpcRequest::ClearSavedSession) {
@@ -197,6 +221,10 @@ impl AppBackend {
                 let _ = config::clear_recent_item();
                 Ok(())
             }
+            Self::Demo(demo) => {
+                demo.lock();
+                Ok(())
+            }
             Self::Remote(client) => match client.call(&RpcRequest::LockVault) {
                 Ok(RpcResponse::LockVault(result)) => result,
                 Ok(_) => Err("unexpected daemon lock-vault response".into()),
@@ -211,7 +239,9 @@ impl AppBackend {
                 config::save_settings(settings).map_err(|e| e.to_string())?;
                 Ok(local_ssh_agent_status(settings))
             }
-            Self::Remote(client) => match client.call(&RpcRequest::ApplySettings(settings.clone())) {
+            Self::Demo(_) => Ok(local_ssh_agent_status(settings)),
+            Self::Remote(client) => match client.call(&RpcRequest::ApplySettings(settings.clone()))
+            {
                 Ok(RpcResponse::SettingsApplied(result)) => result,
                 Ok(_) => Err("unexpected daemon settings response".into()),
                 Err(e) => Err(e),
@@ -222,6 +252,7 @@ impl AppBackend {
     pub fn ssh_agent_status(&self, settings: &AppSettings) -> SshAgentStatus {
         match self {
             Self::Local(_) => local_ssh_agent_status(settings),
+            Self::Demo(_) => local_ssh_agent_status(settings),
             Self::Remote(client) => match client.call(&RpcRequest::GetSshAgentStatus) {
                 Ok(RpcResponse::SshAgentStatus(status)) => status,
                 _ => local_ssh_agent_status(settings),
@@ -232,6 +263,7 @@ impl AppBackend {
     pub fn ssh_approval(&self) -> Option<SshApprovalRequest> {
         match self {
             Self::Local(_) => None,
+            Self::Demo(demo) => demo.ssh_approval(),
             Self::Remote(client) => match client.call(&RpcRequest::GetSshApproval) {
                 Ok(RpcResponse::SshApproval(request)) => request,
                 _ => None,
@@ -245,6 +277,7 @@ impl AppBackend {
     ) -> Result<SshApprovalStatus, String> {
         match self {
             Self::Local(_) => Err("SSH approval is only available in daemon mode".into()),
+            Self::Demo(demo) => Ok(demo.decide_ssh_approval(decision.approved)),
             Self::Remote(client) => match client.call(&RpcRequest::DecideSshApproval(decision)) {
                 Ok(RpcResponse::SshApprovalDecided(result)) => result,
                 Ok(_) => Err("unexpected daemon SSH approval response".into()),
@@ -256,6 +289,10 @@ impl AppBackend {
     pub fn send_ssh_approval_decision(&self, decision: SshApprovalDecision) -> Result<(), String> {
         match self {
             Self::Local(_) => Err("SSH approval is only available in daemon mode".into()),
+            Self::Demo(demo) => {
+                demo.decide_ssh_approval(decision.approved);
+                Ok(())
+            }
             Self::Remote(client) => client.send(&RpcRequest::DecideSshApproval(decision)),
         }
     }
@@ -263,6 +300,7 @@ impl AppBackend {
     pub fn ssh_approval_status(&self) -> Option<SshApprovalStatus> {
         match self {
             Self::Local(_) => None,
+            Self::Demo(_) => None,
             Self::Remote(client) => match client.call(&RpcRequest::GetSshApprovalStatus) {
                 Ok(RpcResponse::SshApprovalStatus(status)) => status,
                 _ => None,

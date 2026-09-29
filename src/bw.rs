@@ -1686,7 +1686,7 @@ impl EncString {
     }
 }
 
-fn generate_totp(seed: &str, now_unix: u64) -> Result<TotpCode, BwError> {
+pub(crate) fn generate_totp(seed: &str, now_unix: u64) -> Result<TotpCode, BwError> {
     let (secret, digits, period) = parse_totp_seed(seed)?;
     let step = now_unix / period;
     let mut mac = HmacSha1::new_from_slice(&secret)

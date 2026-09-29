@@ -1,6 +1,10 @@
 use crate::config;
-use crate::ui::search::{SEARCH_HEIGHT, SEARCH_HORIZONTAL_MARGIN, SEARCH_TOP_MARGIN};
-use egui::{Context, Ui};
+use crate::ui::theme::theme;
+use crate::ui::widgets;
+use egui::{Context, RichText};
+
+const DEFAULT_SERVER: &str = "https://vault.bitwarden.com";
+const FORM_WIDTH: f32 = 440.0;
 
 pub struct AuthState {
     pub server_url: String,
@@ -11,6 +15,7 @@ pub struct AuthState {
     pub in_flight: bool,
     pub has_saved_session: bool,
     pub confirm_forget: bool,
+    /// Initial focus still has to be placed (password when the email is known, else email).
     pub focus_password: bool,
     pub notice: Option<String>,
 }
@@ -23,12 +28,7 @@ impl Default for AuthState {
             server_url: saved
                 .as_ref()
                 .map(|session| session.server_url.clone())
-                .or_else(|| {
-                    std::env::var("BW_SERVER")
-                        .ok()
-                        .filter(|value| !value.trim().is_empty())
-                })
-                .unwrap_or_else(|| "https://vault.bitwarden.com".to_string()),
+                .unwrap_or_else(default_server),
             email: saved
                 .as_ref()
                 .map(|session| session.email.clone())
@@ -47,287 +47,295 @@ impl Default for AuthState {
 
 impl AuthState {
     pub fn reset_to_full_login(&mut self) {
-        self.server_url = std::env::var("BW_SERVER")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "https://vault.bitwarden.com".to_string());
+        *self = Self {
+            server_url: default_server(),
+            has_saved_session: false,
+            ..Self::default()
+        };
         self.email.clear();
-        self.password.clear();
-        self.remember = true;
-        self.error = None;
-        self.in_flight = false;
-        self.has_saved_session = false;
-        self.confirm_forget = false;
-        self.focus_password = true;
-        self.notice = None;
+    }
+
+    fn can_submit(&self) -> bool {
+        !self.in_flight
+            && !self.server_url.trim().is_empty()
+            && !self.email.trim().is_empty()
+            && !self.password.is_empty()
     }
 }
 
-pub fn draw_auth(ctx: &Context, ui: &mut Ui, state: &mut AuthState) -> Option<AuthAction> {
+fn default_server() -> String {
+    std::env::var("BW_SERVER")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_SERVER.to_string())
+}
+
+pub fn draw_auth(ctx: &Context, state: &mut AuthState) -> Option<AuthAction> {
     let mut action = None;
+    let t = theme();
+
+    let hints: &[(&str, &str)] = if state.has_saved_session {
+        &[("⏎", "Unlock"), ("Esc", "Hide")]
+    } else {
+        &[("⏎", "Log in"), ("Tab", "Next field"), ("Esc", "Hide")]
+    };
+    egui::TopBottomPanel::bottom("footer")
+        .frame(widgets::footer_frame())
+        .show(ctx, |ui| widgets::footer(ui, hints, None));
 
     if state.has_saved_session {
-        draw_saved_session_unlock(ui, state, &mut action);
-        draw_auth_tail(ctx, ui, state, &mut action);
-        return action;
-    }
-
-    ui.add_space(28.0);
-
-    let frame_width = 616.0;
-    let left_pad = ((ui.available_width() - frame_width) / 2.0).max(0.0);
-    ui.horizontal(|ui| {
-        ui.add_space(left_pad);
-        egui::Frame::new()
-            .fill(egui::Color32::from_rgb(18, 20, 26))
-            .stroke(egui::Stroke::new(
-                1.0,
-                egui::Color32::from_rgb(52, 58, 70),
-            ))
-            .inner_margin(egui::Margin::symmetric(28, 24))
-            .corner_radius(8.0)
-            .shadow(egui::epaint::Shadow {
-                offset: [0, 8],
-                blur: 24,
-                spread: 0,
-                color: egui::Color32::from_black_alpha(96),
-            })
-            .show(ui, |ui| {
-                ui.set_width(560.0);
-                ui.vertical_centered(|ui| {
-                    ui.heading("🔐 Bitwarden");
-                    if let Some(notice) = &state.notice {
-                        ui.add_space(6.0);
-                        ui.label(
-                            egui::RichText::new(notice)
-                                .small()
-                                .color(egui::Color32::from_rgb(162, 174, 192)),
-                        );
-                    }
-                    ui.add_space(22.0);
-
-                    ui.set_max_width(460.0);
-                    input_with_label(
-                        ui,
-                        "Server",
-                        &mut state.server_url,
-                        false,
-                        "https://vault.example.com",
+        draw_unlock_header(ctx, state, &mut action);
+    } else {
+        egui::TopBottomPanel::top("header")
+            .frame(widgets::header_frame())
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(t.icon("\u{f023}", "🔐"))
+                            .size(t.title())
+                            .color(t.accent),
                     );
-                    ui.add_space(10.0);
-                    input_with_label(ui, "Email", &mut state.email, false, "you@example.com");
-                    ui.add_space(10.0);
-                    input_with_label(ui, "Master password", &mut state.password, true, "");
-
-                    ui.add_space(12.0);
-                    ui.checkbox(&mut state.remember, "Remember this device");
-
-                    ui.add_space(14.0);
-                    let enabled = !state.in_flight
-                        && !state.server_url.is_empty()
-                        && !state.email.is_empty()
-                        && !state.password.is_empty();
-                    ui.add_enabled_ui(enabled, |ui| {
-                        let btn = ui.add_sized([460.0, 38.0], egui::Button::new("Login"));
-                        if btn.clicked() {
-                            action = Some(AuthAction::Login);
-                        }
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("Bitwarden")
+                            .size(t.title())
+                            .color(t.text_strong),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new("Log in to your vault").color(t.text_faint));
                     });
-                    if ui.input(|i| i.key_pressed(egui::Key::Enter))
-                        && !state.email.is_empty()
-                        && !state.password.is_empty()
-                        && !state.server_url.is_empty()
-                        && !state.in_flight
-                    {
-                        action = Some(AuthAction::Login);
-                    }
                 });
             });
-    });
+    }
 
-    draw_auth_tail(ctx, ui, state, &mut action);
+    egui::CentralPanel::default()
+        .frame(widgets::body_frame())
+        .show(ctx, |ui| {
+            if state.has_saved_session {
+                draw_unlock_body(ui, state);
+            } else {
+                draw_login_form(ui, state, &mut action);
+            }
+        });
+
+    if state.confirm_forget {
+        draw_forget_dialog(ctx, state, &mut action);
+    }
+
+    if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && state.can_submit() && !state.confirm_forget
+    {
+        action = Some(AuthAction::Login);
+    }
     action
 }
 
-fn draw_saved_session_unlock(
-    ui: &mut Ui,
-    state: &mut AuthState,
-    action: &mut Option<AuthAction>,
-) {
-    ui.set_min_size(egui::vec2(ui.available_width(), SEARCH_HEIGHT));
-    ui.add_space(SEARCH_TOP_MARGIN);
-
-    ui.horizontal(|ui| {
-        ui.add_space(SEARCH_HORIZONTAL_MARGIN);
-
-        let bar_width = (ui.available_width() - SEARCH_HORIZONTAL_MARGIN).max(280.0);
-        let stroke_color = if state.in_flight {
-            egui::Color32::from_rgb(68, 78, 94)
-        } else {
-            egui::Color32::from_rgb(93, 158, 242)
-        };
-
-        egui::Frame::new()
-            .fill(egui::Color32::from_rgb(18, 20, 26))
-            .stroke(egui::Stroke::new(1.0, stroke_color))
-            .inner_margin(egui::Margin::symmetric(14, 7))
-            .corner_radius(8.0)
-            .show(ui, |ui| {
-                ui.set_width(bar_width - 28.0);
-                ui.set_height(38.0);
-                ui.horizontal_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new("🔐")
-                            .size(20.0)
-                            .color(egui::Color32::from_rgb(162, 174, 192)),
-                    );
-                    ui.add_space(8.0);
-
-                    let right_controls_width = 146.0;
-                    let input_width = (ui.available_width() - right_controls_width).max(120.0);
-                    let hint = if state.email.trim().is_empty() {
-                        "Master password".to_string()
-                    } else {
-                        format!("Unlock {}", state.email.trim())
-                    };
-                    let input = ui.add_sized(
-                        [input_width, 36.0],
-                        egui::TextEdit::singleline(&mut state.password)
-                            .id(egui::Id::new("saved-session-password"))
-                            .font(egui::FontId::proportional(23.0))
-                            .margin(egui::Margin::symmetric(2, 4))
-                            .vertical_align(egui::Align::Center)
-                            .password(true)
-                            .hint_text(hint)
-                            .frame(false),
-                    );
-                    if state.focus_password {
-                        input.request_focus();
-                        state.focus_password = false;
-                    }
-
-                    ui.add_space(8.0);
+fn draw_unlock_header(ctx: &Context, state: &mut AuthState, action: &mut Option<AuthAction>) {
+    let t = theme();
+    egui::TopBottomPanel::top("header")
+        .frame(widgets::header_frame())
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(t.icon("\u{f023}", "🔐"))
+                        .size(t.input())
+                        .color(t.accent),
+                );
+                ui.add_space(6.0);
+                let trailing = 96.0;
+                let id = egui::Id::new("saved-session-password");
+                let hint = if state.email.trim().is_empty() {
+                    "Master password".to_string()
+                } else {
+                    format!("Master password for {}", state.email.trim())
+                };
+                let response = ui.add_sized(
+                    [(ui.available_width() - trailing).max(120.0), 32.0],
+                    egui::TextEdit::singleline(&mut state.password)
+                        .id(id)
+                        .font(t.font(t.input()))
+                        .text_color(t.text_strong)
+                        .hint_text(RichText::new(hint).color(t.text_faint))
+                        .password(true)
+                        .frame(false)
+                        .vertical_align(egui::Align::Center),
+                );
+                if state.focus_password {
+                    response.request_focus();
+                    state.focus_password = false;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if state.in_flight {
-                        ui.add_space(55.0);
-                        ui.spinner();
-                    } else {
-                        let enabled = !state.server_url.is_empty()
-                            && !state.email.is_empty()
-                            && !state.password.is_empty();
-                        ui.add_enabled_ui(enabled, |ui| {
-                            if ui.add_sized([72.0, 32.0], egui::Button::new("Unlock")).clicked() {
-                                *action = Some(AuthAction::Login);
-                            }
-                        });
-                    }
-
-                    let forget = egui::Button::new(
-                        egui::RichText::new("Forget")
-                            .small()
-                            .color(egui::Color32::from_rgb(178, 126, 126)),
-                    )
-                    .frame(false);
-                    if ui.add_sized([54.0, 28.0], forget).clicked() {
-                        state.confirm_forget = true;
+                        ui.add(egui::Spinner::new().color(t.text_muted));
+                    } else if widgets::button(ui, "Unlock", true, state.can_submit()).clicked() {
+                        *action = Some(AuthAction::Login);
                     }
                 });
             });
-    });
-
-    if let Some(notice) = &state.notice {
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.add_space(SEARCH_HORIZONTAL_MARGIN + 6.0);
-            ui.label(
-                egui::RichText::new(notice)
-                    .small()
-                    .color(egui::Color32::from_rgb(162, 174, 192)),
-            );
         });
-    }
-
-    if ui.input(|i| i.key_pressed(egui::Key::Enter))
-        && !state.email.is_empty()
-        && !state.password.is_empty()
-        && !state.server_url.is_empty()
-        && !state.in_flight
-    {
-        *action = Some(AuthAction::Login);
-    }
 }
 
-fn draw_auth_tail(
-    ctx: &Context,
-    ui: &mut Ui,
-    state: &mut AuthState,
-    action: &mut Option<AuthAction>,
-) {
-    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-        *action = Some(AuthAction::Quit);
-    }
+fn draw_unlock_body(ui: &mut egui::Ui, state: &mut AuthState) {
+    let t = theme();
+    ui.add_space((ui.available_height() / 2.0 - 70.0).max(8.0));
+    ui.vertical_centered(|ui| {
+        ui.label(
+            RichText::new(t.icon("\u{f2bd}", "👤"))
+                .size(t.title() + 10.0)
+                .color(t.text_faint),
+        );
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(state.email.trim())
+                .size(t.title())
+                .color(t.text_strong),
+        );
+        ui.label(RichText::new(state.server_url.trim()).color(t.text_faint));
+        if let Some(notice) = &state.notice {
+            ui.add_space(10.0);
+            ui.label(RichText::new(notice).color(t.warning));
+        }
+        if let Some(error) = &state.error {
+            ui.add_space(10.0);
+            widgets::error_line(ui, error);
+        }
+        ui.add_space(18.0);
+        if widgets::button(ui, "Use another account", false, !state.in_flight).clicked() {
+            state.confirm_forget = true;
+        }
+    });
+}
 
-    if let Some(e) = &state.error {
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.add_space(SEARCH_HORIZONTAL_MARGIN + 6.0);
-            ui.colored_label(egui::Color32::from_rgb(232, 112, 112), format!("⚠ {e}"));
-        });
-    }
+fn draw_login_form(ui: &mut egui::Ui, state: &mut AuthState, action: &mut Option<AuthAction>) {
+    let t = theme();
+    let side = ((ui.available_width() - FORM_WIDTH) / 2.0).max(0.0);
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        ui.add_space(side);
+        ui.vertical(|ui| {
+            ui.set_width(FORM_WIDTH);
+            if let Some(notice) = &state.notice {
+                ui.label(RichText::new(notice).color(t.warning));
+                ui.add_space(8.0);
+            }
 
-    if state.confirm_forget {
-        egui::Window::new("Forget saved user?")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.set_width(340.0);
-                ui.label("This removes the saved unlock session from this device.");
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        state.confirm_forget = false;
+            widgets::field_label(ui, "Server");
+            widgets::text_input(
+                ui,
+                egui::Id::new("login-server"),
+                &mut state.server_url,
+                DEFAULT_SERVER,
+                false,
+                t.body(),
+            );
+            ui.add_space(8.0);
+
+            widgets::field_label(ui, "Email");
+            let email = widgets::text_input(
+                ui,
+                egui::Id::new("login-email"),
+                &mut state.email,
+                "you@example.com",
+                false,
+                t.body(),
+            );
+            ui.add_space(8.0);
+
+            widgets::field_label(ui, "Master password");
+            let password = widgets::text_input(
+                ui,
+                egui::Id::new("login-password"),
+                &mut state.password,
+                "Your master password",
+                true,
+                t.body(),
+            );
+            if state.focus_password {
+                if state.email.trim().is_empty() {
+                    email.request_focus();
+                } else {
+                    password.request_focus();
+                }
+                state.focus_password = false;
+            }
+
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.checkbox(
+                    &mut state.remember,
+                    RichText::new("Remember this device").color(t.text),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if state.in_flight {
+                        ui.add(egui::Spinner::new().color(t.text_muted));
+                    } else if widgets::button(ui, "Log in", true, state.can_submit()).clicked() {
+                        *action = Some(AuthAction::Login);
                     }
+                });
+            });
+
+            if let Some(error) = &state.error {
+                ui.add_space(8.0);
+                widgets::error_line(ui, error);
+            }
+        });
+    });
+}
+
+fn draw_forget_dialog(ctx: &Context, state: &mut AuthState, action: &mut Option<AuthAction>) {
+    let t = theme();
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        state.confirm_forget = false;
+        return;
+    }
+    egui::Window::new("Use another account?")
+        .collapsible(false)
+        .resizable(false)
+        .title_bar(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .frame(
+            egui::Frame::window(&ctx.style())
+                .fill(t.bg)
+                .stroke(egui::Stroke::new(1.0_f32, t.accent))
+                .inner_margin(egui::Margin::same(16)),
+        )
+        .show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.label(
+                RichText::new("Use another account?")
+                    .size(t.title())
+                    .color(t.text_strong),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(
+                    "This removes the saved unlock session for this account from this device.",
+                )
+                .color(t.text_muted),
+            );
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                if widgets::button(ui, "Cancel", false, true).clicked() {
+                    state.confirm_forget = false;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
-                        .add(egui::Button::new("Forget user").fill(egui::Color32::from_rgb(
-                            120, 45, 45,
-                        )))
+                        .add(
+                            egui::Button::new(RichText::new("Forget account").color(t.danger))
+                                .fill(t.surface)
+                                .stroke(egui::Stroke::new(1.0_f32, t.danger))
+                                .corner_radius(t.rounding)
+                                .min_size(egui::vec2(96.0, 32.0)),
+                        )
                         .clicked()
                     {
                         *action = Some(AuthAction::ForgetUser);
                     }
                 });
             });
-    }
-}
-
-fn input_with_label(ui: &mut Ui, label: &str, value: &mut String, password: bool, hint: &str) {
-    const INPUT_WIDTH: f32 = 460.0;
-
-    ui.horizontal(|ui| {
-        let left_pad = ((ui.available_width() - INPUT_WIDTH) / 2.0).max(0.0);
-        ui.add_space(left_pad);
-        ui.vertical(|ui| {
-            ui.set_width(INPUT_WIDTH);
-            ui.label(
-                egui::RichText::new(label)
-                    .small()
-                    .color(egui::Color32::from_rgb(145, 145, 145)),
-            );
-            ui.add_sized(
-                [INPUT_WIDTH, 34.0],
-                egui::TextEdit::singleline(value)
-                    .font(egui::FontId::proportional(18.0))
-                    .margin(egui::Margin::symmetric(8, 4))
-                    .vertical_align(egui::Align::Center)
-                    .password(password)
-                    .hint_text(hint),
-            );
         });
-    });
 }
 
 pub enum AuthAction {
     Login,
     ForgetUser,
-    Quit,
 }

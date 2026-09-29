@@ -1,19 +1,12 @@
-use crate::config;
+use crate::config::{self, AppSettings};
 use crate::model::{BwItem, SshAgentStatus, SyncStatus};
-use egui::{Context, Ui};
+use crate::ui::theme::theme;
+use crate::ui::widgets;
+use egui::{Context, RichText, Ui};
 
-pub const SEARCH_WIDTH: f32 = 673.0;
-pub const SEARCH_HEIGHT: f32 = 72.0;
-pub const SEARCH_HORIZONTAL_MARGIN: f32 = 20.0;
-pub const SEARCH_TOP_MARGIN: f32 = 8.0;
-pub const DROPDOWN_GAP: f32 = 14.0;
-pub const DROPDOWN_ROW_HEIGHT: f32 = 62.0;
-pub const DROPDOWN_MAX_ROWS: usize = 6;
-const DROPDOWN_STATIC_HEIGHT: f32 = 23.0;
-const SHORTCUT_BAR_HEIGHT: f32 = 34.0;
-const SHORTCUT_BAR_BODY_HEIGHT: f32 = 24.0;
-const DROPDOWN_MAX_STATUS_HEIGHT: f32 = 44.0;
-const SETTINGS_PANEL_HEIGHT: f32 = 392.0;
+const SEARCH_INPUT_ID: &str = "vault-search-input";
+const SSH_PATH_INPUT_ID: &str = "settings-ssh-socket-path";
+const SETTINGS_ROWS: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchView {
@@ -35,22 +28,6 @@ pub enum OpenSelectedAction {
     LockVault,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ShortcutKind {
-    Search,
-    Settings,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KeyCap {
-    UpDown,
-    Enter,
-    Right,
-    Left,
-    Esc,
-    Space,
-}
-
 pub struct SearchState {
     pub query: String,
     pub results: Vec<BwItem>,
@@ -63,7 +40,11 @@ pub struct SearchState {
     pub last_query_time: Option<std::time::Instant>,
     pub sync_status: Option<SyncStatus>,
     pub view: SearchView,
-    pub ssh_agent_path_input: String,
+    /// Draft of the SSH socket path; `None` until the settings panel loads the saved value.
+    pub ssh_agent_path_input: Option<String>,
+    pub settings_selected: usize,
+    /// Row the list last scrolled to, so it only scrolls when the selection moves.
+    scrolled_to: Option<usize>,
 }
 
 impl Default for SearchState {
@@ -80,7 +61,9 @@ impl Default for SearchState {
             last_query_time: None,
             sync_status: None,
             view: SearchView::Results,
-            ssh_agent_path_input: String::new(),
+            ssh_agent_path_input: None,
+            settings_selected: 0,
+            scrolled_to: None,
         }
     }
 }
@@ -137,7 +120,9 @@ impl SearchState {
         self.in_flight = false;
         self.sync_status = None;
         self.view = SearchView::Results;
-        self.ssh_agent_path_input.clear();
+        self.ssh_agent_path_input = None;
+        self.settings_selected = 0;
+        self.scrolled_to = None;
         self.force_refresh();
         self.focus_search = true;
     }
@@ -156,6 +141,7 @@ impl SearchState {
             Some(DisplayEntry::SettingsCommand) => {
                 self.view = SearchView::Settings;
                 self.selected = 0;
+                self.settings_selected = 0;
                 OpenSelectedAction::None
             }
             Some(DisplayEntry::LockCommand) => OpenSelectedAction::LockVault,
@@ -167,43 +153,8 @@ impl SearchState {
     pub fn close_settings_panel(&mut self) {
         self.view = SearchView::Results;
         self.selected = 0;
-    }
-
-    pub fn should_show_dropdown(&self) -> bool {
-        let has_query = !self.query.trim().is_empty();
-        self.view == SearchView::Settings
-            || self.settings_command_visible()
-            || self.lock_command_visible()
-            || (has_query
-                && (self.in_flight
-                    || self.error.is_some()
-                    || self.warning.is_some()
-                    || !self.results.is_empty()
-                    || (!self.last_query.is_empty() && self.results.is_empty())))
-    }
-
-    pub fn dropdown_height(&self, show_keyboard_shortcuts: bool) -> f32 {
-        let body_height = if self.view == SearchView::Settings {
-            SETTINGS_PANEL_HEIGHT
-        } else if self.display_entry_count() == 0 {
-            50.0
-        } else {
-            result_rows_height(self.display_entry_count())
-        };
-
-        DROPDOWN_STATIC_HEIGHT
-            + body_height
-            + status_height(self)
-            + shortcut_bar_height(show_keyboard_shortcuts)
-    }
-
-    #[cfg(test)]
-    pub fn visible_result_rows_height(&self) -> f32 {
-        if self.display_entry_count() == 0 {
-            0.0
-        } else {
-            result_rows_height(self.display_entry_count())
-        }
+        self.ssh_agent_path_input = None;
+        self.focus_search = true;
     }
 
     fn settings_command_visible(&self) -> bool {
@@ -241,15 +192,6 @@ impl SearchState {
     }
 }
 
-pub fn search_window_height(show_keyboard_shortcuts: bool) -> f32 {
-    SEARCH_HEIGHT
-        + DROPDOWN_GAP
-        + DROPDOWN_STATIC_HEIGHT
-        + result_rows_height(DROPDOWN_MAX_ROWS)
-        + shortcut_bar_height(show_keyboard_shortcuts)
-        + DROPDOWN_MAX_STATUS_HEIGHT
-}
-
 pub fn settings_command_matches(query: &str) -> bool {
     let query = query.trim();
     query.chars().count() >= 2 && "settings".starts_with(&query.to_ascii_lowercase())
@@ -260,939 +202,374 @@ pub fn lock_command_matches(query: &str) -> bool {
     query.chars().count() >= 2 && "lock".starts_with(&query.to_ascii_lowercase())
 }
 
-fn shortcut_bar_height(show_keyboard_shortcuts: bool) -> f32 {
-    if show_keyboard_shortcuts {
-        SHORTCUT_BAR_HEIGHT
-    } else {
-        0.0
-    }
-}
-
 pub fn draw_search(
-    _ctx: &Context,
-    ui: &mut Ui,
+    ctx: &Context,
     state: &mut SearchState,
-    show_keyboard_shortcuts: bool,
-    close_after_copy: bool,
-    restore_recent_item: bool,
-    lock_on_system_lock: bool,
-    lock_after_idle_timeout: bool,
-    idle_lock_timeout_minutes: u64,
-    ssh_agent_enabled: bool,
-    ssh_agent_socket_path: &str,
+    settings: &AppSettings,
     ssh_agent_status: &SshAgentStatus,
 ) -> Option<SearchAction> {
     let mut action = None;
+    let t = theme();
 
     if state.view == SearchView::Settings && !state.settings_command_visible() {
-        state.view = SearchView::Results;
-        state.selected = 0;
+        state.close_settings_panel();
+    }
+    // Keys are consumed before the search field is drawn so it does not also receive them.
+    handle_keys(ctx, state, settings, &mut action);
+
+    let status = if let Some(error) = &state.error {
+        Some((error.as_str(), t.danger))
+    } else {
+        state.warning.as_deref().map(|warning| (warning, t.warning))
+    };
+    if settings.show_keyboard_shortcuts || status.is_some() {
+        let hints: &[(&str, &str)] = match (settings.show_keyboard_shortcuts, state.view) {
+            (false, _) => &[],
+            (true, SearchView::Results) => &[("↑↓", "Navigate"), ("⏎", "Open"), ("Esc", "Hide")],
+            (true, SearchView::Settings) => {
+                &[("↑↓", "Select"), ("Space", "Toggle"), ("Esc", "Back")]
+            }
+        };
+        egui::TopBottomPanel::bottom("footer")
+            .frame(widgets::footer_frame())
+            .show(ctx, |ui| widgets::footer(ui, hints, status));
     }
 
-    ui.input_mut(|input| {
-        match state.view {
-            SearchView::Settings => {
-                if input.consume_key(egui::Modifiers::NONE, egui::Key::Space) {
-                    action = Some(SearchAction::SetKeyboardShortcuts(!show_keyboard_shortcuts));
-                }
-                if input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
-                    || input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)
-                {
-                    state.close_settings_panel();
-                }
-            }
-            SearchView::Results => {
-                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
-                    state.move_selection(1);
-                }
-                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
-                    state.move_selection(-1);
-                }
-                if input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
-                    || input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight)
-                {
-                    match state.open_selected_entry() {
-                        OpenSelectedAction::OpenResult(idx) => {
-                            action = Some(SearchAction::OpenResult(idx));
-                        }
-                        OpenSelectedAction::LockVault => {
-                            action = Some(SearchAction::LockVault);
-                        }
-                        OpenSelectedAction::None => {}
-                    }
-                }
-                if input.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
-                    action = Some(SearchAction::Quit);
-                }
-            }
-        }
-    });
+    egui::TopBottomPanel::top("header")
+        .frame(widgets::header_frame())
+        .show(ctx, |ui| draw_search_field(ui, state));
 
-    let panel_width = ui.available_width();
-    let capsule_width = (panel_width - SEARCH_HORIZONTAL_MARGIN * 2.0).max(260.0);
-    trace_search_ui("search", state, format!("panel_width={panel_width:.1}"));
-    ui.set_min_size(egui::vec2(panel_width, SEARCH_HEIGHT));
-    ui.add_space(SEARCH_TOP_MARGIN);
-    ui.horizontal(|ui| {
-        ui.add_space(SEARCH_HORIZONTAL_MARGIN);
-        let frame = egui::Frame::new()
-            .fill(egui::Color32::from_rgb(22, 24, 30))
-            .stroke(egui::Stroke::new(
-                1.0,
-                if ui.memory(|m| m.has_focus(egui::Id::new("vault-search-input"))) {
-                    egui::Color32::from_rgb(96, 164, 255)
+    egui::CentralPanel::default()
+        .frame(widgets::body_frame())
+        .show(ctx, |ui| {
+            if state.view == SearchView::Settings {
+                if let Some(settings_action) = draw_settings(ui, state, settings, ssh_agent_status)
+                {
+                    action = Some(settings_action);
+                }
+            } else if state.query.trim().is_empty() {
+                widgets::empty_state(
+                    ui,
+                    t.icon("\u{f002}", "🔎"),
+                    "Type to search your vault · \"settings\" and \"lock\" are commands",
+                    false,
+                );
+            } else if state.display_entry_count() == 0 {
+                if state.in_flight || state.last_query.is_empty() {
+                    widgets::empty_state(ui, "", "Searching…", true);
                 } else {
-                    egui::Color32::from_rgb(58, 64, 76)
-                },
-            ))
-            .inner_margin(egui::Margin::symmetric(14, 8))
-            .corner_radius(8.0);
-
-        frame.show(ui, |ui| {
-            ui.set_width(capsule_width - 28.0);
-            ui.horizontal_centered(|ui| {
-                ui.add_sized(
-                    [24.0, 32.0],
-                    egui::Label::new(
-                        egui::RichText::new("🔎")
-                            .size(18.0)
-                            .color(egui::Color32::from_rgb(130, 140, 156)),
-                    ),
-                );
-
-                let available_width = (ui.available_width() - 38.0).max(120.0);
-                let mut search_field = TextEdit::singleline(&mut state.query)
-                    .id(egui::Id::new("vault-search-input"))
-                    .hint_text("Search vault...")
-                    .font(egui::FontId::proportional(24.0))
-                    .margin(egui::Margin::symmetric(4, 4))
-                    .vertical_align(egui::Align::Center)
-                    .desired_width(available_width)
-                    .frame(false)
-                    .interactive(true);
-
-                if state.focus_search {
-                    search_field = search_field.cursor_at_end(true);
+                    widgets::empty_state(ui, t.icon("\u{f05e}", "∅"), "No matching items", false);
                 }
+            } else if let Some(row_action) = draw_results(ui, state) {
+                action = Some(row_action);
+            }
+        });
 
-                let search_response = ui.add_sized([available_width, 36.0], search_field);
+    action
+}
 
-                if state.focus_search {
-                    search_response.request_focus();
-                    state.focus_search = false;
+fn handle_keys(
+    ctx: &Context,
+    state: &mut SearchState,
+    settings: &AppSettings,
+    action: &mut Option<SearchAction>,
+) {
+    let path_focused = ctx.memory(|m| m.has_focus(egui::Id::new(SSH_PATH_INPUT_ID)));
+    let cursor_at_end = search_cursor_at_end(ctx, &state.query);
+    ctx.input_mut(|input| match state.view {
+        SearchView::Settings => {
+            if path_focused {
+                return;
+            }
+            if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                state.settings_selected = (state.settings_selected + 1) % SETTINGS_ROWS;
+            }
+            if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                state.settings_selected =
+                    (state.settings_selected + SETTINGS_ROWS - 1) % SETTINGS_ROWS;
+            }
+            if input.consume_key(egui::Modifiers::NONE, egui::Key::Space)
+                || input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+            {
+                *action = toggle_setting(state.settings_selected, settings);
+            }
+            if input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                || input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)
+            {
+                state.close_settings_panel();
+            }
+        }
+        SearchView::Results => {
+            if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                state.move_selection(1);
+            }
+            if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                state.move_selection(-1);
+            }
+            // Right arrow opens only at the end of the query; elsewhere it moves the cursor.
+            let open = input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                || (cursor_at_end
+                    && state.display_entry_count() > 0
+                    && input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight));
+            // Enter while a newer search runs would open a row from the previous query.
+            if open && !state.in_flight {
+                match state.open_selected_entry() {
+                    OpenSelectedAction::OpenResult(idx) => {
+                        *action = Some(SearchAction::OpenResult(idx))
+                    }
+                    OpenSelectedAction::LockVault => *action = Some(SearchAction::LockVault),
+                    OpenSelectedAction::None => {}
                 }
+            }
+        }
+    });
+}
 
-                ui.allocate_ui_with_layout(
-                    egui::vec2(30.0, 32.0),
-                    egui::Layout::right_to_left(egui::Align::Center),
-                    |ui| {
-                        if state.in_flight {
-                            ui.spinner();
-                        } else if !state.query.trim().is_empty() {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{}",
-                                    state.results.len().min(99)
-                                ))
-                                .size(13.0)
-                                .color(egui::Color32::from_rgb(150, 158, 170)),
-                            );
-                        }
-                    },
-                );
-            });
+fn search_cursor_at_end(ctx: &Context, query: &str) -> bool {
+    egui::TextEdit::load_state(ctx, egui::Id::new(SEARCH_INPUT_ID))
+        .and_then(|edit| edit.cursor.char_range())
+        .is_none_or(|range| range.primary.index >= query.chars().count())
+}
+
+fn draw_search_field(ui: &mut Ui, state: &mut SearchState) {
+    let t = theme();
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(t.icon("\u{f002}", "🔎"))
+                .size(t.input())
+                .color(t.text_muted),
+        );
+        ui.add_space(6.0);
+        let trailing = 44.0;
+        let mut field = egui::TextEdit::singleline(&mut state.query)
+            .id(egui::Id::new(SEARCH_INPUT_ID))
+            .font(t.font(t.input()))
+            .text_color(t.text_strong)
+            .hint_text(RichText::new("Search vault").color(t.text_faint))
+            .frame(false)
+            .vertical_align(egui::Align::Center);
+        if state.focus_search {
+            field = field.cursor_at_end(true);
+        }
+        let response = ui.add_sized([(ui.available_width() - trailing).max(120.0), 32.0], field);
+        if state.focus_search {
+            response.request_focus();
+            state.focus_search = false;
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if state.in_flight {
+                ui.add(egui::Spinner::new().color(t.text_muted));
+            } else if !state.query.trim().is_empty() && state.view == SearchView::Results {
+                ui.label(RichText::new(state.results.len().to_string()).color(t.text_faint));
+            }
         });
     });
-
-    if show_keyboard_shortcuts && !state.should_show_dropdown() {
-        draw_shortcut_bar_with_margins(ui, ShortcutKind::Search);
-    }
-
-    if state.should_show_dropdown() {
-        ui.add_space(DROPDOWN_GAP);
-        if let Some(dropdown_action) = draw_search_dropdown(
-            ui,
-            state,
-            show_keyboard_shortcuts,
-            close_after_copy,
-            restore_recent_item,
-            lock_on_system_lock,
-            lock_after_idle_timeout,
-            idle_lock_timeout_minutes,
-            ssh_agent_enabled,
-            ssh_agent_socket_path,
-            ssh_agent_status,
-        ) {
-            action = Some(dropdown_action);
-        }
-    }
-
-    action
 }
 
-pub fn draw_search_panel(
-    ctx: &Context,
-    ui: &mut Ui,
-    state: &mut SearchState,
-    show_keyboard_shortcuts: bool,
-    close_after_copy: bool,
-    restore_recent_item: bool,
-    lock_on_system_lock: bool,
-    lock_after_idle_timeout: bool,
-    idle_lock_timeout_minutes: u64,
-    ssh_agent_enabled: bool,
-    ssh_agent_socket_path: &str,
-    ssh_agent_status: &SshAgentStatus,
-) -> Option<SearchAction> {
-    draw_search(
-        ctx,
-        ui,
-        state,
-        show_keyboard_shortcuts,
-        close_after_copy,
-        restore_recent_item,
-        lock_on_system_lock,
-        lock_after_idle_timeout,
-        idle_lock_timeout_minutes,
-        ssh_agent_enabled,
-        ssh_agent_socket_path,
-        ssh_agent_status,
-    )
-}
-
-fn draw_search_dropdown(
-    ui: &mut Ui,
-    state: &mut SearchState,
-    show_keyboard_shortcuts: bool,
-    close_after_copy: bool,
-    restore_recent_item: bool,
-    lock_on_system_lock: bool,
-    lock_after_idle_timeout: bool,
-    idle_lock_timeout_minutes: u64,
-    ssh_agent_enabled: bool,
-    ssh_agent_socket_path: &str,
-    ssh_agent_status: &SshAgentStatus,
-) -> Option<SearchAction> {
+fn draw_results(ui: &mut Ui, state: &mut SearchState) -> Option<SearchAction> {
+    let t = theme();
     let mut action = None;
-    let panel_width = ui.available_width();
-    let dropdown_width = (panel_width - SEARCH_HORIZONTAL_MARGIN * 2.0).max(260.0);
-    let dropdown_height = state.dropdown_height(show_keyboard_shortcuts);
-    trace_search_ui(
-        "dropdown",
-        state,
-        format!("panel_width={panel_width:.1} dropdown_height={dropdown_height:.1}"),
-    );
-    ui.set_min_width(panel_width);
-    ui.set_min_height(dropdown_height);
+    let scroll_to = (state.scrolled_to != Some(state.selected)).then_some(state.selected);
+    state.scrolled_to = Some(state.selected);
 
-    let frame = egui::Frame::new()
-        .fill(egui::Color32::from_rgb(18, 20, 26))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(52, 58, 70)))
-        .inner_margin(egui::Margin::symmetric(8, 8))
-        .corner_radius(8.0)
-        .shadow(egui::epaint::Shadow {
-            offset: [0, 8],
-            blur: 24,
-            spread: 0,
-            color: egui::Color32::from_black_alpha(96),
-        });
-
-    ui.allocate_ui_with_layout(
-        egui::vec2(panel_width, dropdown_height),
-        egui::Layout::top_down(egui::Align::Min),
-        |ui| {
-            ui.add_space(7.0);
-            ui.horizontal(|ui| {
-                ui.add_space(SEARCH_HORIZONTAL_MARGIN);
-                frame.show(ui, |ui| {
-                    ui.set_width(dropdown_width - 16.0);
-                    if state.view == SearchView::Settings {
-                        if let Some(settings_action) = draw_settings_panel(
-                            ui,
-                            state,
-                            show_keyboard_shortcuts,
-                            close_after_copy,
-                            restore_recent_item,
-                            lock_on_system_lock,
-                            lock_after_idle_timeout,
-                            idle_lock_timeout_minutes,
-                            ssh_agent_enabled,
-                            ssh_agent_socket_path,
-                            ssh_agent_status,
-                        ) {
-                            action = Some(settings_action);
-                        }
-                    } else if state.in_flight && state.display_entry_count() == 0 {
-                        empty_message(ui, "Searching...");
-                    } else if state.display_entry_count() == 0 && !state.last_query.is_empty() {
-                        empty_message(ui, "No results");
-                    } else {
-                        if let Some(row_action) = draw_visible_entries(ui, state) {
-                            action = Some(row_action);
-                        }
-                    }
-
-                    if let Some(e) = &state.error {
-                        status_line(ui, egui::Color32::from_rgb(245, 110, 110), format!("⚠ {e}"));
-                    }
-                    if let Some(warning) = &state.warning {
-                        status_line(
-                            ui,
-                            egui::Color32::from_rgb(232, 178, 82),
-                            format!("⚠ {warning}"),
-                        );
-                    }
-                    if show_keyboard_shortcuts {
-                        let hints = if state.view == SearchView::Settings {
-                            ShortcutKind::Settings
-                        } else {
-                            ShortcutKind::Search
-                        };
-                        draw_shortcut_bar(ui, hints);
-                    }
-                });
-            });
-        },
-    );
-
-    action
-}
-
-fn draw_visible_entries(ui: &mut Ui, state: &mut SearchState) -> Option<SearchAction> {
-    let entry_count = state.display_entry_count();
-    let row_block_height = result_rows_height(entry_count);
-    let mut action = None;
-    trace_search_ui(
-        "rows",
-        state,
-        format!(
-            "available_width={:.1} row_block_height={row_block_height:.1}",
-            ui.available_width()
-        ),
-    );
-
-    ui.allocate_ui_with_layout(
-        egui::vec2(ui.available_width(), row_block_height),
-        egui::Layout::top_down(egui::Align::Min),
-        |ui| {
-            ui.set_min_height(row_block_height);
-            let first = visible_window_start(state.selected, entry_count);
-            let last = (first + DROPDOWN_MAX_ROWS).min(entry_count);
-
-            for i in first..last {
-                let selected = i == state.selected;
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for i in 0..state.display_entry_count() {
                 let Some(entry) = state.display_entry(i) else {
                     continue;
                 };
-                let resp = match entry {
-                    DisplayEntry::SettingsCommand => draw_settings_command_row(ui, selected),
-                    DisplayEntry::LockCommand => draw_lock_command_row(ui, selected),
+                let selected = i == state.selected;
+                let (rect, response) = widgets::row(ui, selected, widgets::ROW_HEIGHT);
+                match entry {
+                    DisplayEntry::SettingsCommand => widgets::paint_row_content(
+                        ui,
+                        rect,
+                        t.icon("\u{f013}", "⚙"),
+                        "Settings",
+                        Some("Quick access preferences"),
+                        Some("command"),
+                        selected,
+                    ),
+                    DisplayEntry::LockCommand => widgets::paint_row_content(
+                        ui,
+                        rect,
+                        t.icon("\u{f023}", "🔒"),
+                        "Lock vault",
+                        Some("Require the master password again"),
+                        Some("command"),
+                        selected,
+                    ),
                     DisplayEntry::VaultItem(idx) => {
-                        draw_result_row(ui, &state.results[idx], selected)
+                        let item = &state.results[idx];
+                        widgets::paint_row_content(
+                            ui,
+                            rect,
+                            t.item_icon(&item.item_type),
+                            &item.name,
+                            item.username.as_deref(),
+                            item.folder.as_deref(),
+                            selected,
+                        );
                     }
-                };
-
-                if resp.clicked() {
+                }
+                if scroll_to == Some(i) {
+                    ui.scroll_to_rect(rect, None);
+                }
+                if response.clicked() {
                     state.selected = i;
                     match entry {
                         DisplayEntry::SettingsCommand => {
                             state.open_selected_entry();
                         }
-                        DisplayEntry::LockCommand => {
-                            action = Some(SearchAction::LockVault);
-                        }
+                        DisplayEntry::LockCommand => action = Some(SearchAction::LockVault),
                         DisplayEntry::VaultItem(idx) => {
-                            action = Some(SearchAction::OpenResult(idx));
+                            action = Some(SearchAction::OpenResult(idx))
                         }
                     }
                 }
-
-                if i + 1 < last {
-                    ui.add_space(6.0);
-                }
             }
-        },
-    );
-
+        });
     action
 }
 
-fn draw_settings_command_row(ui: &mut Ui, selected: bool) -> egui::Response {
-    draw_command_row(ui, "⚙", "Settings", "Quick access preferences", selected)
+fn toggle_setting(row: usize, settings: &AppSettings) -> Option<SearchAction> {
+    Some(match row {
+        0 => SearchAction::SetKeyboardShortcuts(!settings.show_keyboard_shortcuts),
+        1 => SearchAction::SetCloseAfterCopy(!settings.close_after_copy),
+        2 => SearchAction::SetRestoreRecentItem(!settings.restore_recent_item),
+        3 => SearchAction::SetLockOnSystemLock(!settings.lock_on_system_lock),
+        4 => SearchAction::SetLockAfterIdleTimeout(!settings.lock_after_idle_timeout),
+        5 => SearchAction::SetSshAgentEnabled(!settings.ssh_agent_enabled),
+        _ => return None,
+    })
 }
 
-fn draw_lock_command_row(ui: &mut Ui, selected: bool) -> egui::Response {
-    draw_command_row(
-        ui,
-        "🔒",
-        "Lock Vault",
-        "Require master password again",
-        selected,
-    )
-}
-
-fn draw_command_row(
-    ui: &mut Ui,
-    icon: &str,
-    title: &str,
-    secondary: &str,
-    selected: bool,
-) -> egui::Response {
-    let row_size = egui::vec2(ui.available_width(), DROPDOWN_ROW_HEIGHT);
-    let (rect, response) = ui.allocate_exact_size(row_size, egui::Sense::click());
-    let bg = if selected {
-        egui::Color32::from_rgb(38, 58, 86)
-    } else if response.hovered() {
-        egui::Color32::from_rgb(28, 32, 42)
-    } else {
-        egui::Color32::from_rgb(23, 26, 34)
-    };
-    let stroke = if selected {
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(92, 150, 226))
-    } else if response.hovered() {
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 56, 70))
-    } else {
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(34, 38, 48))
-    };
-    let painter = ui.painter();
-    painter.rect_filled(rect, 6.0, bg);
-    painter.rect_stroke(rect, 6.0, stroke, egui::StrokeKind::Inside);
-
-    painter.text(
-        egui::pos2(rect.left() + 18.0, rect.center().y),
-        egui::Align2::CENTER_CENTER,
-        icon,
-        egui::FontId::proportional(18.0),
-        egui::Color32::from_rgb(236, 240, 248),
-    );
-    painter.text(
-        egui::pos2(rect.left() + 48.0, rect.top() + 13.0),
-        egui::Align2::LEFT_TOP,
-        title,
-        egui::FontId::proportional(15.5),
-        egui::Color32::from_rgb(235, 238, 244),
-    );
-    painter.text(
-        egui::pos2(rect.left() + 48.0, rect.top() + 35.0),
-        egui::Align2::LEFT_TOP,
-        secondary,
-        egui::FontId::proportional(12.0),
-        egui::Color32::from_rgb(120, 130, 146),
-    );
-
-    response
-}
-
-fn draw_settings_panel(
+fn draw_settings(
     ui: &mut Ui,
     state: &mut SearchState,
-    show_keyboard_shortcuts: bool,
-    close_after_copy: bool,
-    restore_recent_item: bool,
-    lock_on_system_lock: bool,
-    lock_after_idle_timeout: bool,
-    idle_lock_timeout_minutes: u64,
-    ssh_agent_enabled: bool,
-    ssh_agent_socket_path: &str,
+    settings: &AppSettings,
     ssh_agent_status: &SshAgentStatus,
 ) -> Option<SearchAction> {
+    let t = theme();
     let mut action = None;
-    ui.allocate_ui_with_layout(
-        egui::vec2(ui.available_width(), SETTINGS_PANEL_HEIGHT),
-        egui::Layout::top_down(egui::Align::Min),
-        |ui| {
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("Settings")
-                    .strong()
-                    .color(egui::Color32::from_rgb(235, 238, 244)),
-            );
-            ui.add_space(10.0);
+    let rows: [(bool, &str, &str); SETTINGS_ROWS] = [
+        (
+            settings.show_keyboard_shortcuts,
+            "Show keyboard shortcuts",
+            "Show the hint bar at the bottom of the window",
+        ),
+        (
+            settings.close_after_copy,
+            "Close after copying",
+            "Hide quick access after a value is copied",
+        ),
+        (
+            settings.restore_recent_item,
+            "Restore recent item",
+            "Reopen the last item for 30 seconds after hiding",
+        ),
+        (
+            settings.lock_on_system_lock,
+            "Lock when the screen locks",
+            "Lock the vault when the desktop session locks",
+        ),
+        (
+            settings.lock_after_idle_timeout,
+            "Lock after idle timeout",
+            "Lock the vault after the session has been idle",
+        ),
+        (
+            settings.ssh_agent_enabled,
+            "Enable SSH agent",
+            "Serve SSH keys from the vault over a local agent socket",
+        ),
+    ];
 
-            let mut value = show_keyboard_shortcuts;
-            let response = ui.checkbox(&mut value, "Show keyboard shortcuts");
-            if response.changed() {
-                action = Some(SearchAction::SetKeyboardShortcuts(value));
-            }
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new("Controls whether shortcut hint bars are displayed.")
-                    .small()
-                    .color(egui::Color32::from_rgb(126, 136, 152)),
-            );
-            ui.add_space(10.0);
-
-            let mut close_value = close_after_copy;
-            let response = ui.checkbox(&mut close_value, "Close after copying");
-            if response.changed() {
-                action = Some(SearchAction::SetCloseAfterCopy(close_value));
-            }
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new("Hides quick access after a value is copied.")
-                    .small()
-                    .color(egui::Color32::from_rgb(126, 136, 152)),
-            );
-            ui.add_space(10.0);
-
-            let mut restore_value = restore_recent_item;
-            let response = ui.checkbox(&mut restore_value, "Restore recent item");
-            if response.changed() {
-                action = Some(SearchAction::SetRestoreRecentItem(restore_value));
-            }
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new("Reopens the last item for 30 seconds after hiding.")
-                    .small()
-                    .color(egui::Color32::from_rgb(126, 136, 152)),
-            );
-            ui.add_space(10.0);
-
-            let mut lock_screen_value = lock_on_system_lock;
-            let response = ui.checkbox(&mut lock_screen_value, "Lock when screen locks");
-            if response.changed() {
-                action = Some(SearchAction::SetLockOnSystemLock(lock_screen_value));
-            }
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new("Locks the vault when the desktop session reports a lock screen.")
-                    .small()
-                    .color(egui::Color32::from_rgb(126, 136, 152)),
-            );
-            ui.add_space(10.0);
-
-            let mut idle_value = lock_after_idle_timeout;
-            let response = ui.checkbox(&mut idle_value, "Lock after idle timeout");
-            if response.changed() {
-                action = Some(SearchAction::SetLockAfterIdleTimeout(idle_value));
-            }
-            ui.add_space(6.0);
-            ui.add_enabled_ui(lock_after_idle_timeout, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("Idle timeout")
-                            .small()
-                            .color(egui::Color32::from_rgb(164, 172, 186)),
-                    );
-                    let mut minutes = idle_lock_timeout_minutes.clamp(1, 1440);
-                    let response = ui.add(
-                        egui::DragValue::new(&mut minutes)
-                            .range(1..=1440)
-                            .speed(1)
-                            .suffix(" min"),
-                    );
-                    if response.changed() {
-                        action = Some(SearchAction::SetIdleLockTimeoutMinutes(minutes));
-                    }
-                });
-            });
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new("Uses the desktop session idle state; default is 60 minutes.")
-                    .small()
-                    .color(egui::Color32::from_rgb(126, 136, 152)),
-            );
-            ui.add_space(10.0);
-
-            let mut ssh_enabled = ssh_agent_enabled;
-            let response = ui.checkbox(&mut ssh_enabled, "Enable SSH agent");
-            if response.changed() {
-                action = Some(SearchAction::SetSshAgentEnabled(ssh_enabled));
-            }
-            ui.add_space(6.0);
-
-            if state.ssh_agent_path_input.is_empty() {
-                state.ssh_agent_path_input = ssh_agent_socket_path.to_string();
-            }
-            ui.add_enabled_ui(ssh_agent_enabled, |ui| {
-                let response = ui.add_sized(
-                    [ui.available_width(), 24.0],
-                    TextEdit::singleline(&mut state.ssh_agent_path_input)
-                        .hint_text("$HOME/.bitwarden-ssh.sock")
-                        .font(egui::FontId::monospace(13.0)),
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for (idx, (on, title, description)) in rows.iter().enumerate() {
+                let response = widgets::toggle_row(
+                    ui,
+                    state.settings_selected == idx,
+                    *on,
+                    title,
+                    description,
                 );
-                if response.changed()
-                    && config::expand_ssh_agent_socket_path(&state.ssh_agent_path_input).is_ok()
-                {
-                    action = Some(SearchAction::SetSshAgentSocketPath(
-                        state.ssh_agent_path_input.clone(),
-                    ));
+                if response.clicked() {
+                    state.settings_selected = idx;
+                    action = toggle_setting(idx, settings);
                 }
-            });
-            ui.add_space(5.0);
-            match config::expand_ssh_agent_socket_path(&state.ssh_agent_path_input) {
-                Ok(path) => ui.label(
-                    egui::RichText::new(format!("Set SSH_AUTH_SOCK={}", path.display()))
-                        .small()
-                        .color(egui::Color32::from_rgb(126, 136, 152)),
-                ),
-                Err(e) => ui.label(
-                    egui::RichText::new(e)
-                        .small()
-                        .color(egui::Color32::from_rgb(245, 110, 110)),
-                ),
-            };
-            ui.add_space(5.0);
-            ui.label(
-                egui::RichText::new(&ssh_agent_status.message)
-                    .small()
-                    .color(if ssh_agent_status.active {
-                        egui::Color32::from_rgb(116, 214, 143)
-                    } else {
-                        egui::Color32::from_rgb(126, 136, 152)
-                    }),
-            );
-        },
-    );
-    action
-}
-
-fn draw_result_row(ui: &mut Ui, item: &BwItem, selected: bool) -> egui::Response {
-    let row_size = egui::vec2(ui.available_width(), DROPDOWN_ROW_HEIGHT);
-    let (rect, response) = ui.allocate_exact_size(row_size, egui::Sense::click());
-    let bg = if selected {
-        egui::Color32::from_rgb(38, 58, 86)
-    } else if response.hovered() {
-        egui::Color32::from_rgb(28, 32, 42)
-    } else {
-        egui::Color32::from_rgb(23, 26, 34)
-    };
-    let stroke = if selected {
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(92, 150, 226))
-    } else if response.hovered() {
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 56, 70))
-    } else {
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(34, 38, 48))
-    };
-    let painter = ui.painter();
-    painter.rect_filled(rect, 6.0, bg);
-    painter.rect_stroke(rect, 6.0, stroke, egui::StrokeKind::Inside);
-
-    let icon_pos = egui::pos2(rect.left() + 18.0, rect.center().y);
-    painter.text(
-        icon_pos,
-        egui::Align2::CENTER_CENTER,
-        item_icon(&item.item_type),
-        egui::FontId::proportional(18.0),
-        egui::Color32::from_rgb(236, 240, 248),
-    );
-
-    let title_pos = egui::pos2(rect.left() + 48.0, rect.top() + 13.0);
-    painter.text(
-        title_pos,
-        egui::Align2::LEFT_TOP,
-        truncate_text(&item.name, 34),
-        egui::FontId::proportional(15.5),
-        egui::Color32::from_rgb(235, 238, 244),
-    );
-
-    if let Some(username) = &item.username {
-        painter.text(
-            egui::pos2(rect.left() + 248.0, rect.top() + 15.0),
-            egui::Align2::LEFT_TOP,
-            truncate_text(username, 36),
-            egui::FontId::proportional(13.0),
-            egui::Color32::from_rgb(152, 162, 178),
-        );
-    }
-
-    let secondary = item.folder.as_deref().unwrap_or(&item.item_type);
-    painter.text(
-        egui::pos2(rect.left() + 48.0, rect.top() + 35.0),
-        egui::Align2::LEFT_TOP,
-        truncate_text(secondary, 56),
-        egui::FontId::proportional(12.0),
-        egui::Color32::from_rgb(120, 130, 146),
-    );
-
-    response
-}
-
-fn item_icon(item_type: &str) -> &'static str {
-    match item_type {
-        "login" => "🔑",
-        "secureNote" => "📝",
-        "card" => "💳",
-        "identity" => "👤",
-        "sshKey" => "🔐",
-        _ => "📦",
-    }
-}
-
-fn truncate_text(value: &str, max_chars: usize) -> String {
-    let mut chars = value.chars();
-    let mut truncated: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        truncated.push('…');
-    }
-    truncated
-}
-
-fn empty_message(ui: &mut Ui, text: &str) {
-    ui.add_space(12.0);
-    ui.horizontal_centered(|ui| {
-        if text == "Searching..." {
-            ui.spinner();
-        }
-        ui.label(
-            egui::RichText::new(text)
-                .italics()
-                .color(egui::Color32::from_rgb(148, 156, 170)),
-        );
-    });
-    ui.add_space(12.0);
-}
-
-fn status_line(ui: &mut Ui, color: egui::Color32, text: String) {
-    ui.add_space(6.0);
-    ui.label(egui::RichText::new(text).small().color(color));
-}
-
-fn draw_shortcut_bar_with_margins(ui: &mut Ui, kind: ShortcutKind) {
-    ui.horizontal(|ui| {
-        ui.add_space(SEARCH_HORIZONTAL_MARGIN);
-        let width = (ui.available_width() - SEARCH_HORIZONTAL_MARGIN).max(260.0);
-        ui.allocate_ui_with_layout(
-            egui::vec2(width, SHORTCUT_BAR_HEIGHT),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                draw_shortcut_bar(ui, kind);
-            },
-        );
-    });
-}
-
-fn draw_shortcut_bar(ui: &mut Ui, kind: ShortcutKind) {
-    ui.add_space(8.0);
-    let width = ui.available_width().max(0.0);
-    if width <= 1.0 {
-        return;
-    }
-
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(width, SHORTCUT_BAR_BODY_HEIGHT),
-        egui::Sense::hover(),
-    );
-    let painter = ui.painter();
-
-    painter.rect_filled(rect, 7.0, egui::Color32::from_rgb(15, 17, 22));
-    painter.rect_stroke(
-        rect,
-        7.0,
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(38, 44, 55)),
-        egui::StrokeKind::Inside,
-    );
-
-    let hints: &[(&str, &[KeyCap])] = match kind {
-        ShortcutKind::Search => &[
-            ("Navigate", &[KeyCap::UpDown]),
-            ("Open", &[KeyCap::Enter, KeyCap::Right]),
-            ("Hide", &[KeyCap::Esc]),
-        ],
-        ShortcutKind::Settings => &[
-            ("Toggle", &[KeyCap::Space]),
-            ("Back", &[KeyCap::Esc, KeyCap::Left]),
-        ],
-    };
-
-    let mut cursor = rect.left() + 10.0;
-    let right_limit = rect.right() - 10.0;
-    for (label, keys) in hints {
-        let label_width = shortcut_label_width(label);
-        let keys_width = keys
-            .iter()
-            .map(|key| keycap_size(*key).x)
-            .sum::<f32>()
-            + keys.len().saturating_sub(1) as f32 * 3.0;
-        let hint_width = label_width + 7.0 + keys_width;
-        if cursor + hint_width > right_limit {
-            break;
-        }
-
-        painter.text(
-            egui::pos2(cursor, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            *label,
-            egui::FontId::proportional(11.0),
-            egui::Color32::from_rgb(118, 128, 144),
-        );
-        cursor += label_width + 7.0;
-
-        for (idx, key) in keys.iter().enumerate() {
-            if idx > 0 {
-                cursor += 3.0;
+                if idx == 4 && settings.lock_after_idle_timeout {
+                    ui.horizontal(|ui| {
+                        ui.add_space(54.0);
+                        ui.label(RichText::new("Idle timeout").color(t.text_muted));
+                        let mut minutes = settings.idle_lock_timeout_minutes.clamp(1, 1440);
+                        let response = ui.add(
+                            egui::DragValue::new(&mut minutes)
+                                .range(1..=1440)
+                                .speed(1)
+                                .suffix(" min"),
+                        );
+                        // Save once a drag ends instead of on every intermediate value.
+                        if response.changed() && !response.dragged() || response.drag_stopped() {
+                            action = Some(SearchAction::SetIdleLockTimeoutMinutes(minutes));
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
             }
-            let size = keycap_size(*key);
-            let key_rect = egui::Rect::from_min_size(
-                egui::pos2(cursor, rect.center().y - size.y / 2.0),
-                size,
-            );
-            paint_keycap(painter, key_rect, *key);
-            cursor += size.x;
-        }
-        cursor += 14.0;
-    }
-}
 
-fn shortcut_label_width(label: &str) -> f32 {
-    label.chars().count() as f32 * 6.0
-}
-
-fn paint_keycap(painter: &egui::Painter, rect: egui::Rect, key: KeyCap) {
-    let bg = egui::Color32::from_rgb(35, 40, 50);
-    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(62, 70, 84));
-    painter.rect_filled(rect, 5.0, bg);
-    painter.rect_stroke(rect, 5.0, stroke, egui::StrokeKind::Inside);
-
-    match key {
-        KeyCap::Esc => {
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "Esc",
-                egui::FontId::proportional(10.0),
-                egui::Color32::from_rgb(202, 210, 222),
-            );
-        }
-        KeyCap::Space => {
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "Space",
-                egui::FontId::proportional(10.0),
-                egui::Color32::from_rgb(202, 210, 222),
-            );
-        }
-        KeyCap::UpDown => {
-            draw_arrow_icon(
-                painter,
-                rect.center() + egui::vec2(-3.5, 0.0),
-                egui::vec2(0.0, -4.5),
-            );
-            draw_arrow_icon(
-                painter,
-                rect.center() + egui::vec2(3.5, 0.0),
-                egui::vec2(0.0, 4.5),
-            );
-        }
-        KeyCap::Enter => {
-            let color = egui::Color32::from_rgb(202, 210, 222);
-            let stroke = egui::Stroke::new(1.4, color);
-            let left = rect.left() + 6.0;
-            let top = rect.top() + 6.0;
-            let mid_y = rect.center().y + 3.0;
-            let right = rect.right() - 6.0;
-            painter.line_segment([egui::pos2(right, top), egui::pos2(right, mid_y)], stroke);
-            painter.line_segment([egui::pos2(right, mid_y), egui::pos2(left, mid_y)], stroke);
-            painter.line_segment(
-                [egui::pos2(left, mid_y), egui::pos2(left + 4.0, mid_y - 3.0)],
-                stroke,
-            );
-            painter.line_segment(
-                [egui::pos2(left, mid_y), egui::pos2(left + 4.0, mid_y + 3.0)],
-                stroke,
-            );
-        }
-        KeyCap::Right => {
-            draw_arrow_icon(painter, rect.center(), egui::vec2(5.0, 0.0));
-        }
-        KeyCap::Left => {
-            draw_arrow_icon(painter, rect.center(), egui::vec2(-5.0, 0.0));
-        }
-    };
-}
-
-fn keycap_size(key: KeyCap) -> egui::Vec2 {
-    match key {
-        KeyCap::Esc => egui::vec2(28.0, 20.0),
-        KeyCap::Space => egui::vec2(42.0, 20.0),
-        KeyCap::Enter => egui::vec2(26.0, 20.0),
-        KeyCap::UpDown => egui::vec2(30.0, 20.0),
-        KeyCap::Right | KeyCap::Left => egui::vec2(22.0, 20.0),
-    }
-}
-
-fn draw_arrow_icon(painter: &egui::Painter, center: egui::Pos2, delta: egui::Vec2) {
-    let color = egui::Color32::from_rgb(202, 210, 222);
-    let stroke = egui::Stroke::new(1.5, color);
-    let start = center - delta * 0.55;
-    let end = center + delta * 0.55;
-    painter.line_segment([start, end], stroke);
-
-    let direction = delta.normalized();
-    let perp = egui::vec2(-direction.y, direction.x);
-    let back = end - direction * 4.0;
-    painter.line_segment([end, back + perp * 3.0], stroke);
-    painter.line_segment([end, back - perp * 3.0], stroke);
-}
-
-fn status_height(state: &SearchState) -> f32 {
-    let mut rows = 0.0;
-    if state.error.is_some() {
-        rows += 22.0;
-    }
-    if state.warning.is_some() {
-        rows += 22.0;
-    }
-    rows
-}
-
-fn result_rows_height(count: usize) -> f32 {
-    let rows = count.min(DROPDOWN_MAX_ROWS);
-    if rows == 0 {
-        0.0
-    } else {
-        rows as f32 * DROPDOWN_ROW_HEIGHT + (rows - 1) as f32 * 6.0
-    }
-}
-
-fn visible_window_start(selected: usize, count: usize) -> usize {
-    if count <= DROPDOWN_MAX_ROWS || selected < DROPDOWN_MAX_ROWS {
-        0
-    } else {
-        (selected + 1 - DROPDOWN_MAX_ROWS).min(count - DROPDOWN_MAX_ROWS)
-    }
-}
-
-fn trace_search_ui(label: &str, state: &SearchState, extra: String) {
-    if state.query.trim().is_empty() && state.results.is_empty() && !state.in_flight {
-        return;
-    }
-
-    let line = format!(
-        "pid={} label={} query_len={} results={} selected={} in_flight={} should_show={} height={:.1} {extra}",
-        std::process::id(),
-        label,
-        state.query.chars().count(),
-        state.results.len(),
-        state.selected,
-        state.in_flight,
-        state.should_show_dropdown(),
-        state.dropdown_height(true),
-    );
-
-    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-        std::sync::OnceLock::new();
-    let seen = SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-    let Ok(mut seen) = seen.lock() else {
-        return;
-    };
-    if !seen.insert(line.clone()) {
-        return;
-    }
-    drop(seen);
-
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/bw-quick-access-ui.log")
-    {
-        let _ = std::io::Write::write_all(&mut file, format!("{timestamp} {line}\n").as_bytes());
-    }
+            if settings.ssh_agent_enabled {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(54.0);
+                    ui.vertical(|ui| {
+                        let path = state
+                            .ssh_agent_path_input
+                            .get_or_insert_with(|| settings.ssh_agent_socket_path.clone());
+                        widgets::field_label(ui, "Socket path (Enter to apply)");
+                        let response = widgets::text_input(
+                            ui,
+                            egui::Id::new(SSH_PATH_INPUT_ID),
+                            path,
+                            "$HOME/.bitwarden-ssh.sock",
+                            false,
+                            t.body(),
+                        );
+                        let commit =
+                            response.lost_focus() && *path != settings.ssh_agent_socket_path;
+                        match config::expand_ssh_agent_socket_path(path) {
+                            Ok(expanded) => {
+                                if commit {
+                                    action =
+                                        Some(SearchAction::SetSshAgentSocketPath(path.clone()));
+                                }
+                                ui.label(
+                                    RichText::new(format!("SSH_AUTH_SOCK={}", expanded.display()))
+                                        .size(t.small())
+                                        .color(t.text_muted),
+                                );
+                            }
+                            Err(e) => widgets::error_line(ui, &e),
+                        }
+                        ui.label(
+                            RichText::new(&ssh_agent_status.message)
+                                .size(t.small())
+                                .color(if ssh_agent_status.active {
+                                    t.success
+                                } else {
+                                    t.text_muted
+                                }),
+                        );
+                    });
+                });
+            }
+        });
+    action
 }
 
 pub enum SearchAction {
@@ -1206,10 +583,7 @@ pub enum SearchAction {
     SetSshAgentEnabled(bool),
     SetSshAgentSocketPath(String),
     LockVault,
-    Quit,
 }
-
-use egui::TextEdit;
 
 #[cfg(test)]
 mod tests {
@@ -1223,57 +597,6 @@ mod tests {
             folder: None,
             item_type: "login".to_string(),
         }
-    }
-
-    #[test]
-    fn dropdown_shows_while_search_is_in_flight() {
-        let state = SearchState {
-            query: "tail".to_string(),
-            in_flight: true,
-            ..SearchState::default()
-        };
-
-        assert!(state.should_show_dropdown());
-    }
-
-    #[test]
-    fn dropdown_height_includes_multiple_uniform_rows() {
-        let state = SearchState {
-            query: "tail".to_string(),
-            results: vec![item("1"), item("2"), item("3")],
-            last_query: "tail".to_string(),
-            ..SearchState::default()
-        };
-
-        assert_eq!(
-            state.visible_result_rows_height(),
-            DROPDOWN_ROW_HEIGHT * 3.0 + 6.0 * 2.0
-        );
-        assert!(state.dropdown_height(true) > state.visible_result_rows_height());
-    }
-
-    #[test]
-    fn search_window_height_can_fit_full_dropdown() {
-        let state = SearchState {
-            query: "tail".to_string(),
-            results: vec![
-                item("1"),
-                item("2"),
-                item("3"),
-                item("4"),
-                item("5"),
-                item("6"),
-                item("7"),
-            ],
-            last_query: "tail".to_string(),
-            warning: Some("warning".to_string()),
-            error: Some("error".to_string()),
-            ..SearchState::default()
-        };
-
-        assert!(
-            search_window_height(true) >= SEARCH_HEIGHT + DROPDOWN_GAP + state.dropdown_height(true)
-        );
     }
 
     #[test]
@@ -1354,25 +677,6 @@ mod tests {
     }
 
     #[test]
-    fn disabling_shortcuts_removes_shortcut_height_from_layout() {
-        let state = SearchState {
-            query: "tail".to_string(),
-            results: vec![item("1"), item("2")],
-            last_query: "tail".to_string(),
-            ..SearchState::default()
-        };
-
-        assert_eq!(
-            state.dropdown_height(true) - state.dropdown_height(false),
-            SHORTCUT_BAR_HEIGHT
-        );
-        assert_eq!(
-            search_window_height(true) - search_window_height(false),
-            SHORTCUT_BAR_HEIGHT
-        );
-    }
-
-    #[test]
     fn reset_for_reopen_clears_stale_results_and_allows_same_query_again() {
         let mut state = SearchState {
             query: "tail".to_string(),
@@ -1396,14 +700,6 @@ mod tests {
 
         state.query = "tail".to_string();
         assert!(state.needs_search());
-    }
-
-    #[test]
-    fn visible_window_start_keeps_keyboard_selection_visible() {
-        assert_eq!(visible_window_start(0, 9), 0);
-        assert_eq!(visible_window_start(5, 9), 0);
-        assert_eq!(visible_window_start(6, 9), 1);
-        assert_eq!(visible_window_start(8, 9), 3);
     }
 
     #[test]

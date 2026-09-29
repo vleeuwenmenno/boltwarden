@@ -1,9 +1,10 @@
+mod app;
 mod auto_lock;
 mod backend;
-mod app;
 mod bw;
 mod clipboard;
 mod config;
+mod demo;
 mod instance;
 mod model;
 mod rpc;
@@ -20,12 +21,11 @@ use instance::LaunchCommand;
 use model::SshAgentStatus;
 use rpc::{RpcEndpoint, RpcEnvelope, RpcError, RpcRequest, RpcResponse, SearchPayload};
 use ssh_agent::{SshAgentHandle, SshApprovalService, SshKeyStore};
-use ui::search::{search_window_height, SEARCH_WIDTH};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tray::TrayCommand;
 
@@ -187,16 +187,22 @@ fn start_auto_lock_monitor(vault: Arc<Mutex<VaultState>>) {
 fn run_popup() -> eframe::Result<()> {
     debug_log("starting popup");
     // Read the token before the stdin listener thread starts consuming lines.
-    let backend = popup_rpc_socket_arg()
-        .map(|path| AppBackend::remote(rpc::RpcClient::new(path, read_popup_token())))
-        .unwrap_or_else(AppBackend::local);
+    let backend = if demo::enabled() {
+        AppBackend::demo()
+    } else {
+        popup_rpc_socket_arg()
+            .map(|path| AppBackend::remote(rpc::RpcClient::new(path, read_popup_token())))
+            .unwrap_or_else(AppBackend::local)
+    };
     let (popup_tx, popup_rx) = mpsc::channel();
     start_popup_stdin_listener(popup_tx);
-    let starts_in_search = backend.has_session();
     let result = eframe::run_native(
         "bw-quick-access",
-        popup_options(starts_in_search),
-        Box::new(|_cc| Ok(Box::new(App::new(backend, popup_rx)))),
+        popup_options(),
+        Box::new(|cc| {
+            ui::theme::theme().install(&cc.egui_ctx);
+            Ok(Box::new(App::new(backend, popup_rx)))
+        }),
     );
     debug_log("popup event loop exited");
     result
@@ -351,7 +357,9 @@ fn handle_rpc_request(
     ssh_approvals: &SshApprovalService,
 ) -> RpcResponse {
     match request {
-        RpcRequest::GetSshApproval => return RpcResponse::SshApproval(ssh_approvals.active_request()),
+        RpcRequest::GetSshApproval => {
+            return RpcResponse::SshApproval(ssh_approvals.active_request());
+        }
         RpcRequest::DecideSshApproval(decision) => {
             return RpcResponse::SshApprovalDecided(ssh_approvals.decide(decision));
         }
@@ -507,7 +515,9 @@ fn apply_ssh_agent_settings(state: &mut VaultState) -> SshAgentStatus {
         Err(e) => {
             stop_ssh_agent(state);
             state.ssh_key_store.set_locked();
-            state.ssh_approvals.clear_all("invalid SSH agent socket path");
+            state
+                .ssh_approvals
+                .clear_all("invalid SSH agent socket path");
             state.ssh_agent_status = ssh_agent::error_status(&settings, e);
             return state.ssh_agent_status.clone();
         }
@@ -641,7 +651,12 @@ fn show_popup(popup: &PopupChild, rpc_socket: Option<&RpcEndpoint>) {
 }
 
 fn show_approval_popup(popup: &PopupChild, rpc_socket: Option<&RpcEndpoint>) {
-    show_popup_with_command(popup, rpc_socket, "ssh-approval return\n", "ssh-approval auto\n");
+    show_popup_with_command(
+        popup,
+        rpc_socket,
+        "ssh-approval return\n",
+        "ssh-approval auto\n",
+    );
 }
 
 fn show_unlock_popup(popup: &PopupChild, rpc_socket: Option<&RpcEndpoint>) {
@@ -663,17 +678,15 @@ fn show_popup_with_command(
             Ok(Some(_)) => {
                 *child_slot = None;
             }
-            Ok(None) => {
-                match send_popup_command(process, existing_command) {
-                    Ok(()) => return,
-                    Err(e) => {
-                        debug_log(&format!("discarding stale popup process: {e}"));
-                        let _ = process.child.kill();
-                        let _ = process.child.wait();
-                        *child_slot = None;
-                    }
+            Ok(None) => match send_popup_command(process, existing_command) {
+                Ok(()) => return,
+                Err(e) => {
+                    debug_log(&format!("discarding stale popup process: {e}"));
+                    let _ = process.child.kill();
+                    let _ = process.child.wait();
+                    *child_slot = None;
                 }
-            }
+            },
             Err(_) => {
                 *child_slot = None;
             }
@@ -851,26 +864,17 @@ fn start_popup_stdin_listener(tx: mpsc::Sender<PopupCommand>) {
     });
 }
 
-fn popup_options(starts_in_search: bool) -> eframe::NativeOptions {
-    let settings = config::load_settings();
-    let initial_size = if starts_in_search {
-        [
-            SEARCH_WIDTH,
-            search_window_height(settings.show_keyboard_shortcuts),
-        ]
-    } else {
-        [SEARCH_WIDTH, 540.0]
-    };
-
+fn popup_options() -> eframe::NativeOptions {
     eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size(initial_size)
-            .with_min_inner_size([620.0, 72.0])
+            .with_inner_size(ui::widgets::WINDOW_SIZE)
+            .with_min_inner_size(ui::widgets::WINDOW_SIZE)
+            .with_max_inner_size(ui::widgets::WINDOW_SIZE)
             .with_title("bw-quick-access")
+            // Wayland app_id / X11 class, so compositor window rules can match the popup.
+            .with_app_id("bw-quick-access")
             .with_decorations(false)
             .with_resizable(false)
-            .with_transparent(true)
-            .with_clamp_size_to_monitor_size(true)
             .with_always_on_top()
             .with_active(true),
         run_and_return: true,
