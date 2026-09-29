@@ -2,7 +2,7 @@ use crate::bw::TwoFactorProvider;
 use crate::config::AppSettings;
 use crate::model::{
     BwItem, BwItemDetail, SshAgentStatus, SshApprovalDecision, SshApprovalRequest,
-    SshApprovalStatus, SyncStatus,
+    SshApprovalStatus, SyncStatus, TotpCode,
 };
 use std::fs;
 use std::io::{self, Read, Write};
@@ -51,7 +51,7 @@ pub enum RpcResponse {
     TwoFactor(Result<(), RpcError>),
     Search(Result<SearchPayload, RpcError>),
     Detail(Result<BwItemDetail, RpcError>),
-    Totp(Result<String, RpcError>),
+    Totp(Result<TotpCode, RpcError>),
     SettingsApplied(Result<SshAgentStatus, String>),
     SshAgentStatus(SshAgentStatus),
     SshApproval(Option<SshApprovalRequest>),

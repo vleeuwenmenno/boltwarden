@@ -1,6 +1,6 @@
 use crate::backend::{AppBackend, BackendError};
 use crate::config::{self, AppSettings};
-use crate::model::{BwItem, BwItemDetail, SshAgentStatus, SyncStatus};
+use crate::model::{BwItem, BwItemDetail, SshAgentStatus, SyncStatus, TotpCode};
 use crate::ui::auth::{draw_auth, AuthAction, AuthState};
 use crate::ui::footer::draw_footer;
 use crate::ui::search::{
@@ -44,8 +44,14 @@ enum BwResponse {
         warning: Option<String>,
         status: SyncStatus,
     },
-    Detail(Result<BwItemDetail, BackendError>),
-    Totp(Result<String, BackendError>),
+    Detail {
+        id: String,
+        result: Result<BwItemDetail, BackendError>,
+    },
+    Totp {
+        id: String,
+        result: Result<TotpCode, BackendError>,
+    },
     SshApprovalDecision(Result<(), String>),
 }
 
@@ -203,8 +209,8 @@ impl App {
         let tx = self.tx.clone();
         let backend = self.backend.clone();
         std::thread::spawn(move || {
-            let res = backend.get_item(&id);
-            let _ = tx.send(BwResponse::Detail(res));
+            let result = backend.get_item(&id);
+            let _ = tx.send(BwResponse::Detail { id, result });
         });
     }
 
@@ -212,8 +218,8 @@ impl App {
         let tx = self.tx.clone();
         let backend = self.backend.clone();
         std::thread::spawn(move || {
-            let res = backend.get_totp(&id);
-            let _ = tx.send(BwResponse::Totp(res));
+            let result = backend.get_totp(&id);
+            let _ = tx.send(BwResponse::Totp { id, result });
         });
     }
 
@@ -301,11 +307,13 @@ impl App {
                     warning,
                     status,
                 } => {
+                    // Clear in_flight before the stale check, otherwise needs_search() stays
+                    // false and a query typed while this request ran would never be sent.
+                    self.search_state.in_flight = false;
                     if query != self.search_state.query.trim() {
                         ctx.request_repaint();
                         continue;
                     }
-                    self.search_state.in_flight = false;
                     match result {
                         Ok(items) => {
                             self.search_state.results = items;
@@ -322,9 +330,14 @@ impl App {
                         }
                     }
                 }
-                BwResponse::Detail(res) => {
+                BwResponse::Detail { id, result } => {
+                    // A reply for an item the user already navigated away from must not
+                    // overwrite the item that is open now.
+                    if self.summary_state.detail_id.as_deref() != Some(id.as_str()) {
+                        continue;
+                    }
                     self.summary_state.in_flight = false;
-                    match res {
+                    match result {
                         Ok(detail) => {
                             self.summary_state.detail = Some(detail);
                             self.summary_state.error = None;
@@ -336,9 +349,12 @@ impl App {
                         }
                     }
                 }
-                BwResponse::Totp(res) => {
+                BwResponse::Totp { id, result } => {
+                    if self.summary_state.detail_id.as_deref() != Some(id.as_str()) {
+                        continue;
+                    }
                     self.summary_state.totp_in_flight = false;
-                    match res {
+                    match result {
                         Ok(code) => {
                             self.summary_state.totp = Some(code);
                             self.summary_state.totp_fetched_at = Some(Instant::now());
@@ -746,9 +762,13 @@ impl eframe::App for App {
 
         self.poll_responses(ctx);
 
+        // Screens with their own Escape-to-back handling must not hide the whole window.
+        let escape_handled_by_screen = self.screen == Screen::TwoFactor
+            || (self.screen == Screen::Search && self.search_state.view == SearchView::Settings);
         if self.window_visible
             && !self.summary_open
             && self.screen != Screen::SshApproval
+            && !escape_handled_by_screen
             && Self::escape_pressed(ctx)
         {
             debug_log("hide because escape was pressed");

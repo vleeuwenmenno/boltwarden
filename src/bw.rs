@@ -1,6 +1,6 @@
 use crate::config;
 use crate::config::{SavedKdf, SavedSession};
-use crate::model::{BwItem, BwItemDetail, CustomField, SshKey, SyncStatus};
+use crate::model::{BwItem, BwItemDetail, CustomField, SshKey, SyncStatus, TotpCode};
 use aes::Aes256;
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
@@ -338,10 +338,14 @@ impl BwClient {
             .ok_or(BwError::NotFound)
     }
 
-    pub fn get_totp(&self, id: &str) -> Result<String, BwError> {
+    pub fn get_totp(&self, id: &str) -> Result<TotpCode, BwError> {
         let detail = self.get_item(id)?;
         let seed = detail.totp.as_deref().ok_or(BwError::NotFound)?;
-        generate_totp(seed)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| BwError::Cli(format!("system clock error: {e}")))?
+            .as_secs();
+        generate_totp(seed, now)
     }
 
     pub fn ssh_keys(&self) -> Result<Vec<SshKey>, BwError> {
@@ -1682,26 +1686,24 @@ impl EncString {
     }
 }
 
-fn generate_totp(seed: &str) -> Result<String, BwError> {
+fn generate_totp(seed: &str, now_unix: u64) -> Result<TotpCode, BwError> {
     let (secret, digits, period) = parse_totp_seed(seed)?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| BwError::Cli(format!("system clock error: {e}")))?
-        .as_secs();
-    let counter = now / period;
-    let mut msg = [0u8; 8];
-    msg.copy_from_slice(&counter.to_be_bytes());
+    let step = now_unix / period;
     let mut mac = HmacSha1::new_from_slice(&secret)
         .map_err(|e| BwError::Parse(format!("invalid TOTP key: {e}")))?;
-    mac.update(&msg);
+    mac.update(&step.to_be_bytes());
     let hash = mac.finalize().into_bytes();
     let offset = (hash[19] & 0x0f) as usize;
-    let code = (((hash[offset] & 0x7f) as u32) << 24)
-        | ((hash[offset + 1] as u32) << 16)
-        | ((hash[offset + 2] as u32) << 8)
-        | (hash[offset + 3] as u32);
-    let modulo = 10u32.pow(digits);
-    Ok(format!("{:0width$}", code % modulo, width = digits as usize))
+    let code = (((hash[offset] & 0x7f) as u64) << 24)
+        | ((hash[offset + 1] as u64) << 16)
+        | ((hash[offset + 2] as u64) << 8)
+        | (hash[offset + 3] as u64);
+    let modulo = 10u64.pow(digits);
+    Ok(TotpCode {
+        code: format!("{:0width$}", code % modulo, width = digits as usize),
+        period,
+        step,
+    })
 }
 
 fn parse_totp_seed(seed: &str) -> Result<(Vec<u8>, u32, u64), BwError> {
@@ -1737,6 +1739,14 @@ fn parse_totp_seed(seed: &str) -> Result<(Vec<u8>, u32, u64), BwError> {
         .decode(normalized.as_bytes())
         .or_else(|_| BASE32.decode(normalized.as_bytes()))
         .map_err(|e| BwError::Parse(format!("invalid TOTP secret: {e}")))?;
+    // Item data is untrusted: period 0 would divide by zero and more than 10 digits
+    // overflows the modulo. Bitwarden itself only produces 6..=10 digits.
+    if !(1..=10).contains(&digits) {
+        return Err(BwError::Parse(format!("unsupported TOTP digits: {digits}")));
+    }
+    if period == 0 {
+        return Err(BwError::Parse("TOTP period must be greater than 0".into()));
+    }
     Ok((decoded, digits, period))
 }
 
@@ -1866,6 +1876,45 @@ mod tests {
         assert_eq!(secret, b"Hello!\xde\xad\xbe\xef");
         assert_eq!(digits, 8);
         assert_eq!(period, 60);
+    }
+
+    // RFC 6238 appendix B, SHA1 variant (secret is ASCII "12345678901234567890").
+    #[test]
+    fn generates_rfc6238_totp_codes() {
+        let seed = "otpauth://totp/rfc?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=8";
+        for (time, expected) in [
+            (59, "94287082"),
+            (1111111109, "07081804"),
+            (1111111111, "14050471"),
+            (1234567890, "89005924"),
+            (2000000000, "69279037"),
+            (20000000000, "65353130"),
+        ] {
+            assert_eq!(generate_totp(seed, time).unwrap().code, expected, "time {time}");
+        }
+    }
+
+    #[test]
+    fn totp_code_tracks_its_time_step() {
+        let code = generate_totp("JBSWY3DPEHPK3PXP", 65).unwrap();
+
+        assert_eq!(code.code.len(), 6);
+        assert_eq!((code.period, code.step), (30, 2));
+        assert_eq!(code.seconds_remaining(65), 25);
+        assert!(code.is_current(89));
+        assert!(!code.is_current(90));
+    }
+
+    #[test]
+    fn rejects_totp_settings_that_would_panic() {
+        for seed in [
+            "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=0",
+            "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=0",
+            "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=11",
+            "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=4294967295",
+        ] {
+            assert!(generate_totp(seed, 59).is_err(), "{seed}");
+        }
     }
 
     #[test]

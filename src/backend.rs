@@ -2,7 +2,7 @@ use crate::bw::{BwClient, BwError, TwoFactorChallenge, TwoFactorProvider};
 use crate::config::{self, AppSettings};
 use crate::model::{
     BwItem, BwItemDetail, SshAgentStatus, SshApprovalDecision, SshApprovalRequest,
-    SshApprovalStatus, SyncStatus,
+    SshApprovalStatus, SyncStatus, TotpCode,
 };
 use crate::rpc::{RpcClient, RpcError, RpcRequest, RpcResponse};
 use std::fmt;
@@ -151,7 +151,7 @@ impl AppBackend {
         }
     }
 
-    pub fn get_totp(&self, id: &str) -> Result<String, BackendError> {
+    pub fn get_totp(&self, id: &str) -> Result<TotpCode, BackendError> {
         match self {
             Self::Local(local) => local
                 .lock()

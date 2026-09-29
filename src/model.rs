@@ -29,6 +29,25 @@ pub struct BwItemDetail {
     pub ssh_key: Option<SshKey>,
 }
 
+/// A generated TOTP code plus the time step it belongs to, so the UI can show the real
+/// remaining validity and refresh exactly when the step rolls over.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TotpCode {
+    pub code: String,
+    pub period: u64,
+    pub step: u64,
+}
+
+impl TotpCode {
+    pub fn seconds_remaining(&self, now_unix: u64) -> u64 {
+        self.period - now_unix % self.period
+    }
+
+    pub fn is_current(&self, now_unix: u64) -> bool {
+        now_unix / self.period == self.step
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SshKey {
     pub id: String,

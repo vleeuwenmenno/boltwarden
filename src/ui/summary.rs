@@ -1,4 +1,4 @@
-use crate::model::BwItemDetail;
+use crate::model::{BwItemDetail, TotpCode};
 use crate::clipboard;
 use egui::{Context, Ui};
 use std::time::Instant;
@@ -11,7 +11,7 @@ pub struct SummaryState {
     pub reveal_fields: std::collections::HashSet<usize>,
     pub selected_field: usize,
     pub copied_field: Option<(String, Instant)>,
-    pub totp: Option<String>,
+    pub totp: Option<TotpCode>,
     pub totp_fetched_at: Option<Instant>,
     pub totp_in_flight: bool,
 }
@@ -58,9 +58,11 @@ impl SummaryState {
         if self.detail.as_ref().and_then(|d| d.totp.as_ref()).is_none() {
             return false;
         }
-        match self.totp_fetched_at {
-            None => true,
-            Some(t) => t.elapsed() >= std::time::Duration::from_secs(30),
+        match (&self.totp, self.totp_fetched_at) {
+            (Some(code), _) => !code.is_current(unix_now()),
+            (None, None) => true,
+            // Last fetch failed: retry every 30 seconds.
+            (None, Some(t)) => t.elapsed() >= std::time::Duration::from_secs(30),
         }
     }
 }
@@ -269,8 +271,19 @@ pub fn draw_summary(
                 );
             }
             if detail.totp.is_some() {
-                let totp_display = state.totp.clone().unwrap_or_else(|| "------".into());
-                let remaining = totp_remaining(&state.totp_fetched_at);
+                let totp_display = state
+                    .totp
+                    .as_ref()
+                    .map(|code| code.code.clone())
+                    .unwrap_or_else(|| "------".into());
+                let remaining = state
+                    .totp
+                    .as_ref()
+                    .map(|code| {
+                        let now = unix_now();
+                        // Show 0s while the refresh for the next step is still in flight.
+                        if code.is_current(now) { code.seconds_remaining(now) } else { 0 }
+                    });
                 let selected = field_idx == state.selected_field;
                 let bg = if selected {
                     egui::Color32::from_rgb(50, 70, 110)
@@ -376,14 +389,11 @@ fn toggle_reveal(state: &mut SummaryState, idx: usize) {
     }
 }
 
-fn totp_remaining(fetched_at: &Option<Instant>) -> Option<u64> {
-    let t = fetched_at.as_ref()?;
-    let elapsed = t.elapsed().as_secs();
-    if elapsed >= 30 {
-        Some(0)
-    } else {
-        Some(30 - elapsed)
-    }
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 pub enum SummaryAction {
