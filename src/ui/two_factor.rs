@@ -107,6 +107,7 @@ pub fn draw_two_factor(ctx: &Context, state: &mut TwoFactorState) -> Option<TwoF
                                 ui,
                                 rect,
                                 if selected { "●" } else { "○" },
+                                None,
                                 provider.label(),
                                 None,
                                 None,

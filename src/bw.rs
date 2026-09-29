@@ -289,6 +289,11 @@ impl BwClient {
         Ok(ranked_search_results(&self.items, &needle))
     }
 
+    /// Base URL of the icon service that belongs to this server.
+    pub fn icons_url(&self) -> String {
+        crate::icons::icons_url_for_server(&self.base_url)
+    }
+
     pub fn sync_warning(&self) -> Option<String> {
         self.sync_warning.clone()
     }
@@ -570,6 +575,7 @@ fn ranked_search_results(items: &[BwItemDetail], needle: &str) -> Vec<BwItem> {
                         username: item.username.clone(),
                         folder: item.folder.clone(),
                         item_type: item.item_type.clone(),
+                        icon_host: crate::icons::icon_host(&item.uris),
                     },
                 )
             })

@@ -1,4 +1,5 @@
 use crate::config::{self, AppSettings};
+use crate::icons::IconCache;
 use crate::model::{BwItem, SshAgentStatus, SyncStatus};
 use crate::ui::theme::theme;
 use crate::ui::widgets;
@@ -6,7 +7,8 @@ use egui::{Context, RichText, Ui};
 
 const SEARCH_INPUT_ID: &str = "vault-search-input";
 const SSH_PATH_INPUT_ID: &str = "settings-ssh-socket-path";
-const SETTINGS_ROWS: usize = 6;
+const SETTINGS_ROWS: usize = 7;
+const IDLE_TIMEOUT_ROW: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchView {
@@ -207,6 +209,7 @@ pub fn draw_search(
     state: &mut SearchState,
     settings: &AppSettings,
     ssh_agent_status: &SshAgentStatus,
+    icons: &mut IconCache,
 ) -> Option<SearchAction> {
     let mut action = None;
     let t = theme();
@@ -260,7 +263,7 @@ pub fn draw_search(
                 } else {
                     widgets::empty_state(ui, t.icon("\u{f05e}", "∅"), "No matching items", false);
                 }
-            } else if let Some(row_action) = draw_results(ui, state) {
+            } else if let Some(row_action) = draw_results(ui, state, icons) {
                 action = Some(row_action);
             }
         });
@@ -366,7 +369,7 @@ fn draw_search_field(ui: &mut Ui, state: &mut SearchState) {
     });
 }
 
-fn draw_results(ui: &mut Ui, state: &mut SearchState) -> Option<SearchAction> {
+fn draw_results(ui: &mut Ui, state: &mut SearchState, icons: &mut IconCache) -> Option<SearchAction> {
     let t = theme();
     let mut action = None;
     let scroll_to = (state.scrolled_to != Some(state.selected)).then_some(state.selected);
@@ -387,6 +390,7 @@ fn draw_results(ui: &mut Ui, state: &mut SearchState) -> Option<SearchAction> {
                         ui,
                         rect,
                         t.icon("\u{f013}", "⚙"),
+                        None,
                         "Settings",
                         Some("Quick access preferences"),
                         Some("command"),
@@ -396,6 +400,7 @@ fn draw_results(ui: &mut Ui, state: &mut SearchState) -> Option<SearchAction> {
                         ui,
                         rect,
                         t.icon("\u{f023}", "🔒"),
+                        None,
                         "Lock vault",
                         Some("Require the master password again"),
                         Some("command"),
@@ -403,10 +408,15 @@ fn draw_results(ui: &mut Ui, state: &mut SearchState) -> Option<SearchAction> {
                     ),
                     DisplayEntry::VaultItem(idx) => {
                         let item = &state.results[idx];
+                        let image = item
+                            .icon_host
+                            .as_deref()
+                            .and_then(|host| icons.get(ui.ctx(), host));
                         widgets::paint_row_content(
                             ui,
                             rect,
                             t.item_icon(&item.item_type),
+                            image.as_ref(),
                             &item.name,
                             item.username.as_deref(),
                             item.folder.as_deref(),
@@ -439,9 +449,10 @@ fn toggle_setting(row: usize, settings: &AppSettings) -> Option<SearchAction> {
         0 => SearchAction::SetKeyboardShortcuts(!settings.show_keyboard_shortcuts),
         1 => SearchAction::SetCloseAfterCopy(!settings.close_after_copy),
         2 => SearchAction::SetRestoreRecentItem(!settings.restore_recent_item),
-        3 => SearchAction::SetLockOnSystemLock(!settings.lock_on_system_lock),
-        4 => SearchAction::SetLockAfterIdleTimeout(!settings.lock_after_idle_timeout),
-        5 => SearchAction::SetSshAgentEnabled(!settings.ssh_agent_enabled),
+        3 => SearchAction::SetShowWebsiteIcons(!settings.show_website_icons),
+        4 => SearchAction::SetLockOnSystemLock(!settings.lock_on_system_lock),
+        IDLE_TIMEOUT_ROW => SearchAction::SetLockAfterIdleTimeout(!settings.lock_after_idle_timeout),
+        6 => SearchAction::SetSshAgentEnabled(!settings.ssh_agent_enabled),
         _ => return None,
     })
 }
@@ -469,6 +480,11 @@ fn draw_settings(
             settings.restore_recent_item,
             "Restore recent item",
             "Reopen the last item for 30 seconds after hiding",
+        ),
+        (
+            settings.show_website_icons,
+            "Show website icons",
+            "Fetch icons from your server's icon service; cached for 30 days",
         ),
         (
             settings.lock_on_system_lock,
@@ -503,7 +519,7 @@ fn draw_settings(
                     state.settings_selected = idx;
                     action = toggle_setting(idx, settings);
                 }
-                if idx == 4 && settings.lock_after_idle_timeout {
+                if idx == IDLE_TIMEOUT_ROW && settings.lock_after_idle_timeout {
                     ui.horizontal(|ui| {
                         ui.add_space(54.0);
                         ui.label(RichText::new("Idle timeout").color(t.text_muted));
@@ -577,6 +593,7 @@ pub enum SearchAction {
     SetKeyboardShortcuts(bool),
     SetCloseAfterCopy(bool),
     SetRestoreRecentItem(bool),
+    SetShowWebsiteIcons(bool),
     SetLockOnSystemLock(bool),
     SetLockAfterIdleTimeout(bool),
     SetIdleLockTimeoutMinutes(u64),
@@ -596,6 +613,7 @@ mod tests {
             username: None,
             folder: None,
             item_type: "login".to_string(),
+            icon_host: None,
         }
     }
 

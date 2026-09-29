@@ -5,6 +5,7 @@ mod bw;
 mod clipboard;
 mod config;
 mod demo;
+mod icons;
 mod instance;
 mod model;
 mod rpc;
@@ -403,6 +404,7 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
                 items,
                 warning: state.bw.sync_warning(),
                 status: state.bw.sync_status(),
+                icons_url: Some(state.bw.icons_url()),
             });
             RpcResponse::Search(result.map_err(rpc_error_from_bw))
         }
@@ -872,7 +874,9 @@ fn popup_options() -> eframe::NativeOptions {
             .with_max_inner_size(ui::widgets::WINDOW_SIZE)
             .with_title("bw-quick-access")
             // Wayland app_id / X11 class, so compositor window rules can match the popup.
-            .with_app_id("bw-quick-access")
+            // Demo mode shows no real secrets, so it gets its own id and escapes rules
+            // such as no_screen_share (handy for screenshots).
+            .with_app_id(if demo::enabled() { "bw-quick-access-demo" } else { "bw-quick-access" })
             .with_decorations(false)
             .with_resizable(false)
             .with_always_on_top()

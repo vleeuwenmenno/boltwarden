@@ -49,11 +49,14 @@ pub fn row(ui: &mut Ui, selected: bool, height: f32) -> (egui::Rect, Response) {
     (rect, response)
 }
 
-/// Draws icon + title + secondary text into a row rect, Omarchy-menu style.
+/// Draws icon + title + secondary text into a row rect, Omarchy-menu style. `image`
+/// (a website icon) replaces the glyph `icon` when it is available.
+#[allow(clippy::too_many_arguments)]
 pub fn paint_row_content(
     ui: &Ui,
     rect: egui::Rect,
     icon: &str,
+    image: Option<&egui::TextureHandle>,
     title: &str,
     secondary: Option<&str>,
     trailing: Option<&str>,
@@ -66,17 +69,26 @@ pub fn paint_row_content(
     } else {
         t.text_strong
     };
-    painter.text(
-        egui::pos2(rect.left() + 20.0, rect.center().y),
-        egui::Align2::CENTER_CENTER,
-        icon,
-        t.font(t.body()),
-        if selected {
-            t.selected_text
-        } else {
-            t.text_muted
-        },
-    );
+    let icon_center = egui::pos2(rect.left() + 20.0, rect.center().y);
+    match image {
+        Some(texture) => {
+            painter.image(
+                texture.id(),
+                egui::Rect::from_center_size(icon_center, egui::vec2(20.0, 20.0)),
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+        None => {
+            painter.text(
+                icon_center,
+                egui::Align2::CENTER_CENTER,
+                icon,
+                t.font(t.body()),
+                if selected { t.selected_text } else { t.text_muted },
+            );
+        }
+    }
 
     let text_left = rect.left() + 42.0;
     let trailing_width = trailing

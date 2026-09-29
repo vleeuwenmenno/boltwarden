@@ -31,6 +31,7 @@ pub struct SearchResult {
     pub items: Vec<BwItem>,
     pub warning: Option<String>,
     pub status: SyncStatus,
+    pub icons_url: Option<String>,
 }
 
 impl AppBackend {
@@ -128,6 +129,7 @@ impl AppBackend {
                     items,
                     warning: backend.bw.sync_warning(),
                     status: backend.bw.sync_status(),
+                    icons_url: Some(backend.bw.icons_url()),
                 })
             }
             Self::Demo(demo) => demo.list_items(query),
@@ -139,6 +141,7 @@ impl AppBackend {
                         items: payload.items,
                         warning: payload.warning,
                         status: payload.status,
+                        icons_url: payload.icons_url,
                     })
                     .map_err(BackendError::from),
                 Ok(_) => Err(BackendError::Message(

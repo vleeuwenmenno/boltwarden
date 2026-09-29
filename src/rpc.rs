@@ -75,6 +75,8 @@ pub struct SearchPayload {
     pub items: Vec<BwItem>,
     pub warning: Option<String>,
     pub status: SyncStatus,
+    #[serde(default)]
+    pub icons_url: Option<String>,
 }
 
 /// What the popup sends: the request plus the per-daemon secret proving it was started

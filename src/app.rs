@@ -1,5 +1,6 @@
 use crate::backend::{AppBackend, BackendError};
 use crate::config::{self, AppSettings};
+use crate::icons::IconCache;
 use crate::model::{BwItem, BwItemDetail, SshAgentStatus, SyncStatus, TotpCode};
 use crate::ui::auth::{AuthAction, AuthState, draw_auth};
 use crate::ui::search::{SearchAction, SearchState, SearchView, draw_search};
@@ -34,6 +35,7 @@ enum BwResponse {
         result: Result<Vec<BwItem>, BackendError>,
         warning: Option<String>,
         status: SyncStatus,
+        icons_url: Option<String>,
     },
     Detail {
         id: String,
@@ -70,6 +72,7 @@ pub struct App {
     ssh_approval_state: SshApprovalUiState,
     ssh_approval_return: Option<(Screen, bool)>,
     summary_state: SummaryState,
+    icons: IconCache,
     rx: mpsc::Receiver<BwResponse>,
     tx: mpsc::Sender<BwResponse>,
     popup_rx: mpsc::Receiver<PopupCommand>,
@@ -142,6 +145,7 @@ impl App {
             popup_rx,
             auth_auto_hide: false,
             auth_inhibit_focus_hide: false,
+            icons: IconCache::new(settings.show_website_icons),
             settings,
             ssh_agent_status,
             window_visible: true,
@@ -183,15 +187,16 @@ impl App {
         let tx = self.tx.clone();
         let backend = self.backend.clone();
         std::thread::spawn(move || {
-            let (res, warning, status) = match backend.list_items(&query) {
-                Ok(result) => (Ok(result.items), result.warning, result.status),
-                Err(error) => (Err(error), None, SyncStatus::default()),
+            let (res, warning, status, icons_url) = match backend.list_items(&query) {
+                Ok(result) => (Ok(result.items), result.warning, result.status, result.icons_url),
+                Err(error) => (Err(error), None, SyncStatus::default(), None),
             };
             let _ = tx.send(BwResponse::Search {
                 query,
                 result: res,
                 warning,
                 status,
+                icons_url,
             });
         });
     }
@@ -288,7 +293,9 @@ impl App {
                     result,
                     warning,
                     status,
+                    icons_url,
                 } => {
+                    self.icons.set_icons_url(icons_url);
                     // Clear in_flight before the stale check, otherwise needs_search() stays
                     // false and a query typed while this request ran would never be sent.
                     self.search_state.in_flight = false;
@@ -637,6 +644,7 @@ impl eframe::App for App {
         }
 
         self.poll_responses(ctx);
+        self.icons.poll(ctx);
 
         // Screens with their own Escape handling must not hide the whole window.
         let escape_handled_by_screen = match self.screen {
@@ -732,6 +740,7 @@ impl App {
             ctx,
             &mut self.summary_state,
             self.settings.show_keyboard_shortcuts,
+            &mut self.icons,
         ) {
             Some(SummaryAction::Copied) if self.settings.close_after_copy => {
                 self.hide_quick_access(ctx);
@@ -755,6 +764,7 @@ impl App {
             &mut self.search_state,
             &self.settings,
             &self.ssh_agent_status,
+            &mut self.icons,
         ) else {
             return;
         };
@@ -766,6 +776,17 @@ impl App {
             }
             SearchAction::SetCloseAfterCopy(close) => {
                 self.settings.close_after_copy = close;
+                self.save_and_apply_settings();
+            }
+            SearchAction::SetShowWebsiteIcons(show) => {
+                self.settings.show_website_icons = show;
+                self.icons.set_enabled(show);
+                if !show {
+                    // Opting out also forgets which sites were looked up.
+                    std::thread::spawn(|| {
+                        let _ = crate::icons::clear_disk_cache();
+                    });
+                }
                 self.save_and_apply_settings();
             }
             SearchAction::SetRestoreRecentItem(restore) => {

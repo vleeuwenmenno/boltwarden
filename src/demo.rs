@@ -1,7 +1,7 @@
 //! In-memory backend with made-up items, for trying the UI without a vault:
 //! `BWQA_DEMO=1 bw-quick-access --popup`. `BWQA_DEMO=locked` starts at the login screen
 //! (the master password "2fa" leads to the two-step screen) and `BWQA_DEMO=ssh` opens an
-//! SSH approval prompt. Nothing is read from or written to disk.
+//! SSH approval prompt. Nothing is read from or written to disk except the icon cache.
 
 use crate::backend::{BackendError, SearchResult};
 use crate::bw::TwoFactorProvider;
@@ -76,6 +76,7 @@ impl DemoBackend {
                 name: detail.name,
                 username: detail.username,
                 folder: detail.folder,
+                icon_host: crate::icons::icon_host(&detail.uris),
                 item_type: detail.item_type,
             })
             .collect();
@@ -87,6 +88,9 @@ impl DemoBackend {
             },
             items,
             warning: None,
+            icons_url: Some(crate::icons::icons_url_for_server(
+                "https://vault.bitwarden.com",
+            )),
         })
     }
 
@@ -171,7 +175,7 @@ fn details() -> Vec<BwItemDetail> {
         Some("m.vanleeuwen"),
         Some("Work"),
     );
-    gitlab.uris = vec!["https://gitlab.example.com".into()];
+    gitlab.uris = vec!["https://gitlab.com/users/sign_in".into()];
 
     let mut bank = detail(
         "bank",
@@ -222,22 +226,20 @@ fn details() -> Vec<BwItemDetail> {
     });
 
     let mut items = vec![github, gitlab, bank, note, card, ssh];
-    for (idx, name) in [
-        "Grafana",
-        "Gmail",
-        "Google Cloud",
-        "Gitea",
-        "Home Assistant",
+    for (idx, (name, uri)) in [
+        ("Grafana", "https://grafana.com"),
+        ("Gmail", "https://mail.google.com"),
+        ("Google Cloud", "https://console.cloud.google.com"),
+        ("Gitea", "https://gitea.com"),
+        // A LAN host: never sent to the icon service.
+        ("Home Assistant", "http://homeassistant.local:8123"),
     ]
     .iter()
     .enumerate()
     {
-        items.push(detail(
-            &format!("extra-{idx}"),
-            name,
-            Some("menno"),
-            Some("Homelab"),
-        ));
+        let mut item = detail(&format!("extra-{idx}"), name, Some("menno"), Some("Homelab"));
+        item.uris = vec![(*uri).into()];
+        items.push(item);
     }
     items
 }

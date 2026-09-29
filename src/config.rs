@@ -29,6 +29,9 @@ pub struct AppSettings {
     pub lock_after_idle_timeout: bool,
     #[serde(default = "default_idle_lock_timeout_minutes")]
     pub idle_lock_timeout_minutes: u64,
+    /// Fetch website icons from the vault server's icon service (cached on disk).
+    #[serde(default = "default_true")]
+    pub show_website_icons: bool,
 }
 
 impl Default for AppSettings {
@@ -42,6 +45,7 @@ impl Default for AppSettings {
             lock_on_system_lock: true,
             lock_after_idle_timeout: true,
             idle_lock_timeout_minutes: default_idle_lock_timeout_minutes(),
+            show_website_icons: true,
         }
     }
 }
@@ -448,6 +452,7 @@ mod tests {
             lock_on_system_lock: false,
             lock_after_idle_timeout: false,
             idle_lock_timeout_minutes: 15,
+            show_website_icons: true,
         })
         .unwrap();
         let actual = load_settings();
@@ -469,6 +474,7 @@ mod tests {
             lock_on_system_lock: true,
             lock_after_idle_timeout: true,
             idle_lock_timeout_minutes: 60,
+            show_website_icons: true,
         })
         .unwrap();
         let actual = load_settings();

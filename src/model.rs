@@ -5,6 +5,9 @@ pub struct BwItem {
     pub username: Option<String>,
     pub folder: Option<String>,
     pub item_type: String,
+    /// Public hostname of the item's first website, used to look up its icon.
+    #[serde(default)]
+    pub icon_host: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

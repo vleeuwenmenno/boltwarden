@@ -1,4 +1,5 @@
 use crate::clipboard;
+use crate::icons::{self, IconCache};
 use crate::model::{BwItemDetail, TotpCode};
 use crate::ui::theme::theme;
 use crate::ui::widgets;
@@ -114,6 +115,7 @@ pub fn draw_summary(
     ctx: &Context,
     state: &mut SummaryState,
     show_shortcuts: bool,
+    icons: &mut IconCache,
 ) -> Option<SummaryAction> {
     let t = theme();
     let mut action = None;
@@ -192,11 +194,23 @@ pub fn draw_summary(
                     action = Some(SummaryAction::Back);
                 }
                 if let Some(detail) = &detail {
-                    ui.label(
-                        RichText::new(t.item_icon(&detail.item_type))
-                            .size(t.title())
-                            .color(t.accent),
-                    );
+                    let website_icon =
+                        icons::icon_host(&detail.uris).and_then(|host| icons.get(ctx, &host));
+                    match website_icon {
+                        Some(texture) => {
+                            ui.add(
+                                egui::Image::new(&texture)
+                                    .fit_to_exact_size(egui::vec2(t.title(), t.title())),
+                            );
+                        }
+                        None => {
+                            ui.label(
+                                RichText::new(t.item_icon(&detail.item_type))
+                                    .size(t.title())
+                                    .color(t.accent),
+                            );
+                        }
+                    }
                     ui.add_space(6.0);
                     ui.add(
                         egui::Label::new(
