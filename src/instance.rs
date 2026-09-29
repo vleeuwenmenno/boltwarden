@@ -1,4 +1,3 @@
-use std::fs;
 use std::io::Write;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
@@ -60,16 +59,12 @@ fn prepare_at_path(path: PathBuf, command: LaunchCommand) -> Instance {
         return Instance::ActivatedExisting;
     }
 
-    let _ = fs::remove_file(&path);
-    if let Some(parent) = path.parent() {
-        if fs::create_dir_all(parent).is_err() {
-            return Instance::Primary(None);
-        }
-    }
-
-    match UnixListener::bind(&path) {
+    match crate::unix_socket::bind_private(&path) {
         Ok(listener) => Instance::Primary(Some(listener)),
-        Err(_) => Instance::Primary(None),
+        Err(e) => {
+            eprintln!("could not start activation socket: {e}");
+            Instance::Primary(None)
+        }
     }
 }
 
@@ -84,17 +79,19 @@ fn activate_existing(path: &PathBuf, command: LaunchCommand) -> bool {
 }
 
 fn socket_path() -> Option<PathBuf> {
-    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-        return Some(PathBuf::from(runtime_dir).join(SOCKET_NAME));
+    match crate::unix_socket::runtime_dir() {
+        Ok(dir) => Some(dir.join(SOCKET_NAME)),
+        Err(e) => {
+            eprintln!("could not prepare socket directory: {e}");
+            None
+        }
     }
-
-    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
-    Some(std::env::temp_dir().join(format!("bw-quick-access-{user}")).join(SOCKET_NAME))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::io::Read;
 
     #[test]

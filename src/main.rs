@@ -10,6 +10,7 @@ mod rpc;
 mod ssh_agent;
 mod tray;
 mod ui;
+mod unix_socket;
 
 use app::{App, PopupCommand};
 use backend::AppBackend;
@@ -17,18 +18,19 @@ use bw::{BwClient, BwError, TwoFactorChallenge};
 use eframe::egui;
 use instance::LaunchCommand;
 use model::SshAgentStatus;
-use rpc::{RpcError, RpcRequest, RpcResponse, SearchPayload};
+use rpc::{RpcEndpoint, RpcEnvelope, RpcError, RpcRequest, RpcResponse, SearchPayload};
 use ssh_agent::{SshAgentHandle, SshApprovalService, SshKeyStore};
 use ui::search::{search_window_height, SEARCH_WIDTH};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use tray::TrayCommand;
 
 const AUTO_LOCK_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const POPUP_TOKEN_PREFIX: &str = "token ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonCommand {
@@ -98,13 +100,13 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
     }
 
     if show_on_start {
-        show_popup(&popup, rpc_socket.as_deref());
+        show_popup(&popup, rpc_socket.as_ref());
     }
     while let Ok(command) = rx.recv() {
         match command {
-            DaemonCommand::Show => show_popup(&popup, rpc_socket.as_deref()),
+            DaemonCommand::Show => show_popup(&popup, rpc_socket.as_ref()),
             DaemonCommand::Hide => hide_popup(&popup),
-            DaemonCommand::Toggle => toggle_popup(&popup, rpc_socket.as_deref()),
+            DaemonCommand::Toggle => toggle_popup(&popup, rpc_socket.as_ref()),
             DaemonCommand::Quit => {
                 quit_popup(&popup);
                 if let Ok(mut state) = vault.lock() {
@@ -184,12 +186,12 @@ fn start_auto_lock_monitor(vault: Arc<Mutex<VaultState>>) {
 
 fn run_popup() -> eframe::Result<()> {
     debug_log("starting popup");
+    // Read the token before the stdin listener thread starts consuming lines.
+    let backend = popup_rpc_socket_arg()
+        .map(|path| AppBackend::remote(rpc::RpcClient::new(path, read_popup_token())))
+        .unwrap_or_else(AppBackend::local);
     let (popup_tx, popup_rx) = mpsc::channel();
     start_popup_stdin_listener(popup_tx);
-
-    let backend = popup_rpc_socket_arg()
-        .map(|path| AppBackend::remote(rpc::RpcClient::new(path)))
-        .unwrap_or_else(AppBackend::local);
     let starts_in_search = backend.has_session();
     let result = eframe::run_native(
         "bw-quick-access",
@@ -251,11 +253,11 @@ fn start_activation_listener(listener: Option<UnixListener>, tx: mpsc::Sender<Da
 fn start_approval_popup_listener(
     rx: mpsc::Receiver<()>,
     popup: PopupChild,
-    rpc_socket: Option<PathBuf>,
+    rpc_socket: Option<RpcEndpoint>,
 ) {
     std::thread::spawn(move || {
         while rx.recv().is_ok() {
-            show_approval_popup(&popup, rpc_socket.as_deref());
+            show_approval_popup(&popup, rpc_socket.as_ref());
         }
     });
 }
@@ -263,11 +265,11 @@ fn start_approval_popup_listener(
 fn start_unlock_popup_listener(
     rx: mpsc::Receiver<()>,
     popup: PopupChild,
-    rpc_socket: Option<PathBuf>,
+    rpc_socket: Option<RpcEndpoint>,
 ) {
     std::thread::spawn(move || {
         while rx.recv().is_ok() {
-            show_unlock_popup(&popup, rpc_socket.as_deref());
+            show_unlock_popup(&popup, rpc_socket.as_ref());
         }
     });
 }
@@ -275,17 +277,21 @@ fn start_unlock_popup_listener(
 fn start_vault_rpc_listener(
     vault: Arc<Mutex<VaultState>>,
     ssh_approvals: SshApprovalService,
-) -> Option<PathBuf> {
+) -> Option<RpcEndpoint> {
     match rpc::prepare_listener() {
-        Ok((path, listener)) => {
+        Ok((endpoint, listener)) => {
+            let token = Arc::new(endpoint.token.clone());
             std::thread::spawn(move || {
                 for stream in listener.incoming().flatten() {
                     let vault = vault.clone();
                     let ssh_approvals = ssh_approvals.clone();
-                    std::thread::spawn(move || handle_rpc_stream(stream, vault, ssh_approvals));
+                    let token = token.clone();
+                    std::thread::spawn(move || {
+                        handle_rpc_stream(stream, &token, vault, ssh_approvals)
+                    });
                 }
             });
-            Some(path)
+            Some(endpoint)
         }
         Err(e) => {
             eprintln!("could not start vault RPC socket: {e}");
@@ -296,24 +302,47 @@ fn start_vault_rpc_listener(
 
 fn handle_rpc_stream(
     mut stream: UnixStream,
+    token: &str,
     vault: Arc<Mutex<VaultState>>,
     ssh_approvals: SshApprovalService,
 ) {
-    let mut request_body = String::new();
-    let response = if stream.read_to_string(&mut request_body).is_err() {
-        RpcResponse::ClearSavedSession(Err("could not read daemon request".into()))
-    } else {
-        match serde_json::from_str::<RpcRequest>(&request_body) {
-            Ok(request) => handle_rpc_request(request, &vault, &ssh_approvals),
-            Err(e) => RpcResponse::ClearSavedSession(Err(format!(
-                "could not decode daemon request: {e}"
-            ))),
+    let response = match read_authenticated_request(&mut stream, token) {
+        Ok(request) => handle_rpc_request(request, &vault, &ssh_approvals),
+        Err(message) => {
+            debug_log(&format!("rejected RPC request: {message}"));
+            RpcResponse::Error(message)
         }
     };
 
     if let Ok(payload) = serde_json::to_vec(&response) {
         let _ = stream.write_all(&payload);
     }
+}
+
+/// Reads one request and checks it comes from our own uid and carries the daemon token.
+/// Only popups spawned by this daemon know the token.
+fn read_authenticated_request(stream: &mut UnixStream, token: &str) -> Result<RpcRequest, String> {
+    match unix_socket::peer_uid(stream) {
+        Ok(uid) if uid == unix_socket::current_uid() => {}
+        Ok(uid) => return Err(format!("peer uid {uid} is not allowed")),
+        Err(e) => return Err(format!("could not inspect peer credentials: {e}")),
+    }
+    // A client that never finishes writing must not pin a thread forever.
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut body = Vec::new();
+    (&mut *stream)
+        .take(rpc::MAX_REQUEST_BYTES + 1)
+        .read_to_end(&mut body)
+        .map_err(|e| format!("could not read daemon request: {e}"))?;
+    if body.len() as u64 > rpc::MAX_REQUEST_BYTES {
+        return Err("daemon request is too large".into());
+    }
+    let envelope: RpcEnvelope = serde_json::from_slice(&body)
+        .map_err(|e| format!("could not decode daemon request: {e}"))?;
+    if !rpc::token_matches(token, &envelope.token) {
+        return Err("daemon request is not authorized".into());
+    }
+    Ok(envelope.request)
 }
 
 fn handle_rpc_request(
@@ -585,6 +614,18 @@ fn rpc_error_from_bw(error: BwError) -> RpcError {
     }
 }
 
+/// First stdin line of a popup started by the daemon; see show_popup_with_command.
+fn read_popup_token() -> String {
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return String::new();
+    }
+    line.trim_end()
+        .strip_prefix(POPUP_TOKEN_PREFIX)
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn popup_rpc_socket_arg() -> Option<PathBuf> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -595,21 +636,21 @@ fn popup_rpc_socket_arg() -> Option<PathBuf> {
     None
 }
 
-fn show_popup(popup: &PopupChild, rpc_socket: Option<&Path>) {
+fn show_popup(popup: &PopupChild, rpc_socket: Option<&RpcEndpoint>) {
     show_popup_with_command(popup, rpc_socket, "show\n", "show\n");
 }
 
-fn show_approval_popup(popup: &PopupChild, rpc_socket: Option<&Path>) {
+fn show_approval_popup(popup: &PopupChild, rpc_socket: Option<&RpcEndpoint>) {
     show_popup_with_command(popup, rpc_socket, "ssh-approval return\n", "ssh-approval auto\n");
 }
 
-fn show_unlock_popup(popup: &PopupChild, rpc_socket: Option<&Path>) {
+fn show_unlock_popup(popup: &PopupChild, rpc_socket: Option<&RpcEndpoint>) {
     show_popup_with_command(popup, rpc_socket, "unlock ssh\n", "unlock ssh\n");
 }
 
 fn show_popup_with_command(
     popup: &PopupChild,
-    rpc_socket: Option<&Path>,
+    rpc_socket: Option<&RpcEndpoint>,
     existing_command: &str,
     new_command: &str,
 ) {
@@ -647,14 +688,21 @@ fn show_popup_with_command(
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if let Some(rpc_socket) = rpc_socket {
-            command.arg("--rpc-socket").arg(rpc_socket);
+            command.arg("--rpc-socket").arg(&rpc_socket.path);
         }
         command.spawn()
     }) {
         Ok(mut child) => {
             if let Some(stdin) = child.stdin.take() {
                 let mut process = PopupProcess { child, stdin };
-                match send_popup_command(&mut process, new_command) {
+                // The token must be the first stdin line: run_popup reads it before
+                // anything else touches the RPC socket.
+                let token_line = rpc_socket
+                    .map(|endpoint| format!("{POPUP_TOKEN_PREFIX}{}\n", endpoint.token))
+                    .unwrap_or_default();
+                match send_popup_command(&mut process, &token_line)
+                    .and_then(|()| send_popup_command(&mut process, new_command))
+                {
                     Ok(()) => {
                         *child_slot = Some(process);
                     }
@@ -698,7 +746,7 @@ fn hide_popup(popup: &PopupChild) {
     }
 }
 
-fn toggle_popup(popup: &PopupChild, rpc_socket: Option<&Path>) {
+fn toggle_popup(popup: &PopupChild, rpc_socket: Option<&RpcEndpoint>) {
     let Ok(mut child_slot) = popup.lock() else {
         return;
     };

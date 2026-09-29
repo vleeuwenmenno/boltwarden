@@ -26,6 +26,8 @@ const SSH_AGENT_RSA_SHA2_256: u32 = 2;
 const SSH_AGENT_RSA_SHA2_512: u32 = 4;
 pub const SSH_APPROVAL_TIMEOUT: Duration = Duration::from_secs(30);
 pub const SSH_APPROVAL_TTL: Duration = Duration::from_secs(15 * 60);
+/// Longest "remember" the approval popup offers (8 hours).
+const MAX_REMEMBER_DURATION: Duration = Duration::from_secs(8 * 60 * 60);
 pub const SSH_UNLOCK_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone)]
@@ -727,8 +729,9 @@ fn cached_approval_matches(cached: &[CachedApproval], request: &SshApprovalReque
 
 fn remember_duration(scope: SshApprovalRemember) -> Duration {
     match scope {
+        // The duration arrives over RPC, so cap it instead of trusting the UI's choices.
         SshApprovalRemember::CommandInCwd { duration_seconds } => {
-            Duration::from_secs(duration_seconds)
+            Duration::from_secs(duration_seconds).min(MAX_REMEMBER_DURATION)
         }
         SshApprovalRemember::Once | SshApprovalRemember::Process | SshApprovalRemember::Parent => {
             SSH_APPROVAL_TTL
