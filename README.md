@@ -76,14 +76,14 @@ without opening the popup immediately.
 Build and run directly from the flake:
 
 ```bash
-nix run git+ssh://git@git.mvl.sh/vleeuwenmenno/bw-quick-access.git
+nix run git+ssh://git@git.mvl.sh/vleeuwenmenno/boltwarden.git
 ```
 
 Use it as a flake input:
 
 ```nix
 {
-  inputs.boltwarden.url = "git+ssh://git@git.mvl.sh/vleeuwenmenno/bw-quick-access.git";
+  inputs.boltwarden.url = "git+ssh://git@git.mvl.sh/vleeuwenmenno/boltwarden.git";
 }
 ```
 

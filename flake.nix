@@ -76,7 +76,7 @@
 
             meta = {
               description = "Linux quick-access GUI for Bitwarden and Vaultwarden vaults";
-              homepage = "https://git.mvl.sh/vleeuwenmenno/bw-quick-access";
+              homepage = "https://git.mvl.sh/vleeuwenmenno/boltwarden";
               mainProgram = "boltwarden";
               platforms = supportedSystems;
             };
