@@ -10,7 +10,7 @@ use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 
-const SOCKET_NAME: &str = "bw-quick-access-rpc.sock";
+const SOCKET_NAME: &str = "boltwarden-rpc.sock";
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum RpcRequest {

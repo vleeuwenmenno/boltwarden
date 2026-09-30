@@ -17,7 +17,7 @@ pub fn runtime_dir() -> io::Result<PathBuf> {
         Some(runtime_dir) => PathBuf::from(runtime_dir),
         None => {
             let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
-            std::env::temp_dir().join(format!("bw-quick-access-{user}"))
+            std::env::temp_dir().join(format!("boltwarden-{user}"))
         }
     };
     ensure_private_dir(&dir)?;
@@ -114,7 +114,7 @@ mod tests {
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "bw-quick-access-socket-test-{}-{name}",
+            "boltwarden-socket-test-{}-{name}",
             uuid::Uuid::new_v4()
         ))
     }

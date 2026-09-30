@@ -1,8 +1,8 @@
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
-BIN_NAME := bw-quick-access
+BIN_NAME := boltwarden
 BIN_PATH := $(BINDIR)/$(BIN_NAME)
-SERVICE_NAME ?= bw-quick-access.service
+SERVICE_NAME ?= boltwarden.service
 SYSTEMD_USER_DIR ?= $(HOME)/.config/systemd/user
 CARGO ?= cargo
 

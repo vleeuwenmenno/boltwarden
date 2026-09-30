@@ -8,6 +8,7 @@ mod demo;
 mod health;
 mod icons;
 mod instance;
+mod logo;
 mod model;
 mod random;
 mod rpc;
@@ -35,7 +36,7 @@ use std::time::{Duration, Instant};
 use tray::TrayCommand;
 
 const POPUP_TOKEN_PREFIX: &str = "token ";
-/// Internal flag that starts the vault window process; users run `bw-quick-access window`.
+/// Internal flag that starts the vault window process; users run `boltwarden window`.
 const WINDOW_FLAG: &str = "--vault-window";
 const POPUP_FLAG: &str = "--popup";
 
@@ -79,6 +80,7 @@ fn main() -> eframe::Result<()> {
         };
         libc::setrlimit(libc::RLIMIT_CORE, &limit);
     }
+    config::migrate_legacy_dirs();
     if std::env::args().any(|arg| arg == "--popup") {
         return run_popup();
     }
@@ -229,7 +231,7 @@ fn run_popup() -> eframe::Result<()> {
         AppBackend::demo()
     } else {
         let Some(path) = popup_rpc_socket_arg() else {
-            eprintln!("--popup is internal. Run bw-quick-access without --popup.");
+            eprintln!("--popup is internal. Run boltwarden without --popup.");
             return Ok(());
         };
         AppBackend::remote(rpc::RpcClient::new(path, read_popup_token()))
@@ -237,7 +239,7 @@ fn run_popup() -> eframe::Result<()> {
     let (popup_tx, popup_rx) = mpsc::channel();
     start_popup_stdin_listener(popup_tx);
     let result = eframe::run_native(
-        "bw-quick-access",
+        "boltwarden",
         popup_options(),
         Box::new(|cc| {
             ui::theme::theme().install(&cc.egui_ctx);
@@ -254,7 +256,7 @@ fn run_window() -> eframe::Result<()> {
         AppBackend::demo()
     } else {
         let Some(path) = popup_rpc_socket_arg() else {
-            eprintln!("{WINDOW_FLAG} is internal. Run `bw-quick-access window` instead.");
+            eprintln!("{WINDOW_FLAG} is internal. Run `boltwarden window` instead.");
             return Ok(());
         };
         AppBackend::remote(rpc::RpcClient::new(path, read_popup_token()))
@@ -262,7 +264,7 @@ fn run_window() -> eframe::Result<()> {
     let (popup_tx, popup_rx) = mpsc::channel();
     start_popup_stdin_listener(popup_tx);
     eframe::run_native(
-        "bw-quick-access",
+        "boltwarden",
         window::options(),
         Box::new(|cc| {
             ui::theme::theme().install(&cc.egui_ctx);
@@ -1110,14 +1112,14 @@ fn popup_options() -> eframe::NativeOptions {
             .with_inner_size(ui::widgets::WINDOW_SIZE)
             .with_min_inner_size(ui::widgets::WINDOW_SIZE)
             .with_max_inner_size(ui::widgets::WINDOW_SIZE)
-            .with_title("bw-quick-access")
+            .with_title("boltwarden")
             // Wayland app_id / X11 class, so compositor window rules can match the popup.
             // Demo mode shows no real secrets, so it gets its own id and escapes rules
             // such as no_screen_share (handy for screenshots).
             .with_app_id(if demo::enabled() {
-                "bw-quick-access-demo"
+                "boltwarden-demo"
             } else {
-                "bw-quick-access"
+                "boltwarden"
             })
             .with_decorations(false)
             .with_resizable(false)
@@ -1129,7 +1131,7 @@ fn popup_options() -> eframe::NativeOptions {
 }
 
 fn debug_log(message: &str) {
-    if std::env::var_os("BWQA_DEBUG").is_some() {
-        eprintln!("[bw-quick-access] {message}");
+    if std::env::var_os("BOLTWARDEN_DEBUG").is_some() {
+        eprintln!("[boltwarden] {message}");
     }
 }

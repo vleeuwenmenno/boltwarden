@@ -37,7 +37,7 @@
         in
         {
           default = pkgs.rustPlatform.buildRustPackage {
-            pname = "bw-quick-access";
+            pname = "boltwarden";
             version = packageVersion;
 
             src = pkgs.lib.cleanSource ./.;
@@ -57,17 +57,17 @@
             RUST_TEST_THREADS = "1";
 
             postInstall = ''
-              wrapProgram "$out/bin/bw-quick-access" \
+              wrapProgram "$out/bin/boltwarden" \
                 --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath runtimeLibs}"
             '';
 
             desktopItems = [
               (pkgs.makeDesktopItem {
-                name = "bw-quick-access-daemon";
-                desktopName = "Bitwarden Quick Access Daemon";
+                name = "boltwarden-daemon";
+                desktopName = "Boltwarden Daemon";
                 genericName = "Password Manager Daemon";
-                comment = "Start the Bitwarden Quick Access background daemon";
-                exec = "bw-quick-access --daemon";
+                comment = "Start the Boltwarden background daemon";
+                exec = "boltwarden --daemon";
                 icon = "dialog-password";
                 terminal = false;
                 categories = [ "Utility" ];
@@ -77,7 +77,7 @@
             meta = {
               description = "Linux quick-access GUI for Bitwarden and Vaultwarden vaults";
               homepage = "https://git.mvl.sh/vleeuwenmenno/bw-quick-access";
-              mainProgram = "bw-quick-access";
+              mainProgram = "boltwarden";
               platforms = supportedSystems;
             };
           };
@@ -87,9 +87,9 @@
       apps = forAllSystems (system: {
         default = {
           type = "app";
-          program = "${self.packages.${system}.default}/bin/bw-quick-access";
+          program = "${self.packages.${system}.default}/bin/boltwarden";
           meta = {
-            description = "Run the Bitwarden Quick Access GUI";
+            description = "Run the Boltwarden GUI";
           };
         };
       });

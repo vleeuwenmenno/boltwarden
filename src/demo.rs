@@ -1,8 +1,8 @@
 //! In-memory backend with made-up items, for trying the UI without a vault:
-//! `BWQA_DEMO=1 bw-quick-access --popup`. `BWQA_DEMO=locked` starts at the login screen
-//! (the master password "2fa" leads to the two-step screen) and `BWQA_DEMO=ssh` opens an
-//! SSH approval prompt. The vault window runs with `BWQA_DEMO=1 bw-quick-access
-//! --vault-window`; `BWQA_DEMO=action` opens it on the action center. Nothing is read
+//! `BOLTWARDEN_DEMO=1 boltwarden --popup`. `BOLTWARDEN_DEMO=locked` starts at the login screen
+//! (the master password "2fa" leads to the two-step screen) and `BOLTWARDEN_DEMO=ssh` opens an
+//! SSH approval prompt. The vault window runs with `BOLTWARDEN_DEMO=1 boltwarden
+//! --vault-window`; `BOLTWARDEN_DEMO=action` opens it on the action center. Nothing is read
 //! from or written to disk except the icon cache.
 
 use crate::backend::{BackendError, SearchResult};
@@ -26,17 +26,17 @@ pub struct DemoBackend {
 }
 
 pub fn enabled() -> bool {
-    std::env::var_os("BWQA_DEMO").is_some()
+    std::env::var_os("BOLTWARDEN_DEMO").is_some()
 }
 
-/// `BWQA_DEMO=action`: open the vault window on the action center.
+/// `BOLTWARDEN_DEMO=action`: open the vault window on the action center.
 pub fn starts_on_action_center() -> bool {
-    std::env::var("BWQA_DEMO").is_ok_and(|mode| mode == "action")
+    std::env::var("BOLTWARDEN_DEMO").is_ok_and(|mode| mode == "action")
 }
 
 impl DemoBackend {
     pub fn new() -> Self {
-        let mode = std::env::var("BWQA_DEMO").unwrap_or_default();
+        let mode = std::env::var("BOLTWARDEN_DEMO").unwrap_or_default();
         Self {
             unlocked: AtomicBool::new(mode != "locked"),
             ssh_request_pending: AtomicBool::new(mode == "ssh"),
@@ -640,7 +640,7 @@ fn demo_ssh_request() -> SshApprovalRequest {
                 "ssh git@git.example.com git-upload-pack 'menno/dotfiles.git'".into(),
             ),
             executable: Some("/usr/bin/ssh".into()),
-            cwd: Some("/home/menno/Projects/bw-quick-access".into()),
+            cwd: Some("/home/menno/Projects/boltwarden".into()),
             parent_pid: Some(4200),
             parent_name: Some("git".into()),
             parent_start_time_ticks: None,
