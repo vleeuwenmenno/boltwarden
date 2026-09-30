@@ -258,8 +258,114 @@ pub struct SshAgentStatus {
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SyncStatus {
+    #[serde(default)]
+    pub last_synced_unix: Option<u64>,
     pub server_ciphers: usize,
     pub decrypted_items: usize,
     pub skipped_items: usize,
     pub first_error: Option<String>,
+}
+
+impl BwItemDetail {
+    /// Bind a copy request to the exact item shown, including field ordering.
+    pub fn copy_version(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let encoded = zeroize::Zeroizing::new(serde_json::to_vec(self).expect("serializable item"));
+        Sha256::digest(encoded.as_slice()).into()
+    }
+
+    pub fn copy_value_checked(&self, index: usize, version: &[u8; 32]) -> Result<String, String> {
+        if &self.copy_version() != version {
+            return Err("Item changed. Reopen it before copying.".into());
+        }
+        self.copy_value(index)
+    }
+
+    /// The same field ordering used by the detail view. TOTP is generated at copy time.
+    pub fn copy_value(&self, index: usize) -> Result<String, String> {
+        let mut values = Vec::new();
+        if let Some(value) = &self.username {
+            values.push(Some(value.as_str()));
+        }
+        if let Some(value) = &self.password {
+            values.push(Some(value.as_str()));
+        }
+        if self.totp.is_some() {
+            values.push(None);
+        }
+        values.extend(self.uris.iter().map(|s| Some(s.as_str())));
+        if let Some(key) = &self.ssh_key {
+            values.push(Some(key.public_key.as_str()));
+            if let Some(value) = &key.fingerprint {
+                values.push(Some(value.as_str()));
+            }
+            values.push(Some(key.private_key.as_str()));
+        }
+        values.extend(self.custom_fields.iter().map(|f| Some(f.value.as_str())));
+        if let Some(value) = &self.notes {
+            values.push(Some(value.as_str()));
+        }
+        match values.get(index) {
+            Some(Some(value)) => Ok((*value).to_owned()),
+            Some(None) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|e| e.to_string())?
+                    .as_secs();
+                crate::bw::generate_totp(self.totp.as_deref().ok_or("No TOTP secret")?, now)
+                    .map(|code| code.code)
+                    .map_err(|e| e.to_string())
+            }
+            None => Err("Field is no longer available".into()),
+        }
+    }
+}
+
+impl zeroize::Zeroize for BwItemDetail {
+    fn zeroize(&mut self) {
+        self.name.zeroize();
+        self.username.zeroize();
+        self.password.zeroize();
+        self.uris.zeroize();
+        self.totp.zeroize();
+        self.notes.zeroize();
+        self.folder.zeroize();
+        for field in &mut self.custom_fields {
+            field.name.zeroize();
+            field.value.zeroize();
+        }
+        if let Some(key) = &mut self.ssh_key {
+            key.private_key.zeroize();
+        }
+    }
+}
+impl zeroize::Zeroize for ItemDraft {
+    fn zeroize(&mut self) {
+        self.name.zeroize();
+        self.notes.zeroize();
+        if let Some(login) = &mut self.login {
+            login.zeroize();
+        }
+        for field in &mut self.fields {
+            field.name.zeroize();
+            field.value.zeroize();
+        }
+    }
+}
+impl zeroize::Zeroize for LoginDraft {
+    fn zeroize(&mut self) {
+        self.username.zeroize();
+        self.password.zeroize();
+        self.totp.zeroize();
+        for uri in &mut self.uris {
+            uri.uri.zeroize();
+        }
+    }
+}
+
+impl Drop for SshKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.private_key.zeroize();
+    }
 }

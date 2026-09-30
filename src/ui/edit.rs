@@ -3,7 +3,7 @@
 use crate::model::{DraftField, DraftFieldKind, DraftUri, ItemDraft, LoginDraft};
 use crate::ui::theme::theme;
 use crate::ui::widgets;
-use egui::{Context, RichText, Ui};
+use egui::{RichText, Ui};
 use std::collections::HashSet;
 
 const LABEL_WIDTH: f32 = 128.0;
@@ -23,6 +23,7 @@ pub struct EditState {
     pub saving: bool,
     confirm_discard: bool,
     reveal_password: bool,
+    reveal_totp: bool,
     reveal_fields: HashSet<usize>,
     /// Input to focus on the next frame, such as the name of a field just added.
     focus: Option<egui::Id>,
@@ -31,6 +32,21 @@ pub struct EditState {
 pub enum EditAction {
     Cancel,
     Save(ItemDraft),
+}
+
+impl Drop for EditState {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        if let Some(draft) = &mut self.draft {
+            draft.zeroize();
+        }
+        if let Some(original) = &mut self.original {
+            original.zeroize();
+        }
+        if let Some(login) = &mut self.stashed_login {
+            login.zeroize();
+        }
+    }
 }
 
 impl EditState {
@@ -45,6 +61,7 @@ impl EditState {
             saving: false,
             confirm_discard: false,
             reveal_password: false,
+            reveal_totp: false,
             reveal_fields: HashSet::new(),
             focus: Some(name_id()),
         }
@@ -83,13 +100,18 @@ fn uri_id(idx: usize) -> egui::Id {
     egui::Id::new(("edit-uri", idx))
 }
 
-pub fn draw_edit(ctx: &Context, state: &mut EditState, show_shortcuts: bool) -> Option<EditAction> {
+pub fn draw_edit(
+    root: &mut egui::Ui,
+    state: &mut EditState,
+    show_shortcuts: bool,
+) -> Option<EditAction> {
+    let ctx = &root.ctx().clone();
     let t = theme();
     let mut action = None;
     let dialog_open = state.confirm_discard;
 
     if !dialog_open && !state.saving {
-        let popup_open = ctx.memory(|m| m.any_popup_open());
+        let popup_open = egui::Popup::is_any_open(ctx);
         ctx.input_mut(|input| {
             if input.consume_key(egui::Modifiers::COMMAND, egui::Key::S) {
                 action = save_action(state);
@@ -107,14 +129,14 @@ pub fn draw_edit(ctx: &Context, state: &mut EditState, show_shortcuts: bool) -> 
         } else {
             &[]
         };
-        egui::TopBottomPanel::bottom("footer")
+        egui::Panel::bottom("footer")
             .frame(widgets::footer_frame())
-            .show(ctx, |ui| widgets::footer(ui, hints, status));
+            .show(root, |ui| widgets::footer(ui, hints, status));
     }
 
-    egui::TopBottomPanel::top("header")
+    egui::Panel::top("header")
         .frame(widgets::header_frame())
-        .show(ctx, |ui| {
+        .show(root, |ui| {
             ui.horizontal(|ui| {
                 let back = ui.add_enabled(
                     !state.saving,
@@ -134,7 +156,11 @@ pub fn draw_edit(ctx: &Context, state: &mut EditState, show_shortcuts: bool) -> 
                         .color(t.accent),
                 );
                 ui.add_space(6.0);
-                let title = if state.creating { "New item" } else { "Edit item" };
+                let title = if state.creating {
+                    "New item"
+                } else {
+                    "Edit item"
+                };
                 ui.label(RichText::new(title).size(t.title()).color(t.text_strong));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let can_save = state.draft.is_some() && !state.saving;
@@ -153,7 +179,7 @@ pub fn draw_edit(ctx: &Context, state: &mut EditState, show_shortcuts: bool) -> 
 
     egui::CentralPanel::default()
         .frame(widgets::body_frame())
-        .show(ctx, |ui| {
+        .show(root, |ui| {
             if state.draft.is_none() {
                 widgets::empty_state(ui, "", "Loading item…", true);
                 return;
@@ -246,7 +272,8 @@ fn draw_form(ui: &mut Ui, state: &mut EditState) {
     }
 
     labeled_row(ui, "Name", |ui| {
-        let response = widgets::text_input(ui, name_id(), &mut draft.name, "Item name", false, t.body());
+        let response =
+            widgets::text_input(ui, name_id(), &mut draft.name, "Item name", false, t.body());
         focus_if(&response, name_id());
     });
 
@@ -276,15 +303,35 @@ fn draw_form(ui: &mut Ui, state: &mut EditState) {
                 );
             });
         });
+        labeled_row(ui, "", |ui| {
+            if ui.button("Generate password (24 characters)").clicked() {
+                match crate::random::password() {
+                    Ok(password) => {
+                        use zeroize::Zeroize;
+                        login.password.zeroize();
+                        login.password = password;
+                        state.reveal_password = false;
+                    }
+                    Err(error) => {
+                        state.error = Some(format!("Could not generate password: {error}"))
+                    }
+                }
+            }
+        });
         labeled_row(ui, "TOTP secret", |ui| {
-            widgets::text_input(
-                ui,
-                egui::Id::new(("edit", "totp")),
-                &mut login.totp,
-                "otpauth://… or base32 key",
-                false,
-                t.body(),
-            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if reveal_button(ui, state.reveal_totp).clicked() {
+                    state.reveal_totp = !state.reveal_totp;
+                }
+                widgets::text_input(
+                    ui,
+                    egui::Id::new(("edit", "totp")),
+                    &mut login.totp,
+                    "otpauth://… or base32 key",
+                    !state.reveal_totp,
+                    t.body(),
+                );
+            });
         });
 
         let mut remove = None;
@@ -295,8 +342,14 @@ fn draw_form(ui: &mut Ui, state: &mut EditState) {
                     if remove_button(ui).clicked() {
                         remove = Some(idx);
                     }
-                    let response =
-                        widgets::text_input(ui, uri_id(idx), &mut uri.uri, "https://", false, t.body());
+                    let response = widgets::text_input(
+                        ui,
+                        uri_id(idx),
+                        &mut uri.uri,
+                        "https://",
+                        false,
+                        t.body(),
+                    );
                     focus_if(&response, uri_id(idx));
                 });
             });
@@ -304,22 +357,40 @@ fn draw_form(ui: &mut Ui, state: &mut EditState) {
         if let Some(idx) = remove {
             login.uris.remove(idx);
         }
-        labeled_row(ui, if login.uris.is_empty() { "Websites" } else { "" }, |ui| {
-            if add_button(ui, "Add website").clicked() {
-                login.uris.push(DraftUri::default());
-                state.focus = Some(uri_id(login.uris.len() - 1));
-            }
-        });
+        labeled_row(
+            ui,
+            if login.uris.is_empty() {
+                "Websites"
+            } else {
+                ""
+            },
+            |ui| {
+                if add_button(ui, "Add website").clicked() {
+                    login.uris.push(DraftUri::default());
+                    state.focus = Some(uri_id(login.uris.len() - 1));
+                }
+            },
+        );
     }
 
     ui.add_space(8.0);
-    ui.label(RichText::new("Custom fields").size(t.small()).color(t.text_muted));
+    ui.label(
+        RichText::new("Custom fields")
+            .size(t.small())
+            .color(t.text_muted),
+    );
     let mut remove = None;
     for (idx, field) in draft.fields.iter_mut().enumerate() {
         ui.horizontal(|ui| {
             ui.allocate_ui(egui::vec2(FIELD_NAME_WIDTH, INPUT_HEIGHT), |ui| {
-                let response =
-                    widgets::text_input(ui, field_name_id(idx), &mut field.name, "Field name", false, t.body());
+                let response = widgets::text_input(
+                    ui,
+                    field_name_id(idx),
+                    &mut field.name,
+                    "Field name",
+                    false,
+                    t.body(),
+                );
                 focus_if(&response, field_name_id(idx));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -349,11 +420,22 @@ fn draw_form(ui: &mut Ui, state: &mut EditState) {
 
     ui.add_space(8.0);
     ui.label(RichText::new("Notes").size(t.small()).color(t.text_muted));
-    widgets::text_area(ui, egui::Id::new(("edit", "notes")), &mut draft.notes, "", 4);
+    widgets::text_area(
+        ui,
+        egui::Id::new(("edit", "notes")),
+        &mut draft.notes,
+        "",
+        4,
+    );
     ui.add_space(8.0);
 }
 
-fn draw_field_value(ui: &mut Ui, idx: usize, field: &mut DraftField, revealed: &mut HashSet<usize>) {
+fn draw_field_value(
+    ui: &mut Ui,
+    idx: usize,
+    field: &mut DraftField,
+    revealed: &mut HashSet<usize>,
+) {
     let t = theme();
     let id = egui::Id::new(("edit-field-value", idx));
     match field.kind {
@@ -395,7 +477,11 @@ fn kind_selector(ui: &mut Ui, idx: usize, field: &mut DraftField) {
         .width(84.0)
         .selected_text(label(field.kind))
         .show_ui(ui, |ui| {
-            for kind in [DraftFieldKind::Text, DraftFieldKind::Hidden, DraftFieldKind::Boolean] {
+            for kind in [
+                DraftFieldKind::Text,
+                DraftFieldKind::Hidden,
+                DraftFieldKind::Boolean,
+            ] {
                 ui.selectable_value(&mut field.kind, kind, label(kind));
             }
         });
@@ -472,7 +558,10 @@ mod tests {
         assert!(validate(&draft).is_err());
 
         draft.fields[0].value.clear();
-        assert!(validate(&draft).is_ok(), "empty unnamed rows are dropped on save");
+        assert!(
+            validate(&draft).is_ok(),
+            "empty unnamed rows are dropped on save"
+        );
 
         draft.name = "  ".into();
         assert!(validate(&draft).is_err());
@@ -489,5 +578,23 @@ mod tests {
 
         state.draft.as_mut().unwrap().notes = "changed".into();
         assert!(state.is_dirty());
+    }
+    #[test]
+    fn totp_seed_is_masked_in_editor() {
+        let ctx = egui::Context::default();
+        let mut state = EditState::create();
+        state.draft.as_mut().unwrap().login.as_mut().unwrap().totp = "AUDITSECRETSEED".into();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(680., 460.),
+            )),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ctx| {
+            draw_edit(ctx, &mut state, true);
+        });
+        out.textures_delta.clear();
+        assert!(!out.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text.contains("AUDITSECRETSEED"))));
     }
 }

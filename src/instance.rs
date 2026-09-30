@@ -189,5 +189,4 @@ mod tests {
             LaunchCommand::Daemon
         );
     }
-
 }

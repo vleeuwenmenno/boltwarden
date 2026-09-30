@@ -15,7 +15,6 @@ pub struct SshApprovalUiState {
     pub request: Option<SshApprovalRequest>,
     pub status: Option<SshApprovalStatus>,
     pub selected_action: usize,
-    pub selected_remember_duration: usize,
     pub error: Option<String>,
     pub auto_hide: bool,
     shown_at: Option<Instant>,
@@ -26,7 +25,6 @@ impl SshApprovalUiState {
         self.request = request;
         self.status = None;
         self.selected_action = 0;
-        self.selected_remember_duration = 0;
         self.error = None;
         self.auto_hide = auto_hide;
         self.shown_at = Some(Instant::now());
@@ -37,25 +35,17 @@ impl SshApprovalUiState {
     }
 }
 
-const REMEMBER_DURATIONS: &[(&str, u64)] = &[
-    ("15 minutes", 15 * 60),
-    ("30 minutes", 30 * 60),
-    ("1 hour", 60 * 60),
-    ("2 hours", 2 * 60 * 60),
-    ("4 hours", 4 * 60 * 60),
-    ("8 hours", 8 * 60 * 60),
-];
-
 pub enum SshApprovalAction {
     Decide(SshApprovalDecision),
     Back,
 }
 
 pub fn draw_ssh_approval(
-    ctx: &Context,
+    root: &mut egui::Ui,
     state: &mut SshApprovalUiState,
     show_shortcuts: bool,
 ) -> Option<SshApprovalAction> {
+    let ctx = &root.ctx().clone();
     let t = theme();
     let mut action = None;
     let request = state.request.clone();
@@ -71,14 +61,14 @@ pub fn draw_ssh_approval(
         } else {
             &[("Esc", "Back")]
         };
-        egui::TopBottomPanel::bottom("footer")
+        egui::Panel::bottom("footer")
             .frame(widgets::footer_frame())
-            .show(ctx, |ui| widgets::footer(ui, hints, None));
+            .show(root, |ui| widgets::footer(ui, hints, None));
     }
 
-    egui::TopBottomPanel::top("header")
+    egui::Panel::top("header")
         .frame(widgets::header_frame())
-        .show(ctx, |ui| {
+        .show(root, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(t.icon("\u{f084}", "🔑"))
@@ -104,7 +94,7 @@ pub fn draw_ssh_approval(
 
     egui::CentralPanel::default()
         .frame(widgets::body_frame().inner_margin(egui::Margin::symmetric(16, 10)))
-        .show(ctx, |ui| match &request {
+        .show(root, |ui| match &request {
             Some(request) => action = draw_pending_request(ctx, ui, state, request),
             None => {
                 if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
@@ -138,31 +128,20 @@ fn draw_pending_request(
     }
 
     ui.add_space(12.0);
-    let selected_duration = REMEMBER_DURATIONS
-        .get(state.selected_remember_duration)
-        .copied()
-        .unwrap_or(REMEMBER_DURATIONS[0]);
     ui.horizontal(|ui| {
         if widgets::button(ui, "Approve once", state.selected_action == 0, true).clicked() {
             action = Some(decision(request, true, SshApprovalRemember::Once));
         }
-        if widgets::button(ui, "Approve and remember", state.selected_action == 1, true).clicked() {
-            action = Some(decision(
-                request,
-                true,
-                SshApprovalRemember::CommandInCwd {
-                    duration_seconds: selected_duration.1,
-                },
-            ));
+        if widgets::button(
+            ui,
+            "Remember process (15 min)",
+            state.selected_action == 1,
+            true,
+        )
+        .clicked()
+        {
+            action = Some(decision(request, true, SshApprovalRemember::Process));
         }
-        egui::ComboBox::from_id_salt("ssh-approval-remember-duration")
-            .selected_text(RichText::new(selected_duration.0).color(t.text))
-            .width(110.0)
-            .show_ui(ui, |ui| {
-                for (idx, (label, _seconds)) in REMEMBER_DURATIONS.iter().enumerate() {
-                    ui.selectable_value(&mut state.selected_remember_duration, idx, *label);
-                }
-            });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let deny = ui.add(
                 egui::Button::new(RichText::new("Deny").color(t.danger))
@@ -178,7 +157,7 @@ fn draw_pending_request(
     });
     ui.add_space(6.0);
     ui.label(
-        RichText::new("Remember applies to this command in this working directory.")
+        RichText::new("Remember applies only to this running process for up to 15 minutes.")
             .size(t.small())
             .color(t.text_faint),
     );
@@ -206,15 +185,7 @@ fn handle_keys(
                 }
                 egui::Key::Enter => {
                     let remember = match state.selected_action {
-                        1 => {
-                            let duration = REMEMBER_DURATIONS
-                                .get(state.selected_remember_duration)
-                                .copied()
-                                .unwrap_or(REMEMBER_DURATIONS[0]);
-                            SshApprovalRemember::CommandInCwd {
-                                duration_seconds: duration.1,
-                            }
-                        }
+                        1 => SshApprovalRemember::Process,
                         _ => SshApprovalRemember::Once,
                     };
                     *action = Some(decision(request, true, remember));

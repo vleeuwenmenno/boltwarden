@@ -70,7 +70,8 @@ fn default_server() -> String {
         .unwrap_or_else(|| DEFAULT_SERVER.to_string())
 }
 
-pub fn draw_auth(ctx: &Context, state: &mut AuthState) -> Option<AuthAction> {
+pub fn draw_auth(root: &mut egui::Ui, state: &mut AuthState) -> Option<AuthAction> {
+    let ctx = &root.ctx().clone();
     let mut action = None;
     let t = theme();
 
@@ -79,16 +80,16 @@ pub fn draw_auth(ctx: &Context, state: &mut AuthState) -> Option<AuthAction> {
     } else {
         &[("⏎", "Log in"), ("Tab", "Next field"), ("Esc", "Hide")]
     };
-    egui::TopBottomPanel::bottom("footer")
+    egui::Panel::bottom("footer")
         .frame(widgets::footer_frame())
-        .show(ctx, |ui| widgets::footer(ui, hints, None));
+        .show(root, |ui| widgets::footer(ui, hints, None));
 
     if state.has_saved_session {
-        draw_unlock_header(ctx, state, &mut action);
+        draw_unlock_header(root, state, &mut action);
     } else {
-        egui::TopBottomPanel::top("header")
+        egui::Panel::top("header")
             .frame(widgets::header_frame())
-            .show(ctx, |ui| {
+            .show(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(t.icon("\u{f023}", "🔐"))
@@ -110,7 +111,7 @@ pub fn draw_auth(ctx: &Context, state: &mut AuthState) -> Option<AuthAction> {
 
     egui::CentralPanel::default()
         .frame(widgets::body_frame())
-        .show(ctx, |ui| {
+        .show(root, |ui| {
             if state.has_saved_session {
                 draw_unlock_body(ui, state);
             } else {
@@ -129,11 +130,11 @@ pub fn draw_auth(ctx: &Context, state: &mut AuthState) -> Option<AuthAction> {
     action
 }
 
-fn draw_unlock_header(ctx: &Context, state: &mut AuthState, action: &mut Option<AuthAction>) {
+fn draw_unlock_header(root: &mut egui::Ui, state: &mut AuthState, action: &mut Option<AuthAction>) {
     let t = theme();
-    egui::TopBottomPanel::top("header")
+    egui::Panel::top("header")
         .frame(widgets::header_frame())
-        .show(ctx, |ui| {
+        .show(root, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(t.icon("\u{f023}", "🔐"))
@@ -156,7 +157,7 @@ fn draw_unlock_header(ctx: &Context, state: &mut AuthState, action: &mut Option<
                         .text_color(t.text_strong)
                         .hint_text(RichText::new(hint).color(t.text_faint))
                         .password(true)
-                        .frame(false)
+                        .frame(egui::Frame::NONE)
                         .vertical_align(egui::Align::Center),
                 );
                 if state.focus_password {

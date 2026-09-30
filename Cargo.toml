@@ -1,17 +1,20 @@
 [package]
 name = "bw-quick-access"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
+rust-version = "1.95"
 
 [dependencies]
-eframe = "0.31"
-egui = "0.31"
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+egui = "0.36"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 base64 = "0.22"
 libc = "0.2"
+zeroize = "1"
+subtle = "2"
 signature = "3"
 pbkdf2 = "0.12"
 sha2 = "0.10"
@@ -19,6 +22,10 @@ uuid = { version = "1", features = ["v4"] }
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 hmac = "0.12"
+hkdf = "0.12"
+tokio = { version = "1", features = ["rt", "time", "macros"] }
+futures-lite = "2"
+zbus = { version = "5.19", default-features = false, features = ["blocking-api", "tokio"] }
 sha1 = "0.10"
 data-encoding = "2"
 url = "2"
@@ -27,7 +34,7 @@ image = { version = "0.25", default-features = false, features = ["png", "ico", 
 resvg = { version = "0.48", default-features = false }
 argon2 = "0.5"
 ksni = { version = "0.3", features = ["blocking"] }
-ssh-key = { version = "0.7.0-rc.10", features = ["crypto", "encryption", "p256", "p384", "p521"] }
+ssh-key = { version = "0.7.0-rc.10", features = ["ed25519", "encryption", "p256", "p384", "p521"] }
 
 [profile.release]
 opt-level = 3

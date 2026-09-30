@@ -6,8 +6,8 @@
 use crate::backend::{BackendError, SearchResult};
 use crate::bw::TwoFactorProvider;
 use crate::model::{
-    BwItem, BwItemDetail, CustomField, DraftField, DraftFieldKind, DraftUri, ItemAction,
-    ItemDates, ItemDraft, ItemState, LoginDraft, SshAgentClientInfo, SshApprovalKind, SshApprovalRequest,
+    BwItem, BwItemDetail, CustomField, DraftField, DraftFieldKind, DraftUri, ItemAction, ItemDates,
+    ItemDraft, ItemState, LoginDraft, SshAgentClientInfo, SshApprovalKind, SshApprovalRequest,
     SshApprovalStatus, SshApprovalStatusKind, SshKey, SyncStatus, TotpCode,
 };
 use std::sync::Mutex;
@@ -133,8 +133,8 @@ impl DemoBackend {
             items.remove(idx);
         } else {
             items[idx].state = crate::bw::state_after(action);
-            items[idx].dates.state_changed_at = (items[idx].state != ItemState::Active)
-                .then(|| crate::bw::iso8601_now());
+            items[idx].dates.state_changed_at =
+                (items[idx].state != ItemState::Active).then(|| crate::bw::iso8601_now());
         }
         Ok(())
     }
@@ -354,11 +354,46 @@ fn details() -> Vec<BwItemDetail> {
     let mut items = vec![github, gitlab, bank, note, card, ssh];
     // Archived and trashed items with different dates, so the list sort is visible.
     for (id, name, uri, state, changed, revised) in [
-        ("dropbox", "Dropbox (old)", "https://www.dropbox.com/login", ItemState::Archived, "2026-03-02", "2025-11-20"),
-        ("evernote", "Evernote", "https://www.evernote.com", ItemState::Archived, "2026-08-14", "2024-06-01"),
-        ("aws-old", "AWS (old account)", "https://aws.amazon.com", ItemState::Archived, "2025-12-24", "2026-01-05"),
-        ("myspace", "MySpace", "https://myspace.com", ItemState::Deleted, "2026-09-12", "2019-02-02"),
-        ("icq", "ICQ", "https://icq.com", ItemState::Deleted, "2026-09-28", "2012-07-07"),
+        (
+            "dropbox",
+            "Dropbox (old)",
+            "https://www.dropbox.com/login",
+            ItemState::Archived,
+            "2026-03-02",
+            "2025-11-20",
+        ),
+        (
+            "evernote",
+            "Evernote",
+            "https://www.evernote.com",
+            ItemState::Archived,
+            "2026-08-14",
+            "2024-06-01",
+        ),
+        (
+            "aws-old",
+            "AWS (old account)",
+            "https://aws.amazon.com",
+            ItemState::Archived,
+            "2025-12-24",
+            "2026-01-05",
+        ),
+        (
+            "myspace",
+            "MySpace",
+            "https://myspace.com",
+            ItemState::Deleted,
+            "2026-09-12",
+            "2019-02-02",
+        ),
+        (
+            "icq",
+            "ICQ",
+            "https://icq.com",
+            ItemState::Deleted,
+            "2026-09-28",
+            "2012-07-07",
+        ),
     ] {
         let mut item = detail(id, name, Some("menno"), None);
         item.uris = vec![uri.into()];
@@ -381,16 +416,28 @@ fn details() -> Vec<BwItemDetail> {
     .iter()
     .enumerate()
     {
-        let mut item = detail(&format!("extra-{idx}"), name, Some("menno"), Some("Homelab"));
+        let mut item = detail(
+            &format!("extra-{idx}"),
+            name,
+            Some("menno"),
+            Some("Homelab"),
+        );
         item.uris = vec![(*uri).into()];
         items.push(item);
     }
     // Spread edit and creation dates over the active items so the start lists differ.
     for (idx, item) in items.iter_mut().enumerate() {
         if item.state == ItemState::Active {
-            let day = |offset: usize| format!("2026-{:02}-{:02}T09:00:00.000Z", 1 + idx % 9, 1 + (idx * 7 + offset) % 28);
+            let day = |offset: usize| {
+                format!(
+                    "2026-{:02}-{:02}T09:00:00.000Z",
+                    1 + idx % 9,
+                    1 + (idx * 7 + offset) % 28
+                )
+            };
             item.dates.revision_date = Some(day(idx * 3));
-            item.dates.creation_date = Some(format!("20{:02}-06-01T09:00:00.000Z", 15 + (idx * 5) % 11));
+            item.dates.creation_date =
+                Some(format!("20{:02}-06-01T09:00:00.000Z", 15 + (idx * 5) % 11));
         }
     }
     items

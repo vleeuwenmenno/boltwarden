@@ -1,13 +1,13 @@
 use crate::config;
 use crate::config::{SavedKdf, SavedSession};
 use crate::model::{
-    BwItem, BwItemDetail, CustomField, DraftField, DraftFieldKind, DraftUri, ItemAction,
-    ItemDates, ItemDraft, ItemState, LoginDraft, SshKey, SyncStatus, TotpCode,
+    BwItem, BwItemDetail, CustomField, DraftField, DraftFieldKind, DraftUri, ItemAction, ItemDates,
+    ItemDraft, ItemState, LoginDraft, SshKey, SyncStatus, TotpCode,
 };
 use aes::Aes256;
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
-use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
 use data_encoding::{BASE32, BASE32_NOPAD};
 use hmac::{Hmac, Mac};
 use pbkdf2::pbkdf2_hmac;
@@ -15,11 +15,13 @@ use reqwest::Method;
 use reqwest::blocking::{Client, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
 use sha1::Sha1;
 use sha2::Sha256;
+use std::collections::HashMap;
+use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
+use zeroize::{Zeroize, Zeroizing};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(12);
 const CLIENT_NAME: &str = "bw-quick-access";
@@ -36,6 +38,8 @@ type HmacSha1 = Hmac<Sha1>;
 #[derive(Clone)]
 pub struct BwClient {
     client: Client,
+    reauth: Option<(String, SavedKdf, String)>,
+    item_grants: HashMap<String, Instant>,
     base_url: String,
     device_identifier: String,
     access_token: Option<String>,
@@ -49,6 +53,7 @@ pub struct BwClient {
     organization_keys: HashMap<String, Vec<u8>>,
     sync_warning: Option<String>,
     sync_status: SyncStatus,
+    last_sync_attempt: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -61,6 +66,7 @@ struct StoredCipher {
 #[derive(Debug)]
 pub enum BwError {
     NotUnlocked,
+    RepromptRequired,
     TwoFactorRequired(TwoFactorChallenge),
     Cli(String),
     Parse(String),
@@ -70,6 +76,7 @@ pub enum BwError {
 impl std::fmt::Display for BwError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            BwError::RepromptRequired => write!(f, "Master password required for this item"),
             BwError::NotUnlocked => write!(f, "vault is not unlocked"),
             BwError::TwoFactorRequired(_) => write!(f, "two factor required"),
             BwError::Cli(s) => write!(f, "{s}"),
@@ -130,6 +137,10 @@ pub enum TwoFactorProvider {
 }
 
 impl TwoFactorProvider {
+    pub fn supports_code_entry(self) -> bool {
+        matches!(self, Self::Authenticator | Self::Yubikey)
+    }
+
     pub fn id(self) -> i64 {
         match self {
             TwoFactorProvider::Authenticator => 0,
@@ -159,6 +170,32 @@ impl TwoFactorProvider {
     }
 }
 
+impl Drop for BwClient {
+    fn drop(&mut self) {
+        self.access_token.zeroize();
+        self.refresh_token.zeroize();
+        self.user_key.zeroize();
+        for item in &mut self.items {
+            item.zeroize();
+        }
+        for key in self.organization_keys.values_mut() {
+            key.zeroize();
+        }
+    }
+}
+impl Drop for StoredCipher {
+    fn drop(&mut self) {
+        self.item_key.zeroize();
+    }
+}
+impl Drop for TwoFactorChallenge {
+    fn drop(&mut self) {
+        self.password.zeroize();
+        self.password_hash.zeroize();
+        self.master_key.zeroize();
+    }
+}
+
 impl Default for BwClient {
     fn default() -> Self {
         Self::new()
@@ -168,7 +205,11 @@ impl Default for BwClient {
 impl BwClient {
     pub fn new() -> Self {
         Self {
+            reauth: None,
+            item_grants: HashMap::new(),
             client: Client::builder()
+                .https_only(true)
+                .redirect(reqwest::redirect::Policy::none())
                 .timeout(HTTP_TIMEOUT)
                 .user_agent("bw-quick-access/0.1")
                 .build()
@@ -187,6 +228,7 @@ impl BwClient {
             organization_keys: HashMap::new(),
             sync_warning: None,
             sync_status: SyncStatus::default(),
+            last_sync_attempt: None,
         }
     }
 
@@ -200,11 +242,16 @@ impl BwClient {
         password: &str,
     ) -> Result<(), BwError> {
         self.base_url = normalize_server_url(&saved.server_url)?;
-        let master_key = master_key_from_saved(password, saved)?;
+        let master_key = Zeroizing::new(master_key_from_saved(password, saved)?);
         let user_key = unwrap_user_key(&saved.master_key_encrypted_user_key, &master_key)?;
-        self.refresh_token = Some(saved.refresh_token.clone());
-        self.refresh_session()?;
+        self.reauth = Some((
+            saved.salt.clone(),
+            saved.kdf.clone(),
+            saved.master_key_encrypted_user_key.clone(),
+        ));
+        self.refresh_token = Some(saved_session_token(saved, &user_key)?);
         self.user_key = Some(user_key);
+        self.refresh_session()?;
         self.sync()?;
         Ok(())
     }
@@ -218,7 +265,7 @@ impl BwClient {
     ) -> Result<(), BwError> {
         self.base_url = normalize_server_url(server_url)?;
         let prelogin = self.prelogin(email)?;
-        let master_key = master_key(email, password, &prelogin)?;
+        let master_key = Zeroizing::new(master_key(email, password, &prelogin)?);
         let password_hash = password_hash(password, &master_key);
         let token = match self.token(email, &password_hash, None)? {
             TokenResult::Success(token) => token,
@@ -229,7 +276,7 @@ impl BwClient {
                     email: email.to_string(),
                     password: password.to_string(),
                     password_hash,
-                    master_key,
+                    master_key: master_key.to_vec(),
                     kdf: SavedKdf {
                         kdf_type: prelogin.kdf,
                         iterations: prelogin.kdf_iterations,
@@ -244,16 +291,20 @@ impl BwClient {
         let (wrapped_user_key, unlock_data) = token.master_key_encrypted_user_key()?;
         let master_key = match unlock_data {
             Some(unlock) => master_key_from_unlock(password, unlock)?,
-            None => master_key,
+            None => master_key.to_vec(),
         };
+        let master_key = Zeroizing::new(master_key);
         let user_key = unwrap_user_key(wrapped_user_key, &master_key)?;
+        let (salt, kdf) = saved_kdf_from_login(email, &prelogin, unlock_data);
+        self.reauth = Some((salt, kdf, wrapped_user_key.to_owned()));
         save_successful_session(
             &self.base_url,
             email,
             token.refresh_token.as_deref(),
             wrapped_user_key,
             saved_kdf_from_login(email, &prelogin, unlock_data),
-        );
+            &user_key,
+        )?;
 
         self.refresh_token = token.refresh_token;
         self.access_token = Some(token.access_token);
@@ -269,6 +320,11 @@ impl BwClient {
         token_code: &str,
         remember: bool,
     ) -> Result<(), BwError> {
+        if !provider.supports_code_entry() {
+            return Err(BwError::Cli(
+                "This two-step method is not supported; use the official Bitwarden app".into(),
+            ));
+        }
         self.base_url = challenge.base_url.clone();
         self.device_identifier = challenge.device_identifier.clone();
         let submission = TwoFactorSubmission {
@@ -291,14 +347,18 @@ impl BwClient {
             Some(unlock) => master_key_from_unlock(&challenge.password, unlock)?,
             None => challenge.master_key.clone(),
         };
+        let master_key = Zeroizing::new(master_key);
         let user_key = unwrap_user_key(wrapped_user_key, &master_key)?;
+        let (salt, kdf) = saved_kdf_from_challenge(&challenge.email, &challenge.kdf, unlock_data);
+        self.reauth = Some((salt, kdf, wrapped_user_key.to_owned()));
         save_successful_session(
             &self.base_url,
             &challenge.email,
             token.refresh_token.as_deref(),
             wrapped_user_key,
             saved_kdf_from_challenge(&challenge.email, &challenge.kdf, unlock_data),
-        );
+            &user_key,
+        )?;
 
         self.refresh_token = token.refresh_token;
         self.access_token = Some(token.access_token);
@@ -310,7 +370,13 @@ impl BwClient {
         self.require_unlocked()?;
         let needle = search.trim().to_lowercase();
         Ok(ranked_search_results(
-            self.items.iter().filter(|item| item.state == state),
+            self.items
+                .iter()
+                .filter(|item| item.state == state)
+                .filter(|item| {
+                    !self.item_requires_reprompt(&item.id)
+                        || title_match_rank(&item.name, &needle).is_some()
+                }),
             &needle,
         ))
     }
@@ -322,6 +388,23 @@ impl BwClient {
 
     pub fn sync_warning(&self) -> Option<String> {
         self.sync_warning.clone()
+    }
+
+    pub fn sync_now(&mut self) -> Result<SyncStatus, BwError> {
+        self.require_unlocked()?;
+        self.sync()?;
+        Ok(self.sync_status())
+    }
+
+    pub fn sync_if_stale(&mut self) {
+        if self
+            .last_sync_attempt
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
+        {
+            if let Err(error) = self.sync_now() {
+                self.sync_warning = Some(format!("Sync failed; showing cached items: {error}"));
+            }
+        }
     }
 
     pub fn sync_status(&self) -> SyncStatus {
@@ -348,20 +431,99 @@ impl BwClient {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().unwrap_or_default();
-            return Err(BwError::Cli(format!("refresh failed with HTTP {status}: {body}")));
+            return Err(BwError::Cli(format!(
+                "refresh failed with HTTP {status}: {body}"
+            )));
         }
         let token: RefreshTokenResponse = response
             .json()
             .map_err(|e| BwError::Parse(format!("refresh response: {e}")))?;
+        let old_refresh = zeroize::Zeroizing::new(self.refresh_token.clone().unwrap_or_default());
+        self.access_token.zeroize();
         self.access_token = Some(token.access_token);
         if let Some(refresh_token) = token.refresh_token {
+            self.refresh_token.zeroize();
             self.refresh_token = Some(refresh_token);
+        }
+        let user_key = self.user_key.as_deref().ok_or(BwError::NotUnlocked)?;
+        if let Some(mut saved) =
+            config::load_saved_session().filter(|saved| saved.server_url == self.base_url)
+        {
+            let previous = Zeroizing::new(saved_session_token(&saved, user_key)?);
+            if *previous == *old_refresh {
+                encrypt_session_token(
+                    &mut saved,
+                    self.refresh_token.as_deref().unwrap_or_default(),
+                    user_key,
+                )?;
+                config::save_session(&saved)
+                    .map_err(|e| BwError::Cli(format!("Could not save encrypted session: {e}")))?;
+            }
         }
         Ok(())
     }
 
+    fn item_requires_reprompt(&self, id: &str) -> bool {
+        self.ciphers.get(id).is_some_and(|cipher| {
+            raw_get(&cipher.raw, "reprompt")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                != 0
+        })
+    }
+
+    fn require_item_access(&self, id: &str) -> Result<(), BwError> {
+        if self.item_requires_reprompt(id)
+            && !self
+                .item_grants
+                .get(id)
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
+        {
+            return Err(BwError::RepromptRequired);
+        }
+        Ok(())
+    }
+
+    pub fn authorize_item(&mut self, id: &str, password: &str) -> Result<BwItemDetail, BwError> {
+        self.require_unlocked()?;
+        if !self.ciphers.contains_key(id) {
+            return Err(BwError::NotFound);
+        }
+        let (salt, kdf, encrypted_key) = self
+            .reauth
+            .as_ref()
+            .ok_or_else(|| BwError::Cli("Lock and unlock the vault to verify this item".into()))?;
+        let master = Zeroizing::new(derive_master_key(
+            password,
+            salt,
+            kdf.kdf_type,
+            kdf.iterations,
+            kdf.memory,
+            kdf.parallelism,
+        )?);
+        let verified = Zeroizing::new(
+            unwrap_user_key(encrypted_key, &master)
+                .map_err(|_| BwError::Cli("Incorrect master password".into()))?,
+        );
+        use subtle::ConstantTimeEq;
+        if !bool::from(
+            verified
+                .as_slice()
+                .ct_eq(self.user_key.as_deref().ok_or(BwError::NotUnlocked)?),
+        ) {
+            return Err(BwError::Cli("Incorrect master password".into()));
+        }
+        self.item_grants.insert(id.to_owned(), Instant::now());
+        self.get_item(id)
+    }
+
+    pub fn revoke_item_grants(&mut self) {
+        self.item_grants.clear();
+    }
+
     pub fn get_item(&self, id: &str) -> Result<BwItemDetail, BwError> {
         self.require_unlocked()?;
+        self.require_item_access(id)?;
         self.items
             .iter()
             .find(|item| item.id == id)
@@ -370,7 +532,7 @@ impl BwClient {
     }
 
     pub fn get_totp(&self, id: &str) -> Result<TotpCode, BwError> {
-        let detail = self.get_item(id)?;
+        let detail = Zeroizing::new(self.get_item(id)?);
         let seed = detail.totp.as_deref().ok_or(BwError::NotFound)?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -385,6 +547,8 @@ impl BwClient {
             .items
             .iter()
             .filter(|item| item.state == ItemState::Active)
+            // Reprompt keys must never become silently available through the agent.
+            .filter(|item| !self.item_requires_reprompt(&item.id))
             .filter_map(|item| item.ssh_key.clone())
             .collect())
     }
@@ -438,6 +602,7 @@ impl BwClient {
 
     pub fn edit_draft(&self, id: &str) -> Result<ItemDraft, BwError> {
         self.require_unlocked()?;
+        self.require_item_access(id)?;
         let stored = self.ciphers.get(id).ok_or(BwError::NotFound)?;
         ensure_editable(&stored.raw)?;
         draft_from_raw(&stored.raw, &stored.item_key)
@@ -487,7 +652,10 @@ impl BwClient {
             decode_cipher(raw, user_key, &self.organization_keys, &self.folders)?;
         let id = detail.id.clone();
         match self.items.iter_mut().find(|item| item.id == id) {
-            Some(slot) => *slot = detail,
+            Some(slot) => {
+                slot.zeroize();
+                *slot = detail;
+            }
             None => self.items.push(detail),
         }
         self.ciphers.insert(id, stored);
@@ -521,7 +689,10 @@ impl BwClient {
             .request(method, format!("{}{path}", self.base_url))
             .bearer_auth(token)
             .header(sync_client_name_header().0, sync_client_name_header().1)
-            .header(sync_client_version_header().0, sync_client_version_header().1);
+            .header(
+                sync_client_version_header().0,
+                sync_client_version_header().1,
+            );
         if let Some(body) = body {
             request = request.json(body);
         }
@@ -607,7 +778,9 @@ impl BwClient {
                     }
                 }
             }
-            return Err(BwError::Cli(format!("login failed with HTTP {status}: {body}")));
+            return Err(BwError::Cli(format!(
+                "login failed with HTTP {status}: {body}"
+            )));
         }
 
         response
@@ -617,11 +790,14 @@ impl BwClient {
     }
 
     fn sync(&mut self) -> Result<(), BwError> {
+        self.last_sync_attempt = Some(Instant::now());
         let response = self.send_authed(Method::GET, "/api/sync?excludeDomains=true", None)?;
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().unwrap_or_default();
-            return Err(BwError::Cli(format!("sync failed with HTTP {status}: {body}")));
+            return Err(BwError::Cli(format!(
+                "sync failed with HTTP {status}: {body}"
+            )));
         }
 
         let user_key = self.user_key.as_deref().ok_or(BwError::NotUnlocked)?;
@@ -653,11 +829,21 @@ impl BwClient {
                 }
             }
         }
+        for item in &mut self.items {
+            item.zeroize();
+        }
+        for key in self.organization_keys.values_mut() {
+            key.zeroize();
+        }
         self.items = items;
         self.ciphers = ciphers;
         self.folders = folders;
         self.organization_keys = organization_keys;
         self.sync_status = SyncStatus {
+            last_synced_unix: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs()),
             server_ciphers,
             decrypted_items: self.items.len(),
             skipped_items: skipped,
@@ -711,9 +897,8 @@ impl SearchRank {
 }
 
 fn search_rank(item: &BwItemDetail, needle: &str) -> Option<SearchRank> {
-    title_match_rank(&item.name, needle).or_else(|| {
-        secondary_matches_search(item, needle).then_some(SearchRank::SecondaryField)
-    })
+    title_match_rank(&item.name, needle)
+        .or_else(|| secondary_matches_search(item, needle).then_some(SearchRank::SecondaryField))
 }
 
 fn ranked_search_results<'a>(
@@ -783,19 +968,31 @@ fn secondary_matches_search(item: &BwItemDetail, needle: &str) -> bool {
         return false;
     }
 
-    item.username.as_deref().is_some_and(|value| text_matches(value, needle))
-        || item.password.as_deref().is_some_and(|value| text_matches(value, needle))
-        || item.folder.as_deref().is_some_and(|value| text_matches(value, needle))
+    item.username
+        .as_deref()
+        .is_some_and(|value| text_matches(value, needle))
+        || item
+            .password
+            .as_deref()
+            .is_some_and(|value| text_matches(value, needle))
+        || item
+            .folder
+            .as_deref()
+            .is_some_and(|value| text_matches(value, needle))
         || text_matches(&item.item_type, needle)
-        || item.notes.as_deref().is_some_and(|value| text_matches(value, needle))
+        || item
+            .notes
+            .as_deref()
+            .is_some_and(|value| text_matches(value, needle))
         || item.uris.iter().any(|value| text_matches(value, needle))
         || item
             .ssh_key
             .as_ref()
             .is_some_and(|ssh_key| ssh_key_matches_search(ssh_key, needle))
-        || item.custom_fields.iter().any(|field| {
-            text_matches(&field.name, needle) || text_matches(&field.value, needle)
-        })
+        || item
+            .custom_fields
+            .iter()
+            .any(|field| text_matches(&field.name, needle) || text_matches(&field.value, needle))
 }
 
 fn ssh_key_matches_search(ssh_key: &SshKey, needle: &str) -> bool {
@@ -933,12 +1130,12 @@ impl<'de> Deserialize<'de> for TwoFactorProvider {
     {
         let value = serde_json::Value::deserialize(deserializer)?;
         let id = match value {
-            serde_json::Value::Number(number) => number
-                .as_i64()
-                .ok_or_else(|| serde::de::Error::custom("two factor provider id is not an integer"))?,
-            serde_json::Value::String(text) => text
-                .parse::<i64>()
-                .map_err(|e| serde::de::Error::custom(format!("invalid two factor provider id: {e}")))?,
+            serde_json::Value::Number(number) => number.as_i64().ok_or_else(|| {
+                serde::de::Error::custom("two factor provider id is not an integer")
+            })?,
+            serde_json::Value::String(text) => text.parse::<i64>().map_err(|e| {
+                serde::de::Error::custom(format!("invalid two factor provider id: {e}"))
+            })?,
             other => {
                 return Err(serde::de::Error::custom(format!(
                     "invalid two factor provider id type: {other}"
@@ -1305,8 +1502,20 @@ fn decrypt_cipher(
             &item_key,
             false,
         )?;
-        push_card_field(&mut custom_fields, "Number", data.number.clone(), &item_key, false)?;
-        push_card_field(&mut custom_fields, "Brand", data.brand.clone(), &item_key, false)?;
+        push_card_field(
+            &mut custom_fields,
+            "Number",
+            data.number.clone(),
+            &item_key,
+            false,
+        )?;
+        push_card_field(
+            &mut custom_fields,
+            "Brand",
+            data.brand.clone(),
+            &item_key,
+            false,
+        )?;
         push_card_field(
             &mut custom_fields,
             "Exp Month",
@@ -1321,16 +1530,40 @@ fn decrypt_cipher(
             &item_key,
             false,
         )?;
-        push_card_field(&mut custom_fields, "CVV", data.code.clone(), &item_key, true)?;
+        push_card_field(
+            &mut custom_fields,
+            "CVV",
+            data.code.clone(),
+            &item_key,
+            true,
+        )?;
         push_identity_data_fields(&mut custom_fields, data, &item_key)?;
     }
 
     if let Some(card) = cipher.card {
-        push_card_field(&mut custom_fields, "Cardholder", card.cardholder_name, &item_key, false)?;
+        push_card_field(
+            &mut custom_fields,
+            "Cardholder",
+            card.cardholder_name,
+            &item_key,
+            false,
+        )?;
         push_card_field(&mut custom_fields, "Number", card.number, &item_key, false)?;
         push_card_field(&mut custom_fields, "Brand", card.brand, &item_key, false)?;
-        push_card_field(&mut custom_fields, "Exp Month", card.exp_month, &item_key, false)?;
-        push_card_field(&mut custom_fields, "Exp Year", card.exp_year, &item_key, false)?;
+        push_card_field(
+            &mut custom_fields,
+            "Exp Month",
+            card.exp_month,
+            &item_key,
+            false,
+        )?;
+        push_card_field(
+            &mut custom_fields,
+            "Exp Year",
+            card.exp_year,
+            &item_key,
+            false,
+        )?;
         push_card_field(&mut custom_fields, "CVV", card.code, &item_key, true)?;
     }
 
@@ -1397,8 +1630,8 @@ fn decode_cipher(
     organization_keys: &HashMap<String, Vec<u8>>,
     folders: &HashMap<String, String>,
 ) -> Result<(BwItemDetail, StoredCipher), BwError> {
-    let cipher: CipherResponse = serde_json::from_value(raw.clone())
-        .map_err(|e| BwError::Parse(format!("cipher: {e}")))?;
+    let cipher: CipherResponse =
+        serde_json::from_value(raw.clone()).map_err(|e| BwError::Parse(format!("cipher: {e}")))?;
     let item_key = cipher_item_key(&cipher, user_key, organization_keys)?;
     let mut detail = decrypt_cipher(cipher, user_key, organization_keys, folders)?;
     let revision_date = raw_get(&raw, "revisionDate")
@@ -1514,7 +1747,10 @@ fn ensure_editable(raw: &Value) -> Result<(), BwError> {
     let unsupported =
         || BwError::Cli("this item uses a server format that can't be edited here".into());
     let object = raw.as_object().ok_or_else(unsupported)?;
-    let item_type = object.get("type").and_then(Value::as_i64).ok_or_else(unsupported)?;
+    let item_type = object
+        .get("type")
+        .and_then(Value::as_i64)
+        .ok_or_else(unsupported)?;
     let type_key = type_object_key(item_type).ok_or_else(unsupported)?;
     if !object.get("name").is_some_and(Value::is_string) {
         return Err(unsupported());
@@ -1591,7 +1827,10 @@ fn encrypt_optional(plaintext: &str, key: &[u8]) -> Result<Value, BwError> {
 
 fn uri_checksum(uri: &str, key: &[u8]) -> Result<Value, BwError> {
     let digest = <Sha256 as sha2::Digest>::digest(uri.as_bytes());
-    encrypt_value(&base64::engine::general_purpose::STANDARD.encode(digest), key)
+    encrypt_value(
+        &base64::engine::general_purpose::STANDARD.encode(digest),
+        key,
+    )
 }
 
 fn validate_draft(draft: &ItemDraft) -> Result<(), BwError> {
@@ -1603,7 +1842,9 @@ fn validate_draft(draft: &ItemDraft) -> Result<(), BwError> {
         .iter()
         .any(|field| field.name.trim().is_empty() && !field.value.is_empty())
     {
-        return Err(BwError::Cli("custom fields with a value need a name".into()));
+        return Err(BwError::Cli(
+            "custom fields with a value need a name".into(),
+        ));
     }
     Ok(())
 }
@@ -1747,7 +1988,11 @@ fn build_save_request(
         }
         login.insert(
             "uris".into(),
-            if uris.is_empty() { Value::Null } else { Value::Array(uris) },
+            if uris.is_empty() {
+                Value::Null
+            } else {
+                Value::Array(uris)
+            },
         );
         body.insert("login".into(), Value::Object(login));
     }
@@ -1794,11 +2039,18 @@ fn build_save_request(
     }
     body.insert(
         "fields".into(),
-        if fields.is_empty() { Value::Null } else { Value::Array(fields) },
+        if fields.is_empty() {
+            Value::Null
+        } else {
+            Value::Array(fields)
+        },
     );
 
     if let Some(revision) = &stored.revision_date {
-        body.insert("lastKnownRevisionDate".into(), Value::String(revision.clone()));
+        body.insert(
+            "lastKnownRevisionDate".into(),
+            Value::String(revision.clone()),
+        );
     }
     Ok(Value::Object(body))
 }
@@ -1994,19 +2246,27 @@ fn item_type_name(item_type: i64) -> &'static str {
 }
 
 fn normalize_server_url(server_url: &str) -> Result<String, BwError> {
-    let trimmed = server_url.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
-        return Err(BwError::Cli("server URL is required".into()));
-    }
-    if !trimmed.starts_with("https://") && !trimmed.starts_with("http://") {
+    let parsed = Url::parse(server_url.trim())
+        .map_err(|_| BwError::Cli("Enter a valid HTTPS server URL".into()))?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
         return Err(BwError::Cli(
-            "server URL must start with https:// or http://".into(),
+            "Server URL must use HTTPS without credentials, query, or fragment".into(),
         ));
     }
-    Ok(trimmed.to_string())
+    Ok(parsed.to_string().trim_end_matches('/').to_string())
 }
 
-fn master_key(email: &str, password: &str, prelogin: &PreloginResponse) -> Result<Vec<u8>, BwError> {
+fn master_key(
+    email: &str,
+    password: &str,
+    prelogin: &PreloginResponse,
+) -> Result<Vec<u8>, BwError> {
     let salt = email.trim().to_lowercase();
     derive_master_key(
         password,
@@ -2089,10 +2349,52 @@ fn saved_kdf_from_challenge(
         );
     }
 
-    (
-        email.trim().to_lowercase(),
-        challenge_kdf.clone(),
-    )
+    (email.trim().to_lowercase(), challenge_kdf.clone())
+}
+
+// Derive a separate key for local session storage, bound to account and server.
+fn session_storage_key(
+    session: &SavedSession,
+    user_key: &[u8],
+) -> Result<Zeroizing<[u8; 64]>, BwError> {
+    let context = serde_json::to_vec(&(&session.server_url, &session.email))
+        .map_err(|e| BwError::Parse(e.to_string()))?;
+    let kdf = hkdf::Hkdf::<Sha256>::new(Some(b"bw-quick-access/session-token/v1"), user_key);
+    let mut key = Zeroizing::new([0u8; 64]);
+    kdf.expand(&context, key.as_mut())
+        .map_err(|_| BwError::Parse("Session key derivation failed".into()))?;
+    Ok(key)
+}
+
+fn encrypt_session_token(
+    session: &mut SavedSession,
+    token: &str,
+    user_key: &[u8],
+) -> Result<(), BwError> {
+    let key = session_storage_key(session, user_key)?;
+    session.encrypted_refresh_token = Some(encrypt_string(token, key.as_ref())?);
+    session.refresh_token.zeroize();
+    Ok(())
+}
+
+fn saved_session_token(session: &SavedSession, user_key: &[u8]) -> Result<String, BwError> {
+    match &session.encrypted_refresh_token {
+        Some(encrypted) => {
+            if !encrypted.starts_with("2.") {
+                return Err(BwError::Parse(
+                    "Unsupported saved-session encryption".into(),
+                ));
+            }
+            let key = session_storage_key(session, user_key)?;
+            decrypt_string(encrypted, key.as_ref())?
+                .ok_or_else(|| BwError::Parse("Empty saved-session token".into()))
+        }
+        // Legacy sessions are migrated after a successful token refresh.
+        None if !session.refresh_token.is_empty() => Ok(session.refresh_token.clone()),
+        None => Err(BwError::Parse(
+            "Saved session contains no refresh token".into(),
+        )),
+    }
 }
 
 fn save_successful_session(
@@ -2101,19 +2403,23 @@ fn save_successful_session(
     refresh_token: Option<&str>,
     master_key_encrypted_user_key: &str,
     (salt, kdf): (String, SavedKdf),
-) {
+    user_key: &[u8],
+) -> Result<(), BwError> {
     let Some(refresh_token) = refresh_token else {
-        return;
+        return Ok(());
     };
-    let session = SavedSession {
+    let mut session = SavedSession {
         server_url: server_url.to_string(),
         email: email.trim().to_string(),
-        refresh_token: refresh_token.to_string(),
+        refresh_token: String::new(),
+        encrypted_refresh_token: None,
         master_key_encrypted_user_key: master_key_encrypted_user_key.to_string(),
         salt,
         kdf,
     };
-    let _ = config::save_session(&session);
+    encrypt_session_token(&mut session, refresh_token, user_key)?;
+    config::save_session(&session)
+        .map_err(|e| BwError::Cli(format!("Could not save encrypted session: {e}")))
 }
 
 fn derive_master_key(
@@ -2225,7 +2531,8 @@ fn encrypt_bytes_with_iv(plaintext: &[u8], key: &[u8], iv: [u8; 16]) -> Result<S
 }
 
 fn decrypt_opt_string(value: Option<&str>, key: &[u8]) -> Result<Option<String>, BwError> {
-    value.map(|value| decrypt_string(value, key))
+    value
+        .map(|value| decrypt_string(value, key))
         .transpose()
         .map(|value| value.flatten())
 }
@@ -2551,7 +2858,11 @@ mod tests {
             (2000000000, "69279037"),
             (20000000000, "65353130"),
         ] {
-            assert_eq!(generate_totp(seed, time).unwrap().code, expected, "time {time}");
+            assert_eq!(
+                generate_totp(seed, time).unwrap().code,
+                expected,
+                "time {time}"
+            );
         }
     }
 
@@ -2708,7 +3019,10 @@ mod tests {
             card: None,
             identity: None,
             ssh_key: Some(SshKeyResponse {
-                private_key: Some(encrypt_string("-----BEGIN OPENSSH PRIVATE KEY-----", &user_key)),
+                private_key: Some(encrypt_string(
+                    "-----BEGIN OPENSSH PRIVATE KEY-----",
+                    &user_key,
+                )),
                 public_key: Some(encrypt_string("ssh-ed25519 AAAATEST", &user_key)),
                 key_fingerprint: Some(encrypt_string("SHA256:test", &user_key)),
             }),
@@ -2995,13 +3309,7 @@ mod tests {
         assert_eq!(cipher.folder_id.as_deref(), Some("folder-1"));
         assert_eq!(cipher.item_type, 1);
         assert_eq!(
-            cipher
-                .login
-                .as_ref()
-                .unwrap()
-                .uris
-                .as_ref()
-                .unwrap()[0]
+            cipher.login.as_ref().unwrap().uris.as_ref().unwrap()[0]
                 .uri
                 .as_deref(),
             Some("2.iv|data|mac")
@@ -3041,13 +3349,7 @@ mod tests {
             Some("2.iv|data|mac")
         );
         assert_eq!(
-            cipher
-                .data
-                .as_ref()
-                .unwrap()
-                .uris
-                .as_ref()
-                .unwrap()[0]
+            cipher.data.as_ref().unwrap().uris.as_ref().unwrap()[0]
                 .uri
                 .as_deref(),
             Some("2.iv|data|mac")
@@ -3078,16 +3380,28 @@ mod tests {
             let second = super::encrypt_string("hunter2", &key).unwrap();
 
             assert_ne!(first, second, "each value gets its own IV");
-            assert_eq!(decrypt_string(&first, &key).unwrap().as_deref(), Some("hunter2"));
-            assert_eq!(decrypt_string(&second, &key).unwrap().as_deref(), Some("hunter2"));
+            assert_eq!(
+                decrypt_string(&first, &key).unwrap().as_deref(),
+                Some("hunter2")
+            );
+            assert_eq!(
+                decrypt_string(&second, &key).unwrap().as_deref(),
+                Some("hunter2")
+            );
         }
     }
 
     #[test]
     fn formats_iso8601_timestamps() {
         assert_eq!(iso8601_from_unix_ms(0), "1970-01-01T00:00:00.000Z");
-        assert_eq!(iso8601_from_unix_ms(951_782_400_123), "2000-02-29T00:00:00.123Z");
-        assert_eq!(iso8601_from_unix_ms(1_790_762_163_576), "2026-09-30T09:56:03.576Z");
+        assert_eq!(
+            iso8601_from_unix_ms(951_782_400_123),
+            "2000-02-29T00:00:00.123Z"
+        );
+        assert_eq!(
+            iso8601_from_unix_ms(1_790_762_163_576),
+            "2026-09-30T09:56:03.576Z"
+        );
     }
 
     #[test]
@@ -3102,12 +3416,21 @@ mod tests {
             })
         };
         let state = |raw: Value| {
-            decode_cipher(raw, &key, &HashMap::new(), &HashMap::new()).unwrap().0.state
+            decode_cipher(raw, &key, &HashMap::new(), &HashMap::new())
+                .unwrap()
+                .0
+                .state
         };
 
         assert_eq!(state(cipher(Value::Null, Value::Null)), ItemState::Active);
-        assert_eq!(state(cipher(Value::Null, json!("2026-02-02"))), ItemState::Archived);
-        assert_eq!(state(cipher(json!("2026-02-02"), json!("2026-02-02"))), ItemState::Deleted);
+        assert_eq!(
+            state(cipher(Value::Null, json!("2026-02-02"))),
+            ItemState::Archived
+        );
+        assert_eq!(
+            state(cipher(json!("2026-02-02"), json!("2026-02-02"))),
+            ItemState::Deleted
+        );
         let (_, stored) = decode_cipher(
             cipher(Value::Null, Value::Null),
             &key,
@@ -3115,7 +3438,10 @@ mod tests {
             &HashMap::new(),
         )
         .unwrap();
-        assert_eq!(stored.revision_date.as_deref(), Some("2026-01-01T00:00:00.000Z"));
+        assert_eq!(
+            stored.revision_date.as_deref(),
+            Some("2026-01-01T00:00:00.000Z")
+        );
     }
 
     #[test]
@@ -3133,10 +3459,7 @@ mod tests {
 
     #[test]
     fn rejects_ids_that_are_not_uuids_in_paths() {
-        assert_eq!(
-            cipher_path("0b6f-AB12").unwrap(),
-            "/api/ciphers/0b6f-AB12"
-        );
+        assert_eq!(cipher_path("0b6f-AB12").unwrap(), "/api/ciphers/0b6f-AB12");
         assert!(cipher_path("../sync").is_err());
         assert!(cipher_path("").is_err());
     }
@@ -3144,7 +3467,9 @@ mod tests {
     fn editable_login(key: &[u8]) -> StoredCipher {
         let enc = |value: &str| encrypt_string(value, key);
         let history = (0..5)
-            .map(|idx| json!({"password": enc(&format!("old-{idx}")), "lastUsedDate": "2025-01-01"}))
+            .map(
+                |idx| json!({"password": enc(&format!("old-{idx}")), "lastUsedDate": "2025-01-01"}),
+            )
             .collect::<Vec<_>>();
         let raw = json!({
             "id": "cipher-edit",
@@ -3214,20 +3539,33 @@ mod tests {
 
         let body = build_save_request(&stored, &draft, "2026-09-30T10:00:00.000Z").unwrap();
         let raw = &stored.raw;
-        let dec = |value: &Value| decrypt_string(value.as_str().unwrap(), &key).unwrap().unwrap();
+        let dec = |value: &Value| {
+            decrypt_string(value.as_str().unwrap(), &key)
+                .unwrap()
+                .unwrap()
+        };
 
         // Untouched data goes back byte for byte.
         assert_eq!(body["name"], raw["name"]);
         assert_eq!(body["favorite"], raw["favorite"]);
         assert_eq!(body["reprompt"], raw["reprompt"]);
         assert_eq!(body["login"]["username"], raw["login"]["username"]);
-        assert_eq!(body["login"]["fido2Credentials"], raw["login"]["fido2Credentials"]);
+        assert_eq!(
+            body["login"]["fido2Credentials"],
+            raw["login"]["fido2Credentials"]
+        );
         assert_eq!(body["login"]["uris"][0], raw["login"]["uris"][0]);
         assert!(body.get("data").is_none());
         // Edited values are re-encrypted, keeping their extra settings.
         assert_eq!(dec(&body["login"]["password"]), "new-password");
-        assert_eq!(body["login"]["passwordRevisionDate"], "2026-09-30T10:00:00.000Z");
-        assert_eq!(dec(&body["login"]["uris"][1]["uri"]), "https://three.example");
+        assert_eq!(
+            body["login"]["passwordRevisionDate"],
+            "2026-09-30T10:00:00.000Z"
+        );
+        assert_eq!(
+            dec(&body["login"]["uris"][1]["uri"]),
+            "https://three.example"
+        );
         assert_eq!(body["login"]["uris"][1]["match"], 3);
         assert_eq!(dec(&body["fields"][0]["name"]), "Environment");
         assert_eq!(body["fields"][0]["value"], raw["fields"][0]["value"]);
@@ -3293,7 +3631,10 @@ mod tests {
                 username: "tester".into(),
                 password: "pw".into(),
                 totp: String::new(),
-                uris: vec![DraftUri { uri: "https://t.example".into(), original_index: None }],
+                uris: vec![DraftUri {
+                    uri: "https://t.example".into(),
+                    original_index: None,
+                }],
             }),
             fields: vec![DraftField {
                 name: "Pin".into(),
@@ -3334,7 +3675,193 @@ mod tests {
         assert_eq!(body["type"], 2);
         assert_eq!(body["secureNote"]["type"], 0);
         assert!(body["login"].is_null());
-        assert_eq!(decrypt_string(body["notes"].as_str().unwrap(), &key).unwrap().as_deref(), Some("text"));
-        assert!(build_create_request(&ItemDraft::default(), &key).is_err(), "name is required");
+        assert_eq!(
+            decrypt_string(body["notes"].as_str().unwrap(), &key)
+                .unwrap()
+                .as_deref(),
+            Some("text")
+        );
+        assert!(
+            build_create_request(&ItemDraft::default(), &key).is_err(),
+            "name is required"
+        );
+    }
+    fn protected_fixture() -> BwClient {
+        let user_key = vec![24u8; 64];
+        let salt = "audit@example.test".to_string();
+        let kdf = SavedKdf {
+            kdf_type: 0,
+            iterations: 1000,
+            memory: None,
+            parallelism: None,
+        };
+        let master = derive_master_key("correct", &salt, 0, 1000, None, None).unwrap();
+        let wrapped = super::encrypt_bytes_with_iv(&user_key, &master, [4u8; 16]).unwrap();
+        let stored = editable_login(&user_key);
+        let (detail, stored) = decode_cipher(
+            stored.raw.clone(),
+            &user_key,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        BwClient {
+            client: Client::new(),
+            reauth: Some((salt, kdf, wrapped)),
+            item_grants: HashMap::new(),
+            base_url: "https://example.test".into(),
+            device_identifier: "test".into(),
+            access_token: Some("test".into()),
+            refresh_token: None,
+            user_key: Some(user_key),
+            items: vec![detail],
+            ciphers: HashMap::from([("cipher-edit".into(), stored)]),
+            folders: HashMap::new(),
+            organization_keys: HashMap::new(),
+            sync_warning: None,
+            sync_status: SyncStatus::default(),
+            last_sync_attempt: None,
+        }
+    }
+
+    #[test]
+    fn server_url_requires_https_and_rejects_ambiguous_authority() {
+        for url in [
+            "http://vault.example.com",
+            "http://localhost",
+            "https://user:pass@example.com",
+            "https://example.com?q=x",
+            "https://example.com/#x",
+            "not a URL",
+        ] {
+            assert!(normalize_server_url(url).is_err(), "{url}");
+        }
+        assert_eq!(
+            normalize_server_url(" https://example.com/vault/ ").unwrap(),
+            "https://example.com/vault"
+        );
+    }
+
+    fn session_fixture() -> SavedSession {
+        SavedSession {
+            server_url: "https://vault.example.test".into(),
+            email: "fixture@example.test".into(),
+            refresh_token: "legacy-refresh-secret".into(),
+            encrypted_refresh_token: None,
+            master_key_encrypted_user_key: "encrypted-key".into(),
+            salt: "fixture@example.test".into(),
+            kdf: SavedKdf {
+                kdf_type: 0,
+                iterations: 1,
+                memory: None,
+                parallelism: None,
+            },
+        }
+    }
+
+    #[test]
+    fn saved_token_migration_and_rotation_never_serialize_plaintext() {
+        let key = [42u8; 64];
+        let mut saved = session_fixture();
+        assert_eq!(
+            saved_session_token(&saved, &key).unwrap(),
+            "legacy-refresh-secret"
+        );
+        assert!(config::save_session(&saved).is_err());
+        encrypt_session_token(&mut saved, "legacy-refresh-secret", &key).unwrap();
+        assert!(saved.refresh_token.is_empty());
+        let encoded = serde_json::to_string(&saved).unwrap();
+        assert!(!encoded.contains("legacy-refresh-secret"));
+        assert!(!encoded.contains("\"refresh_token\""));
+        let mut loaded: SavedSession = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            saved_session_token(&loaded, &key).unwrap(),
+            "legacy-refresh-secret"
+        );
+        encrypt_session_token(&mut loaded, "rotated-refresh-secret", &key).unwrap();
+        assert_eq!(
+            saved_session_token(&loaded, &key).unwrap(),
+            "rotated-refresh-secret"
+        );
+        assert_ne!(
+            loaded.encrypted_refresh_token,
+            saved.encrypted_refresh_token
+        );
+        assert!(!format!("{:?}", session_fixture()).contains("legacy-refresh-secret"));
+    }
+
+    #[test]
+    fn saved_token_rejects_wrong_key_tampering_and_account_substitution() {
+        let key = [42u8; 64];
+        let mut saved = session_fixture();
+        encrypt_session_token(&mut saved, "secret", &key).unwrap();
+        assert!(saved_session_token(&saved, &[43u8; 64]).is_err());
+        let original = saved.encrypted_refresh_token.clone().unwrap();
+        let mut bytes = original.as_bytes().to_vec();
+        bytes[2] = if bytes[2] == b'A' { b'B' } else { b'A' };
+        saved.encrypted_refresh_token = Some(String::from_utf8(bytes).unwrap());
+        assert!(saved_session_token(&saved, &key).is_err());
+        saved.encrypted_refresh_token = Some(original);
+        saved.email = "other@example.test".into();
+        assert!(saved_session_token(&saved, &key).is_err());
+        saved.encrypted_refresh_token = Some("0.unauthenticated".into());
+        assert!(saved_session_token(&saved, &key).is_err());
+    }
+
+    #[test]
+    fn copying_rejects_a_stale_item_after_fields_shift() {
+        let mut client = protected_fixture();
+        let item = &mut client.items[0];
+        item.username = Some("fixture user".into());
+        item.password = Some("fixture password".into());
+        let version = item.copy_version();
+        assert_eq!(
+            item.copy_value_checked(0, &version).unwrap(),
+            "fixture user"
+        );
+        item.username = None;
+        assert!(item.copy_value_checked(0, &version).is_err());
+        assert_eq!(
+            item.copy_value_checked(0, &item.copy_version()).unwrap(),
+            "fixture password"
+        );
+    }
+
+    #[test]
+    fn protected_item_requires_password_and_expires_or_revokes_access() {
+        let mut client = protected_fixture();
+        assert!(matches!(
+            client.get_item("cipher-edit"),
+            Err(BwError::RepromptRequired)
+        ));
+        assert!(matches!(
+            client.edit_draft("cipher-edit"),
+            Err(BwError::RepromptRequired)
+        ));
+        assert!(client.authorize_item("cipher-edit", "wrong").is_err());
+        assert!(client.item_grants.is_empty());
+        assert_eq!(
+            client
+                .authorize_item("cipher-edit", "correct")
+                .unwrap()
+                .password
+                .as_deref(),
+            Some("current-password")
+        );
+        assert!(client.edit_draft("cipher-edit").is_ok());
+        client.item_grants.insert(
+            "cipher-edit".into(),
+            Instant::now() - Duration::from_secs(61),
+        );
+        assert!(matches!(
+            client.get_item("cipher-edit"),
+            Err(BwError::RepromptRequired)
+        ));
+        client.authorize_item("cipher-edit", "correct").unwrap();
+        client.revoke_item_grants();
+        assert!(matches!(
+            client.get_item("cipher-edit"),
+            Err(BwError::RepromptRequired)
+        ));
     }
 }
