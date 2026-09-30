@@ -22,14 +22,14 @@ jobs:
           set -euo pipefail
 
           tag="${{ github.event.release.tag_name }}"
-          artifact="bw-quick-access-${tag}-x86_64-linux"
+          artifact="boltwarden-${tag}-x86_64-linux"
           bundle_link="${RUNNER_TEMP:-/tmp}/${artifact}"
 
           mkdir -p "dist/${artifact}"
           rm -f "${bundle_link}"
 
           nix bundle .#packages.x86_64-linux.default --out-link "${bundle_link}"
-          install -m 0755 "$(readlink -f "${bundle_link}")" "dist/${artifact}/bw-quick-access"
+          install -m 0755 "$(readlink -f "${bundle_link}")" "dist/${artifact}/boltwarden"
           rm -f "${bundle_link}"
 
           tar -C dist -czf "dist/${artifact}.tar.gz" "${artifact}"

@@ -88,11 +88,7 @@ pub fn icons_url_for_server(server_url: &str) -> String {
 }
 
 fn cache_root() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
-    Some(base.join("bw-quick-access").join("icons"))
+    Some(crate::config::cache_dir()?.join("icons"))
 }
 
 /// Versioned so a decoder change (v2: SVG support) does not trust old "no icon" entries.

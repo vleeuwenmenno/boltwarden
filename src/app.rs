@@ -1500,8 +1500,8 @@ impl App {
 }
 
 fn debug_log(message: &str) {
-    if std::env::var_os("BWQA_DEBUG").is_some() {
-        eprintln!("[bw-quick-access] {message}");
+    if std::env::var_os("BOLTWARDEN_DEBUG").is_some() {
+        eprintln!("[boltwarden] {message}");
     }
 }
 

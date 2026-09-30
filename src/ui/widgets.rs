@@ -334,6 +334,12 @@ pub fn confirm_dialog(ctx: &egui::Context, dialog: &ConfirmDialog<'_>) -> Option
     result
 }
 
+/// The app's mark in the accent color, `size` points square.
+pub fn logo(ui: &mut Ui, size: f32) -> Response {
+    let texture = crate::logo::texture(ui.ctx(), theme().accent);
+    ui.add(egui::Image::new(&texture).fit_to_exact_size(egui::vec2(size, size)))
+}
+
 /// "2026-05-17T08:12:00.000Z" -> "17 May 2026". `None` for anything else.
 pub fn format_date(iso: &str) -> Option<String> {
     const MONTHS: [&str; 12] = [

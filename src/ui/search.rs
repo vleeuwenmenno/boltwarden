@@ -729,11 +729,7 @@ fn search_cursor_at_end(ctx: &Context, query: &str) -> bool {
 fn draw_search_field(ui: &mut Ui, state: &mut SearchState) {
     let t = theme();
     ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(t.icon("\u{f002}", "🔎"))
-                .size(t.input())
-                .color(t.text_muted),
-        );
+        widgets::logo(ui, t.input() + 4.0);
         ui.add_space(6.0);
         let chip = match state.view {
             SearchView::Archived => Some((t.icon("\u{f187}", "🗄"), "Archived")),

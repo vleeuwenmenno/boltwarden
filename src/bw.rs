@@ -25,7 +25,7 @@ use url::Url;
 use zeroize::{Zeroize, Zeroizing};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(12);
-const CLIENT_NAME: &str = "bw-quick-access";
+const CLIENT_NAME: &str = "boltwarden";
 // Vaultwarden gates newer cipher types, including SSH keys, on this Bitwarden client header.
 const SYNC_COMPAT_CLIENT_VERSION: &str = "2024.12.0";
 // Official clients keep this many old passwords per login.
@@ -215,7 +215,7 @@ impl BwClient {
                 .https_only(true)
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(HTTP_TIMEOUT)
-                .user_agent("bw-quick-access/0.1")
+                .user_agent("boltwarden/0.1")
                 .build()
                 .expect("reqwest client"),
             base_url: std::env::var("BW_SERVER")
@@ -926,7 +926,7 @@ impl BwClient {
             ("client_id", "web"),
             ("deviceType", "10"),
             ("deviceIdentifier", self.device_identifier.as_str()),
-            ("deviceName", "bw-quick-access"),
+            ("deviceName", "Boltwarden"),
         ];
         let provider_id;
         let remember_value;
@@ -2672,6 +2672,7 @@ fn session_storage_key(
 ) -> Result<Zeroizing<[u8; 64]>, BwError> {
     let context = serde_json::to_vec(&(&session.server_url, &session.email))
         .map_err(|e| BwError::Parse(e.to_string()))?;
+    // Keeps the pre-rename label: changing it would make every saved session unreadable.
     let kdf = hkdf::Hkdf::<Sha256>::new(Some(b"bw-quick-access/session-token/v1"), user_key);
     let mut key = Zeroizing::new([0u8; 64]);
     kdf.expand(&context, key.as_mut())
@@ -3367,7 +3368,7 @@ mod tests {
     fn sync_request_uses_ssh_key_compatible_client_metadata() {
         assert_eq!(
             sync_client_name_header(),
-            ("Bitwarden-Client-Name", "bw-quick-access")
+            ("Bitwarden-Client-Name", "boltwarden")
         );
         assert_eq!(
             sync_client_version_header(),

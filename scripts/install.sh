@@ -61,7 +61,7 @@ case "$command" in
         mkdir -p "$systemd_user_dir"
         cat > "$service_path" <<EOF
 [Unit]
-Description=Bitwarden Quick Access
+Description=Boltwarden
 After=graphical-session.target
 PartOf=graphical-session.target
 

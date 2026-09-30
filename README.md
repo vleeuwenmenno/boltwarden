@@ -1,6 +1,14 @@
-# bw-quick-access
+# Boltwarden
 
-A small Linux quick-access GUI for Bitwarden and Vaultwarden vaults.
+An unofficial Linux desktop app for Vaultwarden and Bitwarden vaults: a quick
+access popup plus a full vault window. It is not affiliated with Bitwarden or the
+Vaultwarden project.
+
+Formerly `bw-quick-access`. On first start, Boltwarden moves
+`~/.config/bw-quick-access` and `~/.cache/bw-quick-access` to their new names, so the
+saved session and settings carry over. Remove the old user service
+(`systemctl --user disable --now bw-quick-access.service`) and binary after
+installing the new one.
 
 The goal is to provide a 1Password-style quick access window: open it from a
 keyboard shortcut or tray icon, search your vault, open an entry, and copy the
@@ -42,7 +50,7 @@ Build a release binary:
 make
 ```
 
-Install it to `/usr/local/bin/bw-quick-access`:
+Install it to `/usr/local/bin/boltwarden`:
 
 ```bash
 sudo make install
@@ -57,7 +65,7 @@ make install-service
 The service runs:
 
 ```bash
-/usr/local/bin/bw-quick-access --daemon
+/usr/local/bin/boltwarden --daemon
 ```
 
 `--daemon` starts the tray icon, activation socket, and in-memory vault session
@@ -75,15 +83,15 @@ Use it as a flake input:
 
 ```nix
 {
-  inputs.bw-quick-access.url = "git+ssh://git@git.mvl.sh/vleeuwenmenno/bw-quick-access.git";
+  inputs.boltwarden.url = "git+ssh://git@git.mvl.sh/vleeuwenmenno/bw-quick-access.git";
 }
 ```
 
-The default package installs the `bw-quick-access` binary and a desktop launcher
-named `Bitwarden Quick Access Daemon`. The launcher starts:
+The default package installs the `boltwarden` binary and a desktop launcher
+named `Boltwarden Daemon`. The launcher starts:
 
 ```bash
-bw-quick-access --daemon
+boltwarden --daemon
 ```
 
 This is useful on desktops where you prefer launching the daemon manually instead
@@ -97,26 +105,26 @@ executable and a `.sha256` checksum.
 Open the quick access popup:
 
 ```bash
-bw-quick-access
+boltwarden
 ```
 
 Toggle the popup:
 
 ```bash
-bw-quick-access --toggle
+boltwarden --toggle
 ```
 
 or:
 
 ```bash
-bw-quick-access toggle
+boltwarden toggle
 ```
 
 Open the vault window, or toggle it:
 
 ```bash
-bw-quick-access window
-bw-quick-access toggle-window
+boltwarden window
+boltwarden toggle-window
 ```
 
 If the daemon is already running, these commands send a message to the daemon
@@ -127,11 +135,11 @@ Wayland apps can't grab global shortcuts, so bind the commands in your composito
 For Hyprland:
 
 ```ini
-bind = SUPER, P, exec, bw-quick-access toggle
-bind = SUPER SHIFT, P, exec, bw-quick-access window
+bind = SUPER, P, exec, boltwarden toggle
+bind = SUPER SHIFT, P, exec, boltwarden window
 ```
 
-The popup uses the `bw-quick-access` app id and the window `bw-quick-access-window`,
+The popup uses the `boltwarden` app id and the window `boltwarden-window`,
 so window rules for the popup (floating, always on top) don't affect the window.
 
 Typical keybindings:
@@ -185,7 +193,7 @@ It also suggests sites that offer two-factor login when no one-time code is save
 and sites that support passkeys when none is stored. Those two checks download the
 public [2fa.directory](https://2fa.directory) lists whole, so no vault data or
 hostnames leave the machine. The lists are cached for a day in
-`~/.cache/bw-quick-access/2fa-directory.json`; without network access the two cards
+`~/.cache/boltwarden/2fa-directory.json`; without network access the two cards
 show as unavailable. All checks run in the daemon: the window only receives item ids.
 
 ### Passkeys
@@ -211,13 +219,13 @@ are disabled; enter the final server URL directly.
 You can also set a default server with:
 
 ```bash
-BW_SERVER=https://vault.example.com bw-quick-access
+BW_SERVER=https://vault.example.com boltwarden
 ```
 
 After a successful login, the app stores the refresh session in:
 
 ```text
-~/.config/bw-quick-access/session.json
+~/.config/boltwarden/session.json
 ```
 
 The daemon keeps the unlocked vault in memory while it is running. The popup can
@@ -288,7 +296,7 @@ service restarts and subscribes before reading initial session state.
 If automatic locking is enabled and monitoring becomes unavailable, the vault
 locks and a warning appears. Systems without a compatible login service must
 explicitly disable `lock_on_system_lock` and `lock_after_idle_timeout` in
-`~/.config/bw-quick-access/settings.json` to use manual locking. Session selection
+`~/.config/boltwarden/settings.json` to use manual locking. Session selection
 requires the daemon's login session or one unambiguous active graphical session.
 Desktop environments must report their lock/idle state to the login service.
 
@@ -322,19 +330,19 @@ press `Ctrl+R` to sync manually.
 Check service status:
 
 ```bash
-systemctl --user status bw-quick-access.service
+systemctl --user status boltwarden.service
 ```
 
 Restart the daemon:
 
 ```bash
-systemctl --user restart bw-quick-access.service
+systemctl --user restart boltwarden.service
 ```
 
 Stop the daemon:
 
 ```bash
-systemctl --user stop bw-quick-access.service
+systemctl --user stop boltwarden.service
 ```
 
 Remove the service:
@@ -355,20 +363,20 @@ The Makefile supports the usual `PREFIX` override:
 
 ```bash
 make
-sudo make install PREFIX=/opt/bw-quick-access
-make install-service PREFIX=/opt/bw-quick-access
+sudo make install PREFIX=/opt/boltwarden
+make install-service PREFIX=/opt/boltwarden
 ```
 
 This installs the binary to:
 
 ```text
-/opt/bw-quick-access/bin/bw-quick-access
+/opt/boltwarden/bin/boltwarden
 ```
 
 and writes the user service to:
 
 ```text
-~/.config/systemd/user/bw-quick-access.service
+~/.config/systemd/user/boltwarden.service
 ```
 
 ## Development
@@ -384,9 +392,9 @@ RUST_TEST_THREADS=1 make test
 Try the popup or the vault window with made-up data and no vault:
 
 ```bash
-BWQA_DEMO=1 bw-quick-access --popup
-BWQA_DEMO=1 bw-quick-access --vault-window
-BWQA_DEMO=action bw-quick-access --vault-window   # opens on the action center
+BOLTWARDEN_DEMO=1 boltwarden --popup
+BOLTWARDEN_DEMO=1 boltwarden --vault-window
+BOLTWARDEN_DEMO=action boltwarden --vault-window   # opens on the action center
 ```
 
 Build a debug binary:

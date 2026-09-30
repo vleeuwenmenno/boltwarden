@@ -176,11 +176,7 @@ fn parse_passkeys(value: &serde_json::Value) -> HashSet<String> {
 }
 
 fn cache_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
-    Some(base.join("bw-quick-access").join("2fa-directory.json"))
+    Some(crate::config::cache_dir()?.join("2fa-directory.json"))
 }
 
 fn read_cache(path: &PathBuf, ttl: Duration) -> Option<Directory> {

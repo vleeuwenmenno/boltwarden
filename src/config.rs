@@ -5,7 +5,9 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use zeroize::Zeroizing;
 
-const APP_DIR: &str = "bw-quick-access";
+const APP_DIR: &str = "boltwarden";
+/// The directory name before the app was renamed from bw-quick-access.
+const LEGACY_APP_DIR: &str = "bw-quick-access";
 const DEVICE_ID_FILE: &str = "device-id";
 const SESSION_FILE: &str = "session.json";
 const SETTINGS_FILE: &str = "settings.json";
@@ -377,15 +379,65 @@ fn unix_millis_now() -> u64 {
 }
 
 fn config_path(file_name: &str) -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+    Some(config_base()?.join(APP_DIR).join(file_name))
+}
+
+fn config_base() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(base.join(APP_DIR).join(file_name))
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+}
+
+/// `$XDG_CACHE_HOME/boltwarden`, or `~/.cache/boltwarden`.
+pub fn cache_dir() -> Option<PathBuf> {
+    Some(cache_base()?.join(APP_DIR))
+}
+
+fn cache_base() -> Option<PathBuf> {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+}
+
+/// Moves the config (saved session, settings, device id) and cache directories from
+/// the old bw-quick-access name, once. Nothing moves when the new directory exists.
+pub fn migrate_legacy_dirs() {
+    for base in [config_base(), cache_base()].into_iter().flatten() {
+        let _ = migrate_dir(&base.join(LEGACY_APP_DIR), &base.join(APP_DIR));
+    }
+}
+
+fn migrate_dir(old: &std::path::Path, new: &std::path::Path) -> io::Result<()> {
+    if !old.is_dir() || new.exists() {
+        return Ok(());
+    }
+    fs::rename(old, new)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrates_the_legacy_directory_once() {
+        let temp =
+            std::env::temp_dir().join(format!("boltwarden-migrate-{}", uuid::Uuid::new_v4()));
+        let (old, new) = (temp.join(LEGACY_APP_DIR), temp.join(APP_DIR));
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join(SESSION_FILE), "saved").unwrap();
+
+        migrate_dir(&old, &new).unwrap();
+        assert_eq!(fs::read_to_string(new.join(SESSION_FILE)).unwrap(), "saved");
+        assert!(!old.exists());
+
+        // A newer directory is never overwritten by an old one.
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join(SESSION_FILE), "stale").unwrap();
+        migrate_dir(&old, &new).unwrap();
+        assert_eq!(fs::read_to_string(new.join(SESSION_FILE)).unwrap(), "saved");
+        let _ = fs::remove_dir_all(temp);
+    }
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -393,10 +445,8 @@ mod tests {
     #[test]
     fn reuses_existing_device_identifier_from_xdg_config() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = std::env::temp_dir().join(format!(
-            "bw-quick-access-config-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("boltwarden-config-test-{}", uuid::Uuid::new_v4()));
         let config_dir = temp.join("config");
         let app_dir = config_dir.join(APP_DIR);
         fs::create_dir_all(&app_dir).unwrap();
@@ -418,10 +468,8 @@ mod tests {
     #[test]
     fn creates_device_identifier_in_xdg_config() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = std::env::temp_dir().join(format!(
-            "bw-quick-access-config-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("boltwarden-config-test-{}", uuid::Uuid::new_v4()));
         let config_dir = temp.join("config");
         let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
 
@@ -441,10 +489,8 @@ mod tests {
     #[test]
     fn saves_and_loads_session_from_xdg_config() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = std::env::temp_dir().join(format!(
-            "bw-quick-access-config-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("boltwarden-config-test-{}", uuid::Uuid::new_v4()));
         let config_dir = temp.join("config");
         let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
 
@@ -490,10 +536,8 @@ mod tests {
     #[test]
     fn clears_saved_session_from_xdg_config() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = std::env::temp_dir().join(format!(
-            "bw-quick-access-config-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("boltwarden-config-test-{}", uuid::Uuid::new_v4()));
         let config_dir = temp.join("config");
         let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
 
@@ -527,10 +571,8 @@ mod tests {
     #[test]
     fn missing_settings_defaults_enabled_features() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = std::env::temp_dir().join(format!(
-            "bw-quick-access-config-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("boltwarden-config-test-{}", uuid::Uuid::new_v4()));
         let config_dir = temp.join("config");
         let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
 
@@ -559,10 +601,8 @@ mod tests {
     #[test]
     fn saves_and_loads_app_settings() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = std::env::temp_dir().join(format!(
-            "bw-quick-access-config-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("boltwarden-config-test-{}", uuid::Uuid::new_v4()));
         let config_dir = temp.join("config");
         let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
 
@@ -630,10 +670,8 @@ mod tests {
     #[test]
     fn loading_old_settings_file_defaults_new_settings_to_enabled() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = std::env::temp_dir().join(format!(
-            "bw-quick-access-config-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("boltwarden-config-test-{}", uuid::Uuid::new_v4()));
         let config_dir = temp.join("config");
         let app_dir = config_dir.join(APP_DIR);
         fs::create_dir_all(&app_dir).unwrap();
@@ -673,16 +711,16 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let previous_home = std::env::var_os("HOME");
         unsafe {
-            std::env::set_var("HOME", "/tmp/bwqa-home");
+            std::env::set_var("HOME", "/tmp/boltwarden-home");
         }
 
         assert_eq!(
             expand_ssh_agent_socket_path("$HOME/.bitwarden-ssh.sock").unwrap(),
-            PathBuf::from("/tmp/bwqa-home/.bitwarden-ssh.sock")
+            PathBuf::from("/tmp/boltwarden-home/.bitwarden-ssh.sock")
         );
         assert_eq!(
             expand_ssh_agent_socket_path("~/.bitwarden-ssh.sock").unwrap(),
-            PathBuf::from("/tmp/bwqa-home/.bitwarden-ssh.sock")
+            PathBuf::from("/tmp/boltwarden-home/.bitwarden-ssh.sock")
         );
         assert!(expand_ssh_agent_socket_path("").is_err());
         assert!(expand_ssh_agent_socket_path("relative.sock").is_err());
@@ -694,10 +732,8 @@ mod tests {
     #[test]
     fn records_recent_item_usage_newest_first_without_duplicates() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = std::env::temp_dir().join(format!(
-            "bw-quick-access-config-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("boltwarden-config-test-{}", uuid::Uuid::new_v4()));
         let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
         unsafe {
             std::env::set_var("XDG_CONFIG_HOME", temp.join("config"));
@@ -723,10 +759,8 @@ mod tests {
     #[test]
     fn saves_loads_and_clears_recent_item() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = std::env::temp_dir().join(format!(
-            "bw-quick-access-config-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("boltwarden-config-test-{}", uuid::Uuid::new_v4()));
         let config_dir = temp.join("config");
         let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
 
@@ -784,7 +818,8 @@ mod tests {
     fn private_writes_replace_links_without_touching_the_target() {
         use std::os::unix::fs::{PermissionsExt, symlink};
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = std::env::temp_dir().join(format!("bwqa-private-{}", uuid::Uuid::new_v4()));
+        let temp =
+            std::env::temp_dir().join(format!("boltwarden-private-{}", uuid::Uuid::new_v4()));
         let app_dir = temp.join(APP_DIR);
         fs::create_dir_all(&app_dir).unwrap();
         let target = temp.join("unrelated");

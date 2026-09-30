@@ -1,6 +1,6 @@
 //! The vault window: a full, resizable browser next to the quick access popup. A sidebar
 //! with favorites, the folder tree and the action center; the item list; and the item
-//! view with editing. The daemon starts it as its own process (`bw-quick-access window`)
+//! view with editing. The daemon starts it as its own process (`boltwarden window`)
 //! and it uses the same vault RPC as the popup.
 
 use crate::app::PopupCommand;
@@ -41,13 +41,13 @@ pub fn options() -> eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(WINDOW_SIZE)
             .with_min_inner_size(MIN_WINDOW_SIZE)
-            .with_title("Vault · bw-quick-access")
+            .with_title(crate::logo::APP_NAME)
             // Its own app id, so window rules for the popup (floating, centered, always
             // on top) don't apply. Demo mode escapes no_screen_share rules as in the popup.
             .with_app_id(if crate::demo::enabled() {
-                "bw-quick-access-window-demo"
+                "boltwarden-window-demo"
             } else {
-                "bw-quick-access-window"
+                "boltwarden-window"
             })
             .with_active(true),
         ..Default::default()
@@ -1408,6 +1408,14 @@ impl WindowApp {
                 .clicked();
             ui.add_space(8.0);
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                widgets::logo(ui, t.title() + 4.0);
+                ui.label(
+                    RichText::new(crate::logo::APP_NAME)
+                        .size(t.body())
+                        .strong()
+                        .color(t.text_strong),
+                );
+                ui.add_space(24.0);
                 ui.label(
                     RichText::new(t.icon("\u{f002}", "🔎"))
                         .size(t.body())
