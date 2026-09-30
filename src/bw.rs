@@ -1,8 +1,9 @@
 use crate::config;
 use crate::config::{SavedKdf, SavedSession};
 use crate::model::{
-    BwItem, BwItemDetail, CustomField, DraftField, DraftFieldKind, DraftUri, ItemAction, ItemDates,
-    ItemDraft, ItemState, LoginDraft, SshKey, SyncStatus, TotpCode,
+    BwItem, BwItemDetail, CustomField, DraftField, DraftFieldKind, DraftPasskey, DraftUri, Folder,
+    HealthReport, ItemAction, ItemDates, ItemDraft, ItemState, LoginDraft, Passkey, SshKey,
+    SyncStatus, TotpCode,
 };
 use aes::Aes256;
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -54,6 +55,9 @@ pub struct BwClient {
     sync_warning: Option<String>,
     sync_status: SyncStatus,
     last_sync_attempt: Option<Instant>,
+    /// The last action center report and the vault state it was computed for. Strength
+    /// checks are slow enough to matter on every sync of a big vault.
+    health_cache: Option<(u64, HealthReport)>,
 }
 
 #[derive(Clone)]
@@ -229,6 +233,7 @@ impl BwClient {
             sync_warning: None,
             sync_status: SyncStatus::default(),
             last_sync_attempt: None,
+            health_cache: None,
         }
     }
 
@@ -561,7 +566,11 @@ impl BwClient {
                 "{action:?} is not available for an item that is {state:?}"
             )));
         }
+        if let ItemAction::Favorite | ItemAction::Unfavorite = action {
+            return self.set_favorite(id, action == ItemAction::Favorite);
+        }
         let (method, path) = match action {
+            ItemAction::Favorite | ItemAction::Unfavorite => unreachable!("handled above"),
             ItemAction::Archive => (Method::PUT, format!("{}/archive", cipher_path(id)?)),
             ItemAction::Unarchive => (Method::PUT, format!("{}/unarchive", cipher_path(id)?)),
             ItemAction::Trash => (Method::PUT, format!("{}/delete", cipher_path(id)?)),
@@ -591,13 +600,185 @@ impl BwClient {
             Err(_) => {
                 // The change went through; keep the list right even if the refresh failed.
                 if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
-                    item.state = state_after(action);
+                    item.state = state_after(action, item.state);
                     item.dates.state_changed_at =
                         (item.state != ItemState::Active).then(iso8601_now);
                 }
                 Ok(())
             }
         }
+    }
+
+    /// Favorite and folder are per-user settings with their own endpoint, so starring or
+    /// moving an item works even for items this app can't otherwise edit.
+    fn set_favorite(&mut self, id: &str, favorite: bool) -> Result<(), BwError> {
+        let stored = self.ciphers.get(id).ok_or(BwError::NotFound)?;
+        let folder_id = raw_get(&stored.raw, "folderId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        self.update_partial(id, folder_id, favorite)
+    }
+
+    /// Moves an item into a folder, or out of all folders with `None`.
+    pub fn move_item(&mut self, id: &str, folder_id: Option<&str>) -> Result<(), BwError> {
+        self.require_unlocked()?;
+        if let Some(folder_id) = folder_id
+            && !self.folders.contains_key(folder_id)
+        {
+            return Err(BwError::Cli("that folder no longer exists".into()));
+        }
+        let favorite = self.get_item_unchecked(id)?.favorite;
+        self.update_partial(id, folder_id.map(str::to_string), favorite)
+    }
+
+    fn update_partial(
+        &mut self,
+        id: &str,
+        folder_id: Option<String>,
+        favorite: bool,
+    ) -> Result<(), BwError> {
+        let body = json!({ "folderId": folder_id, "favorite": favorite });
+        let path = format!("{}/partial", cipher_path(id)?);
+        let response = self.send_authed(Method::PUT, &path, Some(&body))?;
+        let body = expect_success(response, "update item")?
+            .text()
+            .unwrap_or_default();
+        let raw = serde_json::from_str::<Value>(&body)
+            .ok()
+            .filter(looks_like_cipher)
+            .map(Ok)
+            .unwrap_or_else(|| self.fetch_cipher(id));
+        match raw.and_then(|raw| self.replace_cipher(raw)) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                // The change went through; keep the local copy right even if the refresh
+                // failed, including the stored cipher that later edits are built from.
+                let folder_name = folder_id
+                    .as_ref()
+                    .map(|id| self.folders.get(id).cloned().unwrap_or_else(|| id.clone()));
+                if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
+                    item.favorite = favorite;
+                    item.folder_id = folder_id.clone();
+                    item.folder = folder_name;
+                }
+                if let Some(raw) = self
+                    .ciphers
+                    .get_mut(id)
+                    .and_then(|stored| stored.raw.as_object_mut())
+                {
+                    raw.insert("folderId".into(), json!(folder_id));
+                    raw.insert("favorite".into(), Value::Bool(favorite));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Looks up an item without the master-password check: for changes that reveal
+    /// nothing, such as moving it.
+    fn get_item_unchecked(&self, id: &str) -> Result<&BwItemDetail, BwError> {
+        self.items
+            .iter()
+            .find(|item| item.id == id)
+            .ok_or(BwError::NotFound)
+    }
+
+    pub fn create_folder(&mut self, name: &str) -> Result<Folder, BwError> {
+        self.require_unlocked()?;
+        let name = validate_folder_name(name)?;
+        let user_key = self.user_key.as_deref().ok_or(BwError::NotUnlocked)?;
+        let body = json!({ "name": encrypt_string(&name, user_key)? });
+        let response = self.send_authed(Method::POST, "/api/folders", Some(&body))?;
+        let created: FolderResponse = expect_success(response, "create folder")?
+            .json()
+            .map_err(|e| BwError::Parse(format!("create folder response: {e}")))?;
+        self.folders.insert(created.id.clone(), name.clone());
+        Ok(Folder {
+            id: created.id,
+            name,
+        })
+    }
+
+    /// Renames several folders, then syncs so items pick up the new names. Renaming a
+    /// parent means renaming each subfolder too: nesting is only a name prefix.
+    pub fn rename_folders(&mut self, renames: &[(String, String)]) -> Result<(), BwError> {
+        self.require_unlocked()?;
+        let user_key = self.user_key.clone().ok_or(BwError::NotUnlocked)?;
+        let user_key = Zeroizing::new(user_key);
+        let mut result = Ok(());
+        for (id, name) in renames {
+            let step = (|| {
+                let name = validate_folder_name(name)?;
+                let body = json!({ "name": encrypt_string(&name, &user_key)? });
+                let response = self.send_authed(Method::PUT, &folder_path(id)?, Some(&body))?;
+                expect_success(response, "rename folder")?;
+                Ok(())
+            })();
+            if let Err(error) = step {
+                result = Err(error);
+                break;
+            }
+        }
+        // Sync even after a partial failure, so the window shows what really changed.
+        self.sync()?;
+        result
+    }
+
+    /// Deletes folders. Their items stay in the vault without a folder.
+    pub fn delete_folders(&mut self, ids: &[String]) -> Result<(), BwError> {
+        self.require_unlocked()?;
+        let mut result = Ok(());
+        for id in ids {
+            let step = folder_path(id).and_then(|path| {
+                let response = self.send_authed(Method::DELETE, &path, None)?;
+                expect_success(response, "delete folder").map(|_| ())
+            });
+            if let Err(error) = step {
+                result = Err(error);
+                break;
+            }
+        }
+        self.sync()?;
+        result
+    }
+
+    /// Every folder, sorted by name so parents come before their subfolders.
+    pub fn folders(&self) -> Result<Vec<Folder>, BwError> {
+        self.require_unlocked()?;
+        let mut folders = self
+            .folders
+            .iter()
+            .map(|(id, name)| Folder {
+                id: id.clone(),
+                name: name.clone(),
+            })
+            .collect::<Vec<_>>();
+        folders.sort_by_key(|folder| folder.name.to_lowercase());
+        Ok(folders)
+    }
+
+    pub fn health_report(
+        &mut self,
+        directory: &crate::health::Directory,
+    ) -> Result<HealthReport, BwError> {
+        use std::hash::{Hash, Hasher};
+        self.require_unlocked()?;
+        // Every edit changes the revision date, so this covers all inputs of the report.
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for item in &self.items {
+            (&item.id, &item.dates.revision_date, item.state).hash(&mut hasher);
+        }
+        directory.fingerprint().hash(&mut hasher);
+        crate::health::days_since_epoch(SystemTime::now()).hash(&mut hasher);
+        let key = hasher.finish();
+        if let Some((cached, report)) = &self.health_cache
+            && *cached == key
+        {
+            return Ok(report.clone());
+        }
+        let report = crate::health::report(&self.items, directory, SystemTime::now());
+        self.health_cache = Some((key, report.clone()));
+        Ok(report)
     }
 
     pub fn edit_draft(&self, id: &str) -> Result<ItemDraft, BwError> {
@@ -916,6 +1097,8 @@ fn ranked_search_results<'a>(
                         name: item.name.clone(),
                         username: item.username.clone(),
                         folder: item.folder.clone(),
+                        folder_id: item.folder_id.clone(),
+                        favorite: item.favorite,
                         item_type: item.item_type.clone(),
                         icon_host: crate::icons::icon_host(&item.uris),
                         state: item.state,
@@ -1217,6 +1400,8 @@ struct CipherResponse {
     folder_id: Option<String>,
     #[serde(rename = "type", alias = "Type")]
     item_type: i64,
+    #[serde(default, alias = "Favorite")]
+    favorite: bool,
     #[serde(default, alias = "Name")]
     name: Option<String>,
     #[serde(default, alias = "Notes")]
@@ -1252,6 +1437,24 @@ struct LoginResponse {
     uris: Option<Vec<LoginUriResponse>>,
     #[serde(default, alias = "Totp")]
     totp: Option<String>,
+    #[serde(default, alias = "Fido2Credentials")]
+    fido2_credentials: Option<Vec<Fido2CredentialResponse>>,
+}
+
+/// The parts of a stored passkey worth showing. The key material is never decrypted.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Fido2CredentialResponse {
+    #[serde(default, alias = "RpId")]
+    rp_id: Option<String>,
+    #[serde(default, alias = "RpName")]
+    rp_name: Option<String>,
+    #[serde(default, alias = "UserName")]
+    user_name: Option<String>,
+    #[serde(default, alias = "UserDisplayName")]
+    user_display_name: Option<String>,
+    #[serde(default, alias = "CreationDate")]
+    creation_date: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1344,6 +1547,8 @@ struct CipherDataResponse {
     uris: Option<Vec<LoginUriResponse>>,
     #[serde(default, alias = "Totp")]
     totp: Option<String>,
+    #[serde(default, alias = "Fido2Credentials")]
+    fido2_credentials: Option<Vec<Fido2CredentialResponse>>,
     #[serde(default, alias = "CardholderName")]
     cardholder_name: Option<String>,
     #[serde(default, alias = "Number")]
@@ -1443,12 +1648,14 @@ fn decrypt_cipher(
     let mut uris = Vec::new();
     let mut totp = None;
     let mut ssh_key = None;
+    let mut passkeys = Vec::new();
 
     if let Some(data) = data {
         username = decrypt_opt_string(data.username.as_deref(), &item_key)?;
         password = decrypt_opt_string(data.password.as_deref(), &item_key)?;
         totp = decrypt_opt_string(data.totp.as_deref(), &item_key)?;
         uris = decrypt_uris(data.uris.as_deref(), &item_key)?;
+        passkeys = decrypt_passkeys(data.fido2_credentials.as_deref(), &item_key)?;
         if let Some(ssh_response) = data.ssh_key.as_ref() {
             ssh_key = decrypt_ssh_key_data(
                 cipher.id.as_str(),
@@ -1475,6 +1682,7 @@ fn decrypt_cipher(
         password = decrypt_opt_string(login.password.as_deref(), &item_key)?;
         totp = decrypt_opt_string(login.totp.as_deref(), &item_key)?;
         uris = decrypt_uris(login.uris.as_deref(), &item_key)?;
+        passkeys = decrypt_passkeys(login.fido2_credentials.as_deref(), &item_key)?;
     }
 
     if let Some(ssh_response) = cipher.ssh_key {
@@ -1582,7 +1790,11 @@ fn decrypt_cipher(
         custom_fields,
         folder: cipher
             .folder_id
-            .and_then(|id| folders.get(&id).cloned().or(Some(id))),
+            .as_ref()
+            .and_then(|id| folders.get(id).cloned().or(Some(id.clone()))),
+        folder_id: cipher.folder_id,
+        favorite: cipher.favorite,
+        passkeys,
         item_type: item_type_name(cipher.item_type).to_string(),
         ssh_key,
         state,
@@ -1657,15 +1869,35 @@ pub(crate) fn action_allowed(action: ItemAction, state: ItemState) -> bool {
         ItemAction::Unarchive => state == ItemState::Archived,
         ItemAction::Trash => state != ItemState::Deleted,
         ItemAction::Restore | ItemAction::DeleteForever => state == ItemState::Deleted,
+        ItemAction::Favorite | ItemAction::Unfavorite => state != ItemState::Deleted,
     }
 }
 
-pub(crate) fn state_after(action: ItemAction) -> ItemState {
+pub(crate) fn state_after(action: ItemAction, state: ItemState) -> ItemState {
     match action {
         ItemAction::Archive => ItemState::Archived,
         ItemAction::Trash | ItemAction::DeleteForever => ItemState::Deleted,
         ItemAction::Unarchive | ItemAction::Restore => ItemState::Active,
+        ItemAction::Favorite | ItemAction::Unfavorite => state,
     }
+}
+
+fn folder_path(id: &str) -> Result<String, BwError> {
+    if id.is_empty() || !id.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-') {
+        return Err(BwError::Cli(format!("invalid folder id {id:?}")));
+    }
+    Ok(format!("/api/folders/{id}"))
+}
+
+/// Trims each level of a "Parent/Child" folder name and rejects empty levels.
+pub(crate) fn validate_folder_name(name: &str) -> Result<String, BwError> {
+    let parts = name.split('/').map(str::trim).collect::<Vec<_>>();
+    if parts.iter().any(|part| part.is_empty()) {
+        return Err(BwError::Cli(
+            "folder names can't be empty or start or end with /".into(),
+        ));
+    }
+    Ok(parts.join("/"))
 }
 
 /// Cipher ids are UUIDs; anything else must not end up in a request path.
@@ -1778,11 +2010,25 @@ fn draft_from_raw(raw: &Value, item_key: &[u8]) -> Result<ItemDraft, BwError> {
                     })
                 })
                 .collect::<Result<Vec<_>, BwError>>()?;
+            let credentials: Option<Vec<Fido2CredentialResponse>> =
+                raw_get(&login, "fido2Credentials")
+                    .map(|value| serde_json::from_value(value.clone()))
+                    .transpose()
+                    .map_err(|e| BwError::Parse(format!("passkeys: {e}")))?;
+            let passkeys = decrypt_passkeys(credentials.as_deref(), item_key)?
+                .into_iter()
+                .enumerate()
+                .map(|(original_index, passkey)| DraftPasskey {
+                    passkey,
+                    original_index,
+                })
+                .collect();
             Some(LoginDraft {
                 username: raw_decrypt(&login, "username", item_key)?,
                 password: raw_decrypt(&login, "password", item_key)?,
                 totp: raw_decrypt(&login, "totp", item_key)?,
                 uris,
+                passkeys,
             })
         }
         _ => None,
@@ -1809,6 +2055,12 @@ fn draft_from_raw(raw: &Value, item_key: &[u8]) -> Result<ItemDraft, BwError> {
         notes: raw_decrypt(raw, "notes", item_key)?,
         login,
         fields,
+        folder_id: raw_get(raw, "folderId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        favorite: raw_get(raw, "favorite")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -1873,10 +2125,10 @@ fn build_create_request(draft: &ItemDraft, key: &[u8]) -> Result<Value, BwError>
     let mut body = json!({
         "type": if draft.login.is_some() { 1 } else { 2 },
         "organizationId": null,
-        "folderId": null,
+        "folderId": draft.folder_id,
         "name": encrypt_value(&draft.name, key)?,
         "notes": encrypt_optional(&draft.notes, key)?,
-        "favorite": false,
+        "favorite": draft.favorite,
         "reprompt": 0,
         "fields": if fields.is_empty() { Value::Null } else { Value::Array(fields) },
         "login": null,
@@ -1930,6 +2182,12 @@ fn build_save_request(
     }
     if draft.notes != original.notes {
         body.insert("notes".into(), encrypt_optional(&draft.notes, key)?);
+    }
+    if draft.folder_id != original.folder_id {
+        body.insert("folderId".into(), json!(draft.folder_id));
+    }
+    if draft.favorite != original.favorite {
+        body.insert("favorite".into(), Value::Bool(draft.favorite));
     }
 
     if let (Some(new), Some(old)) = (&draft.login, &original.login) {
@@ -1994,6 +2252,39 @@ fn build_save_request(
                 Value::Array(uris)
             },
         );
+        // Passkeys can only be removed. Kept ones go back exactly as stored.
+        if new.passkeys != old.passkeys {
+            let raw_passkeys = login
+                .get("fido2Credentials")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if new
+                .passkeys
+                .iter()
+                .any(|passkey| passkey.original_index >= raw_passkeys.len())
+            {
+                return Err(BwError::Cli("passkeys can't be added here".into()));
+            }
+            let kept = raw_passkeys
+                .into_iter()
+                .enumerate()
+                .filter(|(idx, _)| {
+                    new.passkeys
+                        .iter()
+                        .any(|passkey| passkey.original_index == *idx)
+                })
+                .map(|(_, raw)| raw)
+                .collect::<Vec<_>>();
+            login.insert(
+                "fido2Credentials".into(),
+                if kept.is_empty() {
+                    Value::Null
+                } else {
+                    Value::Array(kept)
+                },
+            );
+        }
         body.insert("login".into(), Value::Object(login));
     }
 
@@ -2126,6 +2417,28 @@ fn push_card_field(
         });
     }
     Ok(())
+}
+
+fn decrypt_passkeys(
+    credentials: Option<&[Fido2CredentialResponse]>,
+    key: &[u8],
+) -> Result<Vec<Passkey>, BwError> {
+    credentials
+        .unwrap_or(&[])
+        .iter()
+        .map(|credential| {
+            Ok(Passkey {
+                rp_id: decrypt_opt_string(credential.rp_id.as_deref(), key)?.unwrap_or_default(),
+                rp_name: decrypt_opt_string(credential.rp_name.as_deref(), key)?,
+                user_name: decrypt_opt_string(credential.user_name.as_deref(), key)?,
+                user_display_name: decrypt_opt_string(
+                    credential.user_display_name.as_deref(),
+                    key,
+                )?,
+                creation_date: credential.creation_date.clone(),
+            })
+        })
+        .collect()
 }
 
 fn decrypt_uris(uris: Option<&[LoginUriResponse]>, key: &[u8]) -> Result<Vec<String>, BwError> {
@@ -2749,6 +3062,7 @@ mod tests {
     fn empty_cipher(id: &str, name: String) -> CipherResponse {
         CipherResponse {
             id: id.to_string(),
+            favorite: false,
             organization_id: None,
             folder_id: None,
             item_type: 1,
@@ -2943,6 +3257,7 @@ mod tests {
         let user_key = [6u8; 64];
         let cipher = CipherResponse {
             id: "cipher-telegram".into(),
+            favorite: false,
             organization_id: None,
             folder_id: None,
             item_type: 1,
@@ -2957,6 +3272,7 @@ mod tests {
             deleted_date: None,
             archived_date: None,
             data: Some(CipherDataResponse {
+                fido2_credentials: None,
                 name: Some(encrypt_string("Telegram", &user_key)),
                 notes: Some(encrypt_string("chat account", &user_key)),
                 fields: Some(vec![FieldResponse {
@@ -3009,6 +3325,7 @@ mod tests {
         let user_key = [9u8; 64];
         let cipher = CipherResponse {
             id: "ssh-key-1".into(),
+            favorite: false,
             organization_id: None,
             folder_id: None,
             item_type: 5,
@@ -3063,6 +3380,7 @@ mod tests {
         let user_key = [7u8; 64];
         let cipher = CipherResponse {
             id: "ssh-key-data-1".into(),
+            favorite: false,
             organization_id: None,
             folder_id: None,
             item_type: 5,
@@ -3077,6 +3395,7 @@ mod tests {
             deleted_date: None,
             archived_date: None,
             data: Some(CipherDataResponse {
+                fido2_credentials: None,
                 name: Some(encrypt_string("Nested SSH key", &user_key)),
                 notes: None,
                 fields: None,
@@ -3192,6 +3511,9 @@ mod tests {
     fn search_matches_notes_folder_type_and_custom_fields() {
         let item = BwItemDetail {
             id: "1".into(),
+            folder_id: None,
+            favorite: false,
+            passkeys: Vec::new(),
             name: "Primary".into(),
             username: Some("user@example.test".into()),
             password: Some("secret-password".into()),
@@ -3248,6 +3570,9 @@ mod tests {
     fn test_item(id: &str, name: &str, username: Option<&str>) -> BwItemDetail {
         BwItemDetail {
             id: id.into(),
+            folder_id: None,
+            favorite: false,
+            passkeys: Vec::new(),
             name: name.into(),
             username: username.map(str::to_string),
             password: None,
@@ -3488,7 +3813,10 @@ mod tests {
                     {"uri": enc("https://one.example"), "match": 0, "uriChecksum": enc("x")},
                     {"uri": enc("https://two.example"), "match": 3, "uriChecksum": enc("y")},
                 ],
-                "fido2Credentials": [{"credentialId": enc("passkey")}],
+                "fido2Credentials": [
+                    {"credentialId": enc("passkey"), "rpId": enc("one.example"), "userName": enc("alice"), "keyValue": enc("secret-key"), "creationDate": "2026-01-02T03:04:05.000Z"},
+                    {"credentialId": enc("passkey-2"), "rpId": enc("two.example"), "keyValue": enc("secret-key-2")},
+                ],
             },
             "fields": [
                 {"type": 0, "name": enc("Env"), "value": enc("prod"), "linkedId": null},
@@ -3597,6 +3925,109 @@ mod tests {
     }
 
     #[test]
+    fn draft_and_detail_show_passkeys_without_key_material() {
+        let key = [27u8; 64];
+        let stored = editable_login(&key);
+
+        let draft = draft_from_raw(&stored.raw, &key).unwrap();
+        let passkeys = &draft.login.as_ref().unwrap().passkeys;
+        assert_eq!(passkeys.len(), 2);
+        assert_eq!(passkeys[0].passkey.rp_id, "one.example");
+        assert_eq!(passkeys[0].passkey.user_name.as_deref(), Some("alice"));
+        assert_eq!(
+            passkeys[0].passkey.creation_date.as_deref(),
+            Some("2026-01-02T03:04:05.000Z")
+        );
+        assert_eq!(passkeys[1].original_index, 1);
+        assert!(draft.favorite);
+
+        let (detail, _) =
+            decode_cipher(stored.raw.clone(), &key, &HashMap::new(), &HashMap::new()).unwrap();
+        assert_eq!(detail.passkeys.len(), 2);
+        assert!(detail.favorite);
+        let shown = serde_json::to_string(&detail).unwrap();
+        assert!(!shown.contains("secret-key"));
+        // Passkeys take a field slot but can't be copied.
+        let passkey_slot = 2; // username, password, then the first passkey
+        assert!(detail.copy_value(passkey_slot).is_err());
+        assert_eq!(
+            detail.copy_value(passkey_slot + 2).unwrap(),
+            "https://one.example"
+        );
+    }
+
+    #[test]
+    fn save_request_removes_only_the_dropped_passkey() {
+        let key = [28u8; 64];
+        let stored = editable_login(&key);
+        let mut draft = draft_from_raw(&stored.raw, &key).unwrap();
+        draft.login.as_mut().unwrap().passkeys.remove(0);
+
+        let body = build_save_request(&stored, &draft, "now").unwrap();
+
+        let passkeys = body["login"]["fido2Credentials"].as_array().unwrap();
+        assert_eq!(passkeys.len(), 1);
+        assert_eq!(passkeys[0], stored.raw["login"]["fido2Credentials"][1]);
+
+        draft.login.as_mut().unwrap().passkeys.clear();
+        let body = build_save_request(&stored, &draft, "now").unwrap();
+        assert!(body["login"]["fido2Credentials"].is_null());
+    }
+
+    #[test]
+    fn save_request_cannot_add_or_duplicate_passkeys() {
+        let key = [29u8; 64];
+        let stored = editable_login(&key);
+        let mut draft = draft_from_raw(&stored.raw, &key).unwrap();
+        let passkeys = &mut draft.login.as_mut().unwrap().passkeys;
+        let mut extra = passkeys[0].clone();
+        extra.original_index = 7;
+        passkeys.push(extra);
+        assert!(build_save_request(&stored, &draft, "now").is_err());
+
+        let passkeys = &mut draft.login.as_mut().unwrap().passkeys;
+        passkeys.pop();
+        let duplicate = passkeys[0].clone();
+        passkeys[1] = duplicate;
+        let body = build_save_request(&stored, &draft, "now").unwrap();
+        assert_eq!(
+            body["login"]["fido2Credentials"].as_array().unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn save_request_moves_folder_and_toggles_favorite() {
+        let key = [30u8; 64];
+        let stored = editable_login(&key);
+        let mut draft = draft_from_raw(&stored.raw, &key).unwrap();
+        draft.folder_id = Some("folder-1".into());
+        draft.favorite = false;
+
+        let body = build_save_request(&stored, &draft, "now").unwrap();
+
+        assert_eq!(body["folderId"], "folder-1");
+        assert_eq!(body["favorite"], false);
+        assert_eq!(
+            body["login"]["fido2Credentials"],
+            stored.raw["login"]["fido2Credentials"]
+        );
+    }
+
+    #[test]
+    fn validates_folder_names_and_ids() {
+        assert_eq!(
+            validate_folder_name(" Work / Servers ").unwrap(),
+            "Work/Servers"
+        );
+        for bad in ["", " ", "/Work", "Work/", "Work//Servers"] {
+            assert!(validate_folder_name(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(folder_path("0b5e-11aa").unwrap(), "/api/folders/0b5e-11aa");
+        assert!(folder_path("../ciphers").is_err());
+    }
+
+    #[test]
     fn save_request_validates_draft() {
         let key = [27u8; 64];
         let stored = editable_login(&key);
@@ -3625,9 +4056,12 @@ mod tests {
     fn create_request_encrypts_login_and_decodes_back() {
         let key = [29u8; 64];
         let draft = ItemDraft {
+            folder_id: None,
+            favorite: false,
             name: "Throwaway".into(),
             notes: String::new(),
             login: Some(LoginDraft {
+                passkeys: Vec::new(),
                 username: "tester".into(),
                 password: "pw".into(),
                 totp: String::new(),
@@ -3665,6 +4099,8 @@ mod tests {
     fn create_request_without_login_is_a_secure_note() {
         let key = [30u8; 32];
         let draft = ItemDraft {
+            folder_id: None,
+            favorite: false,
             name: "Note".into(),
             notes: "text".into(),
             ..ItemDraft::default()
@@ -3721,6 +4157,7 @@ mod tests {
             sync_warning: None,
             sync_status: SyncStatus::default(),
             last_sync_attempt: None,
+            health_cache: None,
         }
     }
 

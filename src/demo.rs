@@ -1,14 +1,17 @@
 //! In-memory backend with made-up items, for trying the UI without a vault:
 //! `BWQA_DEMO=1 bw-quick-access --popup`. `BWQA_DEMO=locked` starts at the login screen
 //! (the master password "2fa" leads to the two-step screen) and `BWQA_DEMO=ssh` opens an
-//! SSH approval prompt. Nothing is read from or written to disk except the icon cache.
+//! SSH approval prompt. The vault window runs with `BWQA_DEMO=1 bw-quick-access
+//! --vault-window`; `BWQA_DEMO=action` opens it on the action center. Nothing is read
+//! from or written to disk except the icon cache.
 
 use crate::backend::{BackendError, SearchResult};
 use crate::bw::TwoFactorProvider;
 use crate::model::{
-    BwItem, BwItemDetail, CustomField, DraftField, DraftFieldKind, DraftUri, ItemAction, ItemDates,
-    ItemDraft, ItemState, LoginDraft, SshAgentClientInfo, SshApprovalKind, SshApprovalRequest,
-    SshApprovalStatus, SshApprovalStatusKind, SshKey, SyncStatus, TotpCode,
+    BwItem, BwItemDetail, CustomField, DraftField, DraftFieldKind, DraftPasskey, DraftUri, Folder,
+    HealthReport, ItemAction, ItemDates, ItemDraft, ItemState, LoginDraft, Passkey,
+    SshAgentClientInfo, SshApprovalKind, SshApprovalRequest, SshApprovalStatus,
+    SshApprovalStatusKind, SshKey, SyncStatus, TotpCode,
 };
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,10 +22,16 @@ pub struct DemoBackend {
     unlocked: AtomicBool,
     ssh_request_pending: AtomicBool,
     items: Mutex<Vec<BwItemDetail>>,
+    folders: Mutex<Vec<Folder>>,
 }
 
 pub fn enabled() -> bool {
     std::env::var_os("BWQA_DEMO").is_some()
+}
+
+/// `BWQA_DEMO=action`: open the vault window on the action center.
+pub fn starts_on_action_center() -> bool {
+    std::env::var("BWQA_DEMO").is_ok_and(|mode| mode == "action")
 }
 
 impl DemoBackend {
@@ -32,6 +41,7 @@ impl DemoBackend {
             unlocked: AtomicBool::new(mode != "locked"),
             ssh_request_pending: AtomicBool::new(mode == "ssh"),
             items: Mutex::new(details()),
+            folders: Mutex::new(folders()),
         }
     }
 
@@ -89,6 +99,8 @@ impl DemoBackend {
                 name: detail.name,
                 username: detail.username,
                 folder: detail.folder,
+                folder_id: detail.folder_id,
+                favorite: detail.favorite,
                 icon_host: crate::icons::icon_host(&detail.uris),
                 item_type: detail.item_type,
                 state: detail.state,
@@ -131,8 +143,10 @@ impl DemoBackend {
         }
         if action == ItemAction::DeleteForever {
             items.remove(idx);
+        } else if let ItemAction::Favorite | ItemAction::Unfavorite = action {
+            items[idx].favorite = action == ItemAction::Favorite;
         } else {
-            items[idx].state = crate::bw::state_after(action);
+            items[idx].state = crate::bw::state_after(action, items[idx].state);
             items[idx].dates.state_changed_at =
                 (items[idx].state != ItemState::Active).then(|| crate::bw::iso8601_now());
         }
@@ -152,6 +166,15 @@ impl DemoBackend {
                 .map(|(idx, uri)| DraftUri {
                     uri: uri.clone(),
                     original_index: Some(idx),
+                })
+                .collect(),
+            passkeys: item
+                .passkeys
+                .iter()
+                .enumerate()
+                .map(|(original_index, passkey)| DraftPasskey {
+                    passkey: passkey.clone(),
+                    original_index,
                 })
                 .collect(),
         });
@@ -174,7 +197,96 @@ impl DemoBackend {
                     original_index: Some(idx),
                 })
                 .collect(),
+            folder_id: item.folder_id,
+            favorite: item.favorite,
         })
+    }
+
+    fn folder_list(&self) -> Result<std::sync::MutexGuard<'_, Vec<Folder>>, BackendError> {
+        self.folders
+            .lock()
+            .map_err(|_| BackendError::Message("demo folders lock poisoned".into()))
+    }
+
+    pub fn folders(&self) -> Result<Vec<Folder>, BackendError> {
+        let mut folders = self.folder_list()?.clone();
+        folders.sort_by_key(|folder| folder.name.to_lowercase());
+        Ok(folders)
+    }
+
+    pub fn move_item(&self, id: &str, folder_id: Option<&str>) -> Result<(), BackendError> {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let name = match folder_id {
+            Some(folder_id) => Some(
+                self.folder_list()?
+                    .iter()
+                    .find(|folder| folder.id == folder_id)
+                    .map(|folder| folder.name.clone())
+                    .ok_or_else(|| BackendError::Message("that folder no longer exists".into()))?,
+            ),
+            None => None,
+        };
+        let mut items = self.items()?;
+        let item = items
+            .iter_mut()
+            .find(|item| item.id == id)
+            .ok_or_else(|| BackendError::Message("item not found".into()))?;
+        item.folder_id = folder_id.map(Into::into);
+        item.folder = name;
+        Ok(())
+    }
+
+    pub fn create_folder(&self, name: &str) -> Result<Folder, BackendError> {
+        let name = crate::bw::validate_folder_name(name).map_err(BackendError::from)?;
+        let folder = Folder {
+            id: uuid::Uuid::new_v4().to_string(),
+            name,
+        };
+        self.folder_list()?.push(folder.clone());
+        Ok(folder)
+    }
+
+    pub fn rename_folders(&self, renames: &[(String, String)]) -> Result<(), BackendError> {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let mut folders = self.folder_list()?;
+        for (id, name) in renames {
+            let name = crate::bw::validate_folder_name(name).map_err(BackendError::from)?;
+            if let Some(folder) = folders.iter_mut().find(|folder| &folder.id == id) {
+                folder.name = name;
+            }
+        }
+        for item in self.items()?.iter_mut() {
+            item.folder = item.folder_id.as_ref().and_then(|id| {
+                folders
+                    .iter()
+                    .find(|folder| &folder.id == id)
+                    .map(|folder| folder.name.clone())
+            });
+        }
+        Ok(())
+    }
+
+    pub fn delete_folders(&self, ids: &[String]) -> Result<(), BackendError> {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        self.folder_list()?
+            .retain(|folder| !ids.contains(&folder.id));
+        for item in self.items()?.iter_mut() {
+            if item.folder_id.as_ref().is_some_and(|id| ids.contains(id)) {
+                item.folder_id = None;
+                item.folder = None;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn health_report(&self) -> Result<HealthReport, BackendError> {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let directory = crate::health::Directory::demo();
+        Ok(crate::health::report(
+            &self.items()?,
+            &directory,
+            std::time::SystemTime::now(),
+        ))
     }
 
     pub fn create_item(&self, draft: &ItemDraft) -> Result<BwItemDetail, BackendError> {
@@ -193,6 +305,7 @@ impl DemoBackend {
         if draft.name.trim().is_empty() {
             return Err(BackendError::Message("name is required".into()));
         }
+        let folders = self.folders()?;
         let mut items = self.items()?;
         let item = items
             .iter_mut()
@@ -201,10 +314,23 @@ impl DemoBackend {
         let non_empty = |value: &str| (!value.is_empty()).then(|| value.to_string());
         item.name = draft.name.clone();
         item.notes = non_empty(&draft.notes);
+        item.favorite = draft.favorite;
+        item.folder_id = draft.folder_id.clone();
+        item.folder = draft.folder_id.as_ref().and_then(|id| {
+            folders
+                .iter()
+                .find(|folder| &folder.id == id)
+                .map(|folder| folder.name.clone())
+        });
         if let Some(login) = &draft.login {
             item.username = non_empty(&login.username);
             item.password = non_empty(&login.password);
             item.totp = non_empty(&login.totp);
+            item.passkeys = login
+                .passkeys
+                .iter()
+                .map(|passkey| passkey.passkey.clone())
+                .collect();
             item.uris = login
                 .uris
                 .iter()
@@ -261,17 +387,43 @@ impl DemoBackend {
     }
 }
 
+fn demo_folder_id(name: &str) -> String {
+    format!("folder:{name}")
+}
+
+fn folders() -> Vec<Folder> {
+    let mut names = details()
+        .into_iter()
+        .filter_map(|item| item.folder)
+        .collect::<Vec<_>>();
+    // An empty folder, so creating items in one can be tried.
+    names.push("Personal".into());
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .map(|name| Folder {
+            id: demo_folder_id(&name),
+            name,
+        })
+        .collect()
+}
+
 fn detail(id: &str, name: &str, username: Option<&str>, folder: Option<&str>) -> BwItemDetail {
     BwItemDetail {
         id: id.into(),
         name: name.into(),
         username: username.map(Into::into),
-        password: Some("correct-horse-battery-staple".into()),
+        // Distinct and strong, so only the items set up for it show in the action center.
+        password: Some(format!("{id}-Vq7#Lm2!Zt9$")),
         uris: Vec::new(),
         totp: None,
         notes: None,
         custom_fields: Vec::new(),
         folder: folder.map(Into::into),
+        folder_id: folder.map(demo_folder_id),
+        favorite: false,
+        passkeys: Vec::new(),
         item_type: "login".into(),
         ssh_key: None,
         state: ItemState::Active,
@@ -294,6 +446,14 @@ fn details() -> Vec<BwItemDetail> {
         hidden: true,
     }];
     github.notes = Some("Personal account.\nSSO for work goes through Okta.".into());
+    github.favorite = true;
+    github.passkeys = vec![Passkey {
+        rp_id: "github.com".into(),
+        rp_name: Some("GitHub".into()),
+        user_name: Some("menno".into()),
+        user_display_name: Some("Menno".into()),
+        creation_date: Some("2026-05-17T08:12:00.000Z".into()),
+    }];
 
     let mut gitlab = detail(
         "gitlab",
@@ -302,6 +462,11 @@ fn details() -> Vec<BwItemDetail> {
         Some("Work"),
     );
     gitlab.uris = vec!["https://gitlab.com/users/sign_in".into()];
+    gitlab.password = Some("summer2024".into());
+
+    let mut jenkins = detail("jenkins", "Jenkins", Some("admin"), Some("Work/Servers"));
+    jenkins.uris = vec!["http://ci.example.com/login".into()];
+    jenkins.password = Some("summer2024".into());
 
     let mut bank = detail(
         "bank",
@@ -310,6 +475,7 @@ fn details() -> Vec<BwItemDetail> {
         Some("Finance"),
     );
     bank.totp = Some(DEMO_TOTP_SEED.into());
+    bank.favorite = true;
 
     let mut note = detail("wifi", "Home Wi-Fi", None, None);
     note.item_type = "secureNote".into();
@@ -326,8 +492,13 @@ fn details() -> Vec<BwItemDetail> {
             hidden: true,
         },
         CustomField {
-            name: "Expiry".into(),
-            value: "12/29".into(),
+            name: "Exp Month".into(),
+            value: "09".into(),
+            hidden: false,
+        },
+        CustomField {
+            name: "Exp Year".into(),
+            value: "2026".into(),
             hidden: false,
         },
         CustomField {
@@ -351,7 +522,7 @@ fn details() -> Vec<BwItemDetail> {
         fingerprint: Some("SHA256:3fGdemo0fingerprint0value0for0the0ui0only".into()),
     });
 
-    let mut items = vec![github, gitlab, bank, note, card, ssh];
+    let mut items = vec![github, gitlab, jenkins, bank, note, card, ssh];
     // Archived and trashed items with different dates, so the list sort is visible.
     for (id, name, uri, state, changed, revised) in [
         (
@@ -412,16 +583,17 @@ fn details() -> Vec<BwItemDetail> {
         ("Gitea", "https://gitea.com"),
         // A LAN host: never sent to the icon service.
         ("Home Assistant", "http://homeassistant.local:8123"),
+        ("Jellyfin", "https://jellyfin.example.com"),
     ]
     .iter()
     .enumerate()
     {
-        let mut item = detail(
-            &format!("extra-{idx}"),
-            name,
-            Some("menno"),
-            Some("Homelab"),
-        );
+        let folder = if *name == "Jellyfin" {
+            "Homelab/Media"
+        } else {
+            "Homelab"
+        };
+        let mut item = detail(&format!("extra-{idx}"), name, Some("menno"), Some(folder));
         item.uris = vec![(*uri).into()];
         items.push(item);
     }

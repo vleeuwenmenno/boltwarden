@@ -1,6 +1,7 @@
-//! Edit form for an item: name, login credentials, websites, custom fields and notes.
+//! Edit form for an item: name, folder, login credentials, passkeys, websites, custom
+//! fields and notes.
 
-use crate::model::{DraftField, DraftFieldKind, DraftUri, ItemDraft, LoginDraft};
+use crate::model::{DraftField, DraftFieldKind, DraftUri, Folder, ItemDraft, LoginDraft};
 use crate::ui::theme::theme;
 use crate::ui::widgets;
 use egui::{RichText, Ui};
@@ -21,7 +22,11 @@ pub struct EditState {
     original: Option<ItemDraft>,
     pub error: Option<String>,
     pub saving: bool,
+    /// Folders to choose from; empty until the caller provides them.
+    pub folders: Vec<Folder>,
     confirm_discard: bool,
+    /// Passkey (index into the draft's passkeys) waiting for removal confirmation.
+    confirm_remove_passkey: Option<usize>,
     reveal_password: bool,
     reveal_totp: bool,
     reveal_fields: HashSet<usize>,
@@ -59,7 +64,9 @@ impl EditState {
             original: None,
             error: None,
             saving: false,
+            folders: Vec::new(),
             confirm_discard: false,
+            confirm_remove_passkey: None,
             reveal_password: false,
             reveal_totp: false,
             reveal_fields: HashSet::new(),
@@ -108,7 +115,7 @@ pub fn draw_edit(
     let ctx = &root.ctx().clone();
     let t = theme();
     let mut action = None;
-    let dialog_open = state.confirm_discard;
+    let dialog_open = state.confirm_discard || state.confirm_remove_passkey.is_some();
 
     if !dialog_open && !state.saving {
         let popup_open = egui::Popup::is_any_open(ctx);
@@ -192,7 +199,40 @@ pub fn draw_edit(
             });
         });
 
-    if dialog_open {
+    if let Some(idx) = state.confirm_remove_passkey {
+        let passkeys = state
+            .draft
+            .as_mut()
+            .and_then(|draft| draft.login.as_mut())
+            .map(|login| &mut login.passkeys);
+        match passkeys {
+            Some(passkeys) if idx < passkeys.len() => {
+                let body = format!(
+                    "You will no longer be able to sign in with the passkey for {}. \
+                     It is deleted from the vault when you save this item.",
+                    passkeys[idx].passkey.describe()
+                );
+                let dialog = widgets::ConfirmDialog {
+                    title: "Remove passkey?",
+                    body: &body,
+                    confirm_label: "Remove passkey",
+                    danger: true,
+                    key: widgets::ConfirmKey::CtrlEnter,
+                    busy: false,
+                    error: None,
+                };
+                match widgets::confirm_dialog(ctx, &dialog) {
+                    Some(true) => {
+                        passkeys.remove(idx);
+                        state.confirm_remove_passkey = None;
+                    }
+                    Some(false) => state.confirm_remove_passkey = None,
+                    None => {}
+                }
+            }
+            _ => state.confirm_remove_passkey = None,
+        }
+    } else if state.confirm_discard {
         let dialog = widgets::ConfirmDialog {
             title: "Discard changes?",
             body: "Your edits to this item will be lost.",
@@ -277,6 +317,30 @@ fn draw_form(ui: &mut Ui, state: &mut EditState) {
         focus_if(&response, name_id());
     });
 
+    labeled_row(ui, "Folder", |ui| {
+        folder_selector(ui, &mut draft.folder_id, &state.folders);
+        ui.add_space(12.0);
+        let star = if draft.favorite {
+            t.icon("\u{f005}", "★")
+        } else {
+            t.icon("\u{f006}", "☆")
+        };
+        let color = if draft.favorite {
+            t.warning
+        } else {
+            t.text_muted
+        };
+        if ui
+            .add(
+                egui::Button::new(RichText::new(format!("{star} Favorite")).color(color))
+                    .frame(false),
+            )
+            .clicked()
+        {
+            draft.favorite = !draft.favorite;
+        }
+    });
+
     if let Some(login) = draft.login.as_mut() {
         labeled_row(ui, "Username", |ui| {
             widgets::text_input(
@@ -333,6 +397,35 @@ fn draw_form(ui: &mut Ui, state: &mut EditState) {
                 );
             });
         });
+
+        for (idx, passkey) in login.passkeys.iter().enumerate() {
+            let label = if idx == 0 { "Passkeys" } else { "" };
+            labeled_row(ui, label, |ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if glyph(ui, "\u{f1f8}", "🗑", "Remove passkey").clicked() {
+                        state.confirm_remove_passkey = Some(idx);
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "{}  {}",
+                                t.icon("\u{f084}", "🔑"),
+                                passkey.passkey.describe()
+                            ))
+                            .color(t.text),
+                        );
+                        if let Some(date) = passkey
+                            .passkey
+                            .creation_date
+                            .as_deref()
+                            .and_then(widgets::format_date)
+                        {
+                            ui.label(RichText::new(format!("saved {date}")).color(t.text_faint));
+                        }
+                    });
+                });
+            });
+        }
 
         let mut remove = None;
         for (idx, uri) in login.uris.iter_mut().enumerate() {
@@ -465,6 +558,26 @@ fn draw_field_value(
     }
 }
 
+fn folder_selector(ui: &mut Ui, folder_id: &mut Option<String>, folders: &[Folder]) {
+    let current = match folder_id.as_deref() {
+        None => "No folder".to_string(),
+        Some(id) => folders
+            .iter()
+            .find(|folder| folder.id == id)
+            .map(|folder| folder.name.clone())
+            .unwrap_or_else(|| "Unknown folder".into()),
+    };
+    egui::ComboBox::from_id_salt(("edit", "folder"))
+        .width(220.0)
+        .selected_text(current)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(folder_id, None, "No folder");
+            for folder in folders {
+                ui.selectable_value(folder_id, Some(folder.id.clone()), &folder.name);
+            }
+        });
+}
+
 fn kind_selector(ui: &mut Ui, idx: usize, field: &mut DraftField) {
     let label = |kind| match kind {
         DraftFieldKind::Text => "Text",
@@ -579,6 +692,118 @@ mod tests {
         state.draft.as_mut().unwrap().notes = "changed".into();
         assert!(state.is_dirty());
     }
+    fn with_passkey() -> EditState {
+        let mut state = EditState::loading("id".into());
+        state.set_draft(ItemDraft {
+            name: "GitHub".into(),
+            login: Some(LoginDraft {
+                passkeys: vec![crate::model::DraftPasskey {
+                    passkey: crate::model::Passkey {
+                        rp_id: "github.com".into(),
+                        user_name: Some("alice".into()),
+                        ..Default::default()
+                    },
+                    original_index: 0,
+                }],
+                ..LoginDraft::default()
+            }),
+            ..ItemDraft::default()
+        });
+        state
+    }
+
+    fn frame(state: &mut EditState, events: Vec<egui::Event>) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let input = |events| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(680., 460.),
+            )),
+            events,
+            ..Default::default()
+        };
+        // egui lays windows out invisibly on their first frame.
+        let mut out = ctx.run_ui(input(Vec::new()), |ui| {
+            draw_edit(ui, state, true);
+        });
+        out.textures_delta.clear();
+        let mut out = ctx.run_ui(input(events), |ui| {
+            draw_edit(ui, state, true);
+        });
+        out.textures_delta.clear();
+        out.shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) => Some(text.galley.job.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    fn passkey_count(state: &EditState) -> usize {
+        state
+            .draft
+            .as_ref()
+            .unwrap()
+            .login
+            .as_ref()
+            .unwrap()
+            .passkeys
+            .len()
+    }
+
+    #[test]
+    fn editor_lists_passkeys() {
+        let mut state = with_passkey();
+        let texts = frame(&mut state, Vec::new());
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("alice on github.com"))
+        );
+    }
+
+    #[test]
+    fn removing_a_passkey_needs_confirmation() {
+        let mut state = with_passkey();
+        state.confirm_remove_passkey = Some(0);
+        let texts = frame(&mut state, Vec::new());
+        assert!(texts.iter().any(|text| text == "Remove passkey?"));
+        assert_eq!(passkey_count(&state), 1);
+
+        // A plain Enter must not remove it; Escape cancels.
+        frame(
+            &mut state,
+            vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert_eq!(passkey_count(&state), 1);
+        frame(
+            &mut state,
+            vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert_eq!(state.confirm_remove_passkey, None);
+        assert_eq!(passkey_count(&state), 1);
+        assert!(!state.is_dirty());
+
+        state.confirm_remove_passkey = Some(0);
+        frame(
+            &mut state,
+            vec![key(egui::Key::Enter, egui::Modifiers::COMMAND)],
+        );
+        assert_eq!(passkey_count(&state), 0);
+        assert!(state.is_dirty(), "removal waits for Save");
+    }
+
     #[test]
     fn totp_seed_is_masked_in_editor() {
         let ctx = egui::Context::default();

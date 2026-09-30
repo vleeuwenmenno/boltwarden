@@ -642,6 +642,13 @@ impl App {
                     self.summary_state.action_in_flight = false;
                     self.summary_state.confirm = None;
                     match result {
+                        // Starring keeps the item open; reload it to show the new star.
+                        Ok(())
+                            if matches!(action, ItemAction::Favorite | ItemAction::Unfavorite) =>
+                        {
+                            self.search_state.force_refresh();
+                            self.spawn_detail(id);
+                        }
                         Ok(()) => {
                             self.search_state.show_notice(action.done_message());
                             self.search_state.force_refresh();
@@ -1287,6 +1294,7 @@ impl App {
             root,
             &mut self.summary_state,
             self.settings.show_keyboard_shortcuts,
+            false,
             &mut self.icons,
             &mut |index| {
                 self.backend
@@ -1300,7 +1308,9 @@ impl App {
             Some(SummaryAction::Edit) => {
                 if let Some(id) = self.summary_state.detail_id.clone() {
                     self.summary_state.error = None;
-                    self.edit_state = Some(EditState::loading(id.clone()));
+                    let mut edit = EditState::loading(id.clone());
+                    edit.folders = self.backend.folders().unwrap_or_default();
+                    self.edit_state = Some(edit);
                     self.spawn_edit_draft(id);
                 }
             }
@@ -1343,6 +1353,7 @@ impl App {
     }
 
     fn update_search(&mut self, root: &mut egui::Ui) {
+        let ctx = &root.ctx().clone();
         self.search_state.reset_results_for_empty_query();
         if self.search_state.needs_search() {
             self.search_state.in_flight = true;
@@ -1383,10 +1394,16 @@ impl App {
                 }
                 self.save_and_apply_settings();
             }
+            SearchAction::OpenWindow => match self.backend.open_window() {
+                Ok(()) => self.hide_quick_access(ctx),
+                Err(e) => self.search_state.warning = Some(e),
+            },
             SearchAction::NewItem => {
                 self.summary_state = SummaryState::default();
                 self.summary_open = true;
-                self.edit_state = Some(EditState::create());
+                let mut edit = EditState::create();
+                edit.folders = self.backend.folders().unwrap_or_default();
+                self.edit_state = Some(edit);
                 self.unfocused_since = None;
             }
             SearchAction::SetKeyboardShortcuts(show) => {

@@ -112,6 +112,7 @@ enum DisplayEntry {
     ArchivedCommand,
     TrashCommand,
     NewItemCommand,
+    WindowCommand,
     VaultItem(usize),
 }
 
@@ -121,6 +122,7 @@ pub enum OpenSelectedAction {
     OpenResult(usize),
     LockVault,
     NewItem,
+    OpenWindow,
 }
 
 pub struct SearchState {
@@ -339,6 +341,7 @@ impl SearchState {
                 OpenSelectedAction::None
             }
             Some(DisplayEntry::NewItemCommand) => OpenSelectedAction::NewItem,
+            Some(DisplayEntry::WindowCommand) => OpenSelectedAction::OpenWindow,
             Some(DisplayEntry::VaultItem(idx)) => OpenSelectedAction::OpenResult(idx),
             None => OpenSelectedAction::None,
         }
@@ -378,6 +381,10 @@ impl SearchState {
             (
                 new_item_command_matches(&self.query),
                 DisplayEntry::NewItemCommand,
+            ),
+            (
+                window_command_matches(&self.query),
+                DisplayEntry::WindowCommand,
             ),
         ]
         .into_iter()
@@ -444,6 +451,13 @@ pub fn archived_command_matches(query: &str) -> bool {
 
 pub fn new_item_command_matches(query: &str) -> bool {
     command_matches(query, &["new item", "create item", "add item"])
+}
+
+pub fn window_command_matches(query: &str) -> bool {
+    command_matches(
+        query,
+        &["vault window", "open vault", "window", "browse vault"],
+    )
 }
 
 pub fn trash_command_matches(query: &str) -> bool {
@@ -584,7 +598,7 @@ pub fn draw_search(
                 let hint = if state.start_list == StartList::RecentlyUsed {
                     "Items you open show up here · type to search"
                 } else {
-                    "Type to search · commands: settings, lock, archived, deleted, new"
+                    "Type to search · commands: settings, lock, archived, deleted, new, window"
                 };
                 widgets::empty_state(ui, t.icon("\u{f002}", "🔎"), hint, false);
             } else if state.display_entry_count() == 0 {
@@ -698,6 +712,7 @@ fn handle_keys(
                     }
                     OpenSelectedAction::LockVault => *action = Some(SearchAction::LockVault),
                     OpenSelectedAction::NewItem => *action = Some(SearchAction::NewItem),
+                    OpenSelectedAction::OpenWindow => *action = Some(SearchAction::OpenWindow),
                     OpenSelectedAction::None => {}
                 }
             }
@@ -878,6 +893,16 @@ fn draw_results(
                         Some("command"),
                         selected,
                     ),
+                    DisplayEntry::WindowCommand => widgets::paint_row_content(
+                        ui,
+                        rect,
+                        t.icon("\u{f2d0}", "🗔"),
+                        None,
+                        "Open vault window",
+                        Some("Browse folders, favorites and the action center"),
+                        Some("command"),
+                        selected,
+                    ),
                     DisplayEntry::TrashCommand => widgets::paint_row_content(
                         ui,
                         rect,
@@ -916,6 +941,7 @@ fn draw_results(
                     DisplayEntry::ArchivedCommand => "Archived items".into(),
                     DisplayEntry::TrashCommand => "Recently deleted".into(),
                     DisplayEntry::NewItemCommand => "New item".into(),
+                    DisplayEntry::WindowCommand => "Open vault window".into(),
                 };
                 response.widget_info(|| {
                     egui::WidgetInfo::selected(
@@ -938,6 +964,7 @@ fn draw_results(
                         }
                         DisplayEntry::LockCommand => action = Some(SearchAction::LockVault),
                         DisplayEntry::NewItemCommand => action = Some(SearchAction::NewItem),
+                        DisplayEntry::WindowCommand => action = Some(SearchAction::OpenWindow),
                         DisplayEntry::VaultItem(idx) => {
                             action = Some(SearchAction::OpenResult(idx))
                         }
@@ -1149,6 +1176,7 @@ pub enum SearchAction {
     Sync,
     QuickCopy(usize),
     OpenResult(usize),
+    OpenWindow,
     SetKeyboardShortcuts(bool),
     SetCloseAfterCopy(bool),
     SetRestoreRecentItem(bool),
@@ -1174,6 +1202,8 @@ mod tests {
             name: format!("Item {id}"),
             username: None,
             folder: None,
+            folder_id: None,
+            favorite: false,
             item_type: "login".to_string(),
             icon_host: None,
             state: Default::default(),
@@ -1370,6 +1400,19 @@ mod tests {
         assert_eq!(state.selected, 0);
         state.move_selection(-1);
         assert_eq!(state.selected, 2);
+    }
+
+    #[test]
+    fn window_command_opens_the_vault_window() {
+        assert!(window_command_matches("win"));
+        assert!(window_command_matches("vault w"));
+        assert!(!window_command_matches("w"));
+        let mut state = SearchState {
+            query: "window".into(),
+            ..SearchState::default()
+        };
+
+        assert_eq!(state.open_selected_entry(), OpenSelectedAction::OpenWindow);
     }
 
     #[test]

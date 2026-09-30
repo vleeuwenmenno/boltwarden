@@ -1,8 +1,8 @@
 use crate::bw::TwoFactorProvider;
 use crate::config::AppSettings;
 use crate::model::{
-    BwItem, BwItemDetail, ItemAction, ItemDraft, ItemState, SshAgentStatus, SshApprovalDecision,
-    SshApprovalRequest, SshApprovalStatus, SyncStatus, TotpCode,
+    BwItem, BwItemDetail, Folder, HealthReport, ItemAction, ItemDraft, ItemState, SshAgentStatus,
+    SshApprovalDecision, SshApprovalRequest, SshApprovalStatus, SyncStatus, TotpCode,
 };
 use crate::unix_socket;
 use std::io::{self, Read, Write};
@@ -63,6 +63,24 @@ pub enum RpcRequest {
     CreateItem {
         draft: ItemDraft,
     },
+    ListFolders,
+    MoveItem {
+        id: String,
+        folder_id: Option<String>,
+    },
+    CreateFolder {
+        name: String,
+    },
+    /// Folder id and new full name, for a folder and each of its subfolders.
+    RenameFolders {
+        renames: Vec<(String, String)>,
+    },
+    DeleteFolders {
+        ids: Vec<String>,
+    },
+    VaultHealth,
+    /// Opens (or focuses) the vault window.
+    OpenWindow,
     ApplySettings(AppSettings),
     GetSshAgentStatus,
     GetSshApproval,
@@ -87,6 +105,12 @@ pub enum RpcResponse {
     EditDraft(Result<ItemDraft, RpcError>),
     Saved(Result<BwItemDetail, RpcError>),
     Created(Result<BwItemDetail, RpcError>),
+    Folders(Result<Vec<Folder>, RpcError>),
+    ItemMoved(Result<(), RpcError>),
+    FolderCreated(Result<Folder, RpcError>),
+    FoldersChanged(Result<(), RpcError>),
+    Health(Result<HealthReport, RpcError>),
+    WindowOpened(Result<(), String>),
     SettingsApplied(Result<SshAgentStatus, String>),
     SshAgentStatus(SshAgentStatus),
     SshApproval(Option<SshApprovalRequest>),

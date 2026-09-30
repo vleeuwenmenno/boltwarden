@@ -4,6 +4,10 @@ pub struct BwItem {
     pub name: String,
     pub username: Option<String>,
     pub folder: Option<String>,
+    #[serde(default)]
+    pub folder_id: Option<String>,
+    #[serde(default)]
+    pub favorite: bool,
     pub item_type: String,
     /// Public hostname of the item's first website, used to look up its icon.
     #[serde(default)]
@@ -29,7 +33,9 @@ pub struct ItemDates {
 
 /// Where an item lives in the vault. A trashed item that was also archived counts as
 /// deleted: it only shows up under "Recently deleted".
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum ItemState {
     #[default]
     Active,
@@ -45,6 +51,8 @@ pub enum ItemAction {
     Trash,
     Restore,
     DeleteForever,
+    Favorite,
+    Unfavorite,
 }
 
 impl ItemAction {
@@ -56,6 +64,8 @@ impl ItemAction {
             Self::Trash => "Moved to trash",
             Self::Restore => "Restored",
             Self::DeleteForever => "Deleted permanently",
+            Self::Favorite => "Added to favorites",
+            Self::Unfavorite => "Removed from favorites",
         }
     }
 }
@@ -68,6 +78,10 @@ pub struct ItemDraft {
     pub notes: String,
     pub login: Option<LoginDraft>,
     pub fields: Vec<DraftField>,
+    #[serde(default)]
+    pub folder_id: Option<String>,
+    #[serde(default)]
+    pub favorite: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -76,6 +90,52 @@ pub struct LoginDraft {
     pub password: String,
     pub totp: String,
     pub uris: Vec<DraftUri>,
+    /// Passkeys can't be created or changed here, only removed.
+    #[serde(default)]
+    pub passkeys: Vec<DraftPasskey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DraftPasskey {
+    pub passkey: Passkey,
+    pub original_index: usize,
+}
+
+/// What the UI shows of a stored passkey. The private key never leaves the daemon.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Passkey {
+    pub rp_id: String,
+    pub rp_name: Option<String>,
+    pub user_name: Option<String>,
+    pub user_display_name: Option<String>,
+    pub creation_date: Option<String>,
+}
+
+impl Passkey {
+    /// "alice on example.com", for field rows and confirmations.
+    pub fn describe(&self) -> String {
+        let site = self
+            .rp_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&self.rp_id);
+        match self
+            .user_name
+            .as_deref()
+            .or(self.user_display_name.as_deref())
+            .filter(|user| !user.is_empty())
+        {
+            Some(user) => format!("{user} on {site}"),
+            None => site.to_string(),
+        }
+    }
+}
+
+/// A vault folder. Bitwarden nests folders by name: "Work/Servers" sits inside "Work".
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Folder {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -140,6 +200,12 @@ pub struct BwItemDetail {
     pub notes: Option<String>,
     pub custom_fields: Vec<CustomField>,
     pub folder: Option<String>,
+    #[serde(default)]
+    pub folder_id: Option<String>,
+    #[serde(default)]
+    pub favorite: bool,
+    #[serde(default)]
+    pub passkeys: Vec<Passkey>,
     pub item_type: String,
     pub ssh_key: Option<SshKey>,
     #[serde(default)]
@@ -266,6 +332,96 @@ pub struct SyncStatus {
     pub first_error: Option<String>,
 }
 
+/// One kind of problem the action center looks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum HealthCheck {
+    ReusedPasswords,
+    WeakPasswords,
+    UnsecuredWebsites,
+    Duplicates,
+    Expiring,
+    TwoFactorAvailable,
+    PasskeysAvailable,
+}
+
+impl HealthCheck {
+    pub const ALL: [Self; 7] = [
+        Self::ReusedPasswords,
+        Self::WeakPasswords,
+        Self::UnsecuredWebsites,
+        Self::Duplicates,
+        Self::TwoFactorAvailable,
+        Self::PasskeysAvailable,
+        Self::Expiring,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::ReusedPasswords => "Reused passwords",
+            Self::WeakPasswords => "Weak passwords",
+            Self::UnsecuredWebsites => "Unsecured websites",
+            Self::Duplicates => "Duplicate items",
+            Self::Expiring => "Expiring items",
+            Self::TwoFactorAvailable => "Two-factor authentication",
+            Self::PasskeysAvailable => "Passkeys available",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::ReusedPasswords => {
+                "The same password is used by more than one login. Give each site its own."
+            }
+            Self::WeakPasswords => "These passwords are easy to guess. Generate strong ones.",
+            Self::UnsecuredWebsites => {
+                "Websites saved with http:// send your login unencrypted. Switch them to https://."
+            }
+            Self::Duplicates => {
+                "Logins with the same website, username and password. Delete the extra copies."
+            }
+            Self::Expiring => "Cards that have expired or expire within 30 days.",
+            Self::TwoFactorAvailable => {
+                "These sites offer two-factor authentication, but no one-time code is saved."
+            }
+            Self::PasskeysAvailable => {
+                "These sites support passkeys, a phishing-resistant alternative to passwords."
+            }
+        }
+    }
+
+    /// Security problems, as opposed to suggestions such as adding a passkey.
+    pub fn is_risk(self) -> bool {
+        matches!(
+            self,
+            Self::ReusedPasswords | Self::WeakPasswords | Self::UnsecuredWebsites
+        )
+    }
+}
+
+/// Vault health for the action center. Holds item ids only, never secrets.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HealthReport {
+    /// Active logins that have a password.
+    pub passwords: usize,
+    /// How many passwords got each strength score, from 0 (very weak) to 4 (strong).
+    pub strength: [usize; 5],
+    /// Share of those logins with no risk (reused, weak or unsecured), 0..=100.
+    pub score: u8,
+    pub findings: Vec<(HealthCheck, Vec<String>)>,
+    /// Why the two-factor and passkey checks are missing, if they are.
+    pub directory_error: Option<String>,
+}
+
+impl HealthReport {
+    pub fn items(&self, check: HealthCheck) -> &[String] {
+        self.findings
+            .iter()
+            .find(|(kind, _)| *kind == check)
+            .map(|(_, ids)| ids.as_slice())
+            .unwrap_or(&[])
+    }
+}
+
 impl BwItemDetail {
     /// Bind a copy request to the exact item shown, including field ordering.
     pub fn copy_version(&self) -> [u8; 32] {
@@ -283,31 +439,37 @@ impl BwItemDetail {
 
     /// The same field ordering used by the detail view. TOTP is generated at copy time.
     pub fn copy_value(&self, index: usize) -> Result<String, String> {
+        enum Source<'a> {
+            Value(&'a str),
+            Totp,
+            Passkey,
+        }
         let mut values = Vec::new();
         if let Some(value) = &self.username {
-            values.push(Some(value.as_str()));
+            values.push(Source::Value(value));
         }
         if let Some(value) = &self.password {
-            values.push(Some(value.as_str()));
+            values.push(Source::Value(value));
         }
         if self.totp.is_some() {
-            values.push(None);
+            values.push(Source::Totp);
         }
-        values.extend(self.uris.iter().map(|s| Some(s.as_str())));
+        values.extend(self.passkeys.iter().map(|_| Source::Passkey));
+        values.extend(self.uris.iter().map(|s| Source::Value(s)));
         if let Some(key) = &self.ssh_key {
-            values.push(Some(key.public_key.as_str()));
+            values.push(Source::Value(&key.public_key));
             if let Some(value) = &key.fingerprint {
-                values.push(Some(value.as_str()));
+                values.push(Source::Value(value));
             }
-            values.push(Some(key.private_key.as_str()));
+            values.push(Source::Value(&key.private_key));
         }
-        values.extend(self.custom_fields.iter().map(|f| Some(f.value.as_str())));
+        values.extend(self.custom_fields.iter().map(|f| Source::Value(&f.value)));
         if let Some(value) = &self.notes {
-            values.push(Some(value.as_str()));
+            values.push(Source::Value(value));
         }
         match values.get(index) {
-            Some(Some(value)) => Ok((*value).to_owned()),
-            Some(None) => {
+            Some(Source::Value(value)) => Ok((*value).to_owned()),
+            Some(Source::Totp) => {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_err(|e| e.to_string())?
@@ -316,6 +478,7 @@ impl BwItemDetail {
                     .map(|code| code.code)
                     .map_err(|e| e.to_string())
             }
+            Some(Source::Passkey) => Err("Passkeys can't be copied".into()),
             None => Err("Field is no longer available".into()),
         }
     }

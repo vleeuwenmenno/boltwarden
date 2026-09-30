@@ -5,4 +5,5 @@ pub mod ssh_approval;
 pub mod summary;
 pub mod theme;
 pub mod two_factor;
+pub mod vault;
 pub mod widgets;
