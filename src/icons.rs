@@ -173,8 +173,9 @@ impl IconCache {
         }
     }
 
-    /// Texture for `host` if it is loaded; otherwise starts loading it.
-    pub fn get(&mut self, ctx: &egui::Context, host: &str) -> Option<egui::TextureHandle> {
+    /// Texture for `host` if loaded; otherwise queues it in this frame's request order.
+    /// Request the selected item before visible rows to give it first priority.
+    pub fn get(&mut self, host: &str) -> Option<egui::TextureHandle> {
         if !self.enabled {
             return None;
         }
@@ -185,13 +186,13 @@ impl IconCache {
                 self.icons_url.as_ref()?;
                 self.slots.insert(host.to_owned(), Slot::Pending);
                 self.queue.push_back(host.to_owned());
-                self.start_queued(ctx);
                 None
             }
         }
     }
 
-    /// Turns finished loads into textures. Call once per frame.
+    /// Collects completed loads and drops requests that did not start last frame.
+    /// The current view rebuilds the queue before `start_queued` runs after drawing.
     pub fn poll(&mut self, ctx: &egui::Context) {
         while let Ok((host, image)) = self.rx.try_recv() {
             self.in_flight = self.in_flight.saturating_sub(1);
@@ -208,10 +209,12 @@ impl IconCache {
             };
             self.slots.insert(host, slot);
         }
-        self.start_queued(ctx);
+        for host in self.queue.drain(..) {
+            self.slots.remove(&host);
+        }
     }
 
-    fn start_queued(&mut self, ctx: &egui::Context) {
+    pub fn start_queued(&mut self, ctx: &egui::Context) {
         let (Some(icons_url), Some(dir)) = (self.icons_url.clone(), cache_dir()) else {
             return;
         };
@@ -414,6 +417,80 @@ mod tests {
 
     fn uris(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    fn request_cache() -> IconCache {
+        // Enable after construction to avoid starting disk-cache maintenance in tests.
+        let mut cache = IconCache::new(false);
+        cache.set_enabled(true);
+        cache.set_icons_url(Some("https://icons.example.org".into()));
+        cache
+    }
+
+    #[test]
+    fn queues_selected_then_visible_hosts_without_duplicates() {
+        let mut cache = request_cache();
+        cache.get("selected.example.org");
+        cache.get("first.example.org");
+        cache.get("selected.example.org");
+        cache.get("last.example.org");
+
+        assert_eq!(
+            cache.queue.iter().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "selected.example.org",
+                "first.example.org",
+                "last.example.org"
+            ]
+        );
+        assert_eq!(cache.in_flight, 0, "dispatch waits until after drawing");
+    }
+
+    #[test]
+    fn new_frame_replaces_old_requests_and_preserves_running_loads() {
+        let mut cache = request_cache();
+        cache.get("running.example.org");
+        // Simulate dispatch without starting a network request.
+        cache.queue.pop_front();
+        cache.in_flight = 1;
+        cache.get("old.example.org");
+        cache.get("shared.example.org");
+
+        cache.poll(&egui::Context::default());
+        cache.get("shared.example.org");
+        cache.get("new.example.org");
+        cache.get("running.example.org");
+
+        assert!(!cache.slots.contains_key("old.example.org"));
+        assert_eq!(cache.in_flight, 1);
+        assert_eq!(
+            cache.queue.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["shared.example.org", "new.example.org"]
+        );
+    }
+
+    #[test]
+    fn completed_icons_stay_available_without_requeueing() {
+        let mut cache = request_cache();
+        let ctx = egui::Context::default();
+        cache.in_flight = 1;
+        cache
+            .slots
+            .insert("ready.example.org".into(), Slot::Pending);
+        cache
+            .tx
+            .send((
+                "ready.example.org".into(),
+                Some(egui::ColorImage::new([8, 8], egui::Color32::WHITE)),
+            ))
+            .unwrap();
+
+        cache.poll(&ctx);
+        assert!(cache.get("ready.example.org").is_some());
+        cache.poll(&ctx);
+        assert!(cache.get("ready.example.org").is_some());
+        assert!(cache.queue.is_empty());
+        assert_eq!(cache.in_flight, 0);
     }
 
     #[test]

@@ -195,7 +195,7 @@ pub fn draw_summary(
                 }
                 if let Some(detail) = &detail {
                     let website_icon =
-                        icons::icon_host(&detail.uris).and_then(|host| icons.get(ctx, &host));
+                        icons::icon_host(&detail.uris).and_then(|host| icons.get(&host));
                     match website_icon {
                         Some(texture) => {
                             ui.add(

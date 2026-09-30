@@ -670,6 +670,7 @@ impl eframe::App for App {
             Screen::Search if self.summary_open => self.update_summary(ctx),
             Screen::Search => self.update_search(ctx),
         }
+        self.icons.start_queued(ctx);
         self.schedule_repaint(ctx);
     }
 }

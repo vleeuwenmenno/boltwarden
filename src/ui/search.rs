@@ -375,6 +375,14 @@ fn draw_results(ui: &mut Ui, state: &mut SearchState, icons: &mut IconCache) -> 
     let scroll_to = (state.scrolled_to != Some(state.selected)).then_some(state.selected);
     state.scrolled_to = Some(state.selected);
 
+    // The keyboard selection gets the first available worker, even before scrolling
+    // brings it into view. Only visible rows request the remaining icons.
+    if let Some(DisplayEntry::VaultItem(idx)) = state.display_entry(state.selected)
+        && let Some(host) = state.results[idx].icon_host.as_deref()
+    {
+        icons.get(host);
+    }
+
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -408,10 +416,10 @@ fn draw_results(ui: &mut Ui, state: &mut SearchState, icons: &mut IconCache) -> 
                     ),
                     DisplayEntry::VaultItem(idx) => {
                         let item = &state.results[idx];
-                        let image = item
-                            .icon_host
-                            .as_deref()
-                            .and_then(|host| icons.get(ui.ctx(), host));
+                        let image = ui
+                            .is_rect_visible(rect)
+                            .then(|| item.icon_host.as_deref().and_then(|host| icons.get(host)))
+                            .flatten();
                         widgets::paint_row_content(
                             ui,
                             rect,
