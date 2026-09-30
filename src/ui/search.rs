@@ -1,25 +1,117 @@
-use crate::config::{self, AppSettings};
+use crate::config::{self, AppSettings, StartList};
 use crate::icons::IconCache;
-use crate::model::{BwItem, SshAgentStatus, SyncStatus};
+use crate::model::{BwItem, ItemState, SshAgentStatus, SyncStatus};
 use crate::ui::theme::theme;
 use crate::ui::widgets;
 use egui::{Context, RichText, Ui};
 
 const SEARCH_INPUT_ID: &str = "vault-search-input";
 const SSH_PATH_INPUT_ID: &str = "settings-ssh-socket-path";
-const SETTINGS_ROWS: usize = 7;
-const IDLE_TIMEOUT_ROW: usize = 5;
+const SETTINGS_ROWS: usize = 9;
+const SCREEN_CAPTURE_ROW: usize = 5;
+const START_LIST_ROW: usize = 3;
+const IDLE_TIMEOUT_ROW: usize = 7;
+/// Items shown in the "Recently edited/created" start lists.
+const START_LIST_LIMIT: usize = 20;
+const NOTICE_DURATION: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchView {
     Results,
     Settings,
+    Archived,
+    Trash,
+}
+
+impl SearchView {
+    /// Which items the view lists; `None` for the settings panel.
+    pub fn item_state(self) -> Option<ItemState> {
+        match self {
+            Self::Results => Some(ItemState::Active),
+            Self::Archived => Some(ItemState::Archived),
+            Self::Trash => Some(ItemState::Deleted),
+            Self::Settings => None,
+        }
+    }
+
+    fn is_item_list(self) -> bool {
+        matches!(self, Self::Archived | Self::Trash)
+    }
+}
+
+/// How the archived and trash lists are ordered. Tab cycles through the keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListSortKey {
+    /// When the item was archived or trashed.
+    StateChanged,
+    Name,
+    Modified,
+}
+
+impl ListSortKey {
+    fn next(self) -> Self {
+        match self {
+            Self::StateChanged => Self::Name,
+            Self::Name => Self::Modified,
+            Self::Modified => Self::StateChanged,
+        }
+    }
+
+    fn label(self, view: SearchView) -> &'static str {
+        match (self, view) {
+            (Self::StateChanged, SearchView::Trash) => "Date deleted",
+            (Self::StateChanged, _) => "Date archived",
+            (Self::Name, _) => "Name",
+            (Self::Modified, _) => "Last modified",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListSort {
+    pub key: ListSortKey,
+    pub descending: bool,
+}
+
+impl Default for ListSort {
+    /// Most recently archived or deleted first.
+    fn default() -> Self {
+        Self {
+            key: ListSortKey::StateChanged,
+            descending: true,
+        }
+    }
+}
+
+impl ListSort {
+    fn apply(self, items: &mut [BwItem]) {
+        items.sort_by(|a, b| {
+            let name = |item: &BwItem| item.name.to_lowercase();
+            let ordering = match self.key {
+                ListSortKey::StateChanged => {
+                    a.dates.state_changed_at.cmp(&b.dates.state_changed_at)
+                }
+                ListSortKey::Name => name(a).cmp(&name(b)),
+                ListSortKey::Modified => a.dates.revision_date.cmp(&b.dates.revision_date),
+            };
+            let ordering = if self.descending {
+                ordering.reverse()
+            } else {
+                ordering
+            };
+            // Ties (and items without a date) stay in name order.
+            ordering.then_with(|| name(a).cmp(&name(b)))
+        });
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DisplayEntry {
     SettingsCommand,
     LockCommand,
+    ArchivedCommand,
+    TrashCommand,
+    NewItemCommand,
     VaultItem(usize),
 }
 
@@ -28,6 +120,7 @@ pub enum OpenSelectedAction {
     None,
     OpenResult(usize),
     LockVault,
+    NewItem,
 }
 
 pub struct SearchState {
@@ -41,10 +134,19 @@ pub struct SearchState {
     pub last_query: String,
     pub last_query_time: Option<std::time::Instant>,
     pub sync_status: Option<SyncStatus>,
+    pub syncing: bool,
     pub view: SearchView,
     /// Draft of the SSH socket path; `None` until the settings panel loads the saved value.
     pub ssh_agent_path_input: Option<String>,
     pub settings_selected: usize,
+    pub capture_pending: bool,
+    settings_scrolled_to: Option<usize>,
+    /// Short success message for the footer, such as "Moved to trash".
+    pub notice: Option<(String, std::time::Instant)>,
+    /// Order of the archived and trash lists; the main search keeps relevance order.
+    pub list_sort: ListSort,
+    /// What the empty search shows, from the settings.
+    pub start_list: StartList,
     /// Row the list last scrolled to, so it only scrolls when the selection moves.
     scrolled_to: Option<usize>,
 }
@@ -62,17 +164,40 @@ impl Default for SearchState {
             last_query: String::new(),
             last_query_time: None,
             sync_status: None,
+            syncing: false,
             view: SearchView::Results,
             ssh_agent_path_input: None,
             settings_selected: 0,
+            capture_pending: false,
+            settings_scrolled_to: None,
+            notice: None,
+            list_sort: ListSort::default(),
+            start_list: StartList::None,
             scrolled_to: None,
         }
     }
 }
 
 impl SearchState {
+    /// Whether the empty search shows a start list (recently used, edited or created).
+    pub fn showing_start_list(&self) -> bool {
+        self.view == SearchView::Results
+            && self.start_list != StartList::None
+            && self.query.trim().is_empty()
+    }
+
     pub fn reset_results_for_empty_query(&mut self) {
-        if self.query.trim().is_empty() {
+        // A start list loads through a normal search; only drop the results of the query
+        // that was just cleared.
+        if self.showing_start_list() {
+            if !self.last_query.is_empty() {
+                self.results.clear();
+                self.selected = 0;
+            }
+            return;
+        }
+        // The archived and trash lists show everything while the query is empty.
+        if self.query.trim().is_empty() && !self.view.is_item_list() {
             self.results.clear();
             self.selected = 0;
             self.error = None;
@@ -87,7 +212,7 @@ impl SearchState {
 
     pub fn needs_search(&self) -> bool {
         let query = self.query.trim();
-        if query.is_empty() {
+        if query.is_empty() && !self.view.is_item_list() && !self.showing_start_list() {
             return false;
         }
         if self.in_flight {
@@ -124,6 +249,63 @@ impl SearchState {
         self.view = SearchView::Results;
         self.ssh_agent_path_input = None;
         self.settings_selected = 0;
+        self.settings_scrolled_to = None;
+        self.notice = None;
+        self.scrolled_to = None;
+        self.force_refresh();
+        self.focus_search = true;
+    }
+
+    /// Takes a fresh result list, ordering it by the list sort in the archived and trash views.
+    pub fn set_results(&mut self, mut items: Vec<BwItem>) {
+        if self.view.is_item_list() {
+            self.list_sort.apply(&mut items);
+        } else if self.showing_start_list() {
+            items = start_list_items(self.start_list, items, &config::load_item_usage());
+        }
+        self.results = items;
+        self.selected = 0;
+    }
+
+    fn change_list_sort(&mut self, sort: ListSort) {
+        if sort == self.list_sort {
+            return;
+        }
+        self.list_sort = sort;
+        let items = std::mem::take(&mut self.results);
+        self.set_results(items);
+        self.scrolled_to = None;
+    }
+
+    pub fn show_notice(&mut self, message: &str) {
+        self.notice = Some((message.to_string(), std::time::Instant::now()));
+    }
+
+    fn current_notice(&self) -> Option<&str> {
+        self.notice
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < NOTICE_DURATION)
+            .map(|(message, _)| message.as_str())
+    }
+
+    /// Switches to the archived or trash list, which starts unfiltered.
+    fn open_item_list(&mut self, view: SearchView) {
+        self.view = view;
+        self.query.clear();
+        self.results.clear();
+        self.selected = 0;
+        self.error = None;
+        self.scrolled_to = None;
+        self.force_refresh();
+        self.focus_search = true;
+    }
+
+    pub fn close_item_list(&mut self) {
+        self.view = SearchView::Results;
+        self.query.clear();
+        self.results.clear();
+        self.selected = 0;
+        self.error = None;
         self.scrolled_to = None;
         self.force_refresh();
         self.focus_search = true;
@@ -144,9 +326,19 @@ impl SearchState {
                 self.view = SearchView::Settings;
                 self.selected = 0;
                 self.settings_selected = 0;
+                self.settings_scrolled_to = None;
                 OpenSelectedAction::None
             }
             Some(DisplayEntry::LockCommand) => OpenSelectedAction::LockVault,
+            Some(DisplayEntry::ArchivedCommand) => {
+                self.open_item_list(SearchView::Archived);
+                OpenSelectedAction::None
+            }
+            Some(DisplayEntry::TrashCommand) => {
+                self.open_item_list(SearchView::Trash);
+                OpenSelectedAction::None
+            }
+            Some(DisplayEntry::NewItemCommand) => OpenSelectedAction::NewItem,
             Some(DisplayEntry::VaultItem(idx)) => OpenSelectedAction::OpenResult(idx),
             None => OpenSelectedAction::None,
         }
@@ -163,35 +355,78 @@ impl SearchState {
         settings_command_matches(&self.query)
     }
 
-    fn lock_command_visible(&self) -> bool {
-        lock_command_matches(&self.query)
+    /// Command rows shown above the vault items, in display order. The archived and
+    /// trash lists only show items.
+    fn visible_commands(&self) -> Vec<DisplayEntry> {
+        if self.view.is_item_list() {
+            return Vec::new();
+        }
+        [
+            (
+                settings_command_matches(&self.query),
+                DisplayEntry::SettingsCommand,
+            ),
+            (lock_command_matches(&self.query), DisplayEntry::LockCommand),
+            (
+                archived_command_matches(&self.query),
+                DisplayEntry::ArchivedCommand,
+            ),
+            (
+                trash_command_matches(&self.query),
+                DisplayEntry::TrashCommand,
+            ),
+            (
+                new_item_command_matches(&self.query),
+                DisplayEntry::NewItemCommand,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(visible, entry)| visible.then_some(entry))
+        .collect()
     }
 
     fn display_entry_count(&self) -> usize {
-        usize::from(self.settings_command_visible())
-            + usize::from(self.lock_command_visible())
-            + self.results.len()
+        self.visible_commands().len() + self.results.len()
     }
 
     fn display_entry(&self, display_idx: usize) -> Option<DisplayEntry> {
-        let mut cursor = 0;
-        if self.settings_command_visible() {
-            if display_idx == cursor {
-                return Some(DisplayEntry::SettingsCommand);
-            }
-            cursor += 1;
+        let commands = self.visible_commands();
+        if let Some(command) = commands.get(display_idx) {
+            return Some(*command);
         }
-        if self.lock_command_visible() {
-            if display_idx == cursor {
-                return Some(DisplayEntry::LockCommand);
-            }
-            cursor += 1;
-        }
+        let cursor = commands.len();
         let item_idx = display_idx.checked_sub(cursor)?;
         self.results
             .get(item_idx)
             .map(|_| DisplayEntry::VaultItem(item_idx))
     }
+}
+
+/// Picks and orders the items of a start list from all active items.
+fn start_list_items(list: StartList, mut items: Vec<BwItem>, usage: &[String]) -> Vec<BwItem> {
+    let newest_first = |items: &mut Vec<BwItem>, date: fn(&BwItem) -> Option<&String>| {
+        items.retain(|item| date(item).is_some());
+        items.sort_by(|a, b| date(b).cmp(&date(a)));
+        items.truncate(START_LIST_LIMIT);
+    };
+    match list {
+        StartList::None => items.clear(),
+        StartList::RecentlyUsed => {
+            // Usage ids of items that are gone or archived simply find no match.
+            return usage
+                .iter()
+                .filter_map(|id| items.iter().position(|item| &item.id == id))
+                .map(|idx| items[idx].clone())
+                .collect();
+        }
+        StartList::RecentlyEdited => {
+            newest_first(&mut items, |item| item.dates.revision_date.as_ref())
+        }
+        StartList::RecentlyCreated => {
+            newest_first(&mut items, |item| item.dates.creation_date.as_ref())
+        }
+    }
+    items
 }
 
 pub fn settings_command_matches(query: &str) -> bool {
@@ -200,17 +435,34 @@ pub fn settings_command_matches(query: &str) -> bool {
 }
 
 pub fn lock_command_matches(query: &str) -> bool {
-    let query = query.trim();
-    query.chars().count() >= 2 && "lock".starts_with(&query.to_ascii_lowercase())
+    command_matches(query, &["lock"])
+}
+
+pub fn archived_command_matches(query: &str) -> bool {
+    command_matches(query, &["archived items"])
+}
+
+pub fn new_item_command_matches(query: &str) -> bool {
+    command_matches(query, &["new item", "create item", "add item"])
+}
+
+pub fn trash_command_matches(query: &str) -> bool {
+    command_matches(query, &["recently deleted", "deleted", "trash"])
+}
+
+fn command_matches(query: &str, names: &[&str]) -> bool {
+    let query = query.trim().to_ascii_lowercase();
+    query.chars().count() >= 2 && names.iter().any(|name| name.starts_with(&query))
 }
 
 pub fn draw_search(
-    ctx: &Context,
+    root: &mut egui::Ui,
     state: &mut SearchState,
     settings: &AppSettings,
     ssh_agent_status: &SshAgentStatus,
     icons: &mut IconCache,
 ) -> Option<SearchAction> {
+    let ctx = &root.ctx().clone();
     let mut action = None;
     let t = theme();
 
@@ -222,46 +474,130 @@ pub fn draw_search(
 
     let status = if let Some(error) = &state.error {
         Some((error.as_str(), t.danger))
+    } else if let Some(notice) = state.current_notice() {
+        Some((notice, t.success))
     } else {
         state.warning.as_deref().map(|warning| (warning, t.warning))
     };
-    if settings.show_keyboard_shortcuts || status.is_some() {
+    {
         let hints: &[(&str, &str)] = match (settings.show_keyboard_shortcuts, state.view) {
             (false, _) => &[],
-            (true, SearchView::Results) => &[("↑↓", "Navigate"), ("⏎", "Open"), ("Esc", "Hide")],
+            (true, SearchView::Results) => &[
+                ("↑↓", "Navigate"),
+                ("⏎", "Open"),
+                ("Shift+⏎", "Copy password"),
+                ("Esc", "Hide"),
+            ],
             (true, SearchView::Settings) => {
                 &[("↑↓", "Select"), ("Space", "Toggle"), ("Esc", "Back")]
             }
+            (true, SearchView::Archived | SearchView::Trash) => &[
+                ("↑↓", "Navigate"),
+                ("⏎", "Open"),
+                ("Tab", "Sort by"),
+                ("Ctrl+↑↓", "Order"),
+                ("Esc", "Back"),
+            ],
         };
-        egui::TopBottomPanel::bottom("footer")
+        egui::Panel::bottom("footer")
             .frame(widgets::footer_frame())
-            .show(ctx, |ui| widgets::footer(ui, hints, status));
+            .show(root, |ui| {
+                let sync_label = if state.syncing {
+                    "Syncing…"
+                } else if state
+                    .sync_status
+                    .as_ref()
+                    .and_then(|s| s.last_synced_unix)
+                    .is_some()
+                {
+                    "Synced"
+                } else {
+                    "Sync"
+                };
+                let rect = widgets::footer(ui, hints, status.or(Some((sync_label, t.text_faint))));
+                if status.is_none() {
+                    if let Some(rect) = rect {
+                        let response = ui.interact(
+                            rect,
+                            egui::Id::new("footer-sync"),
+                            if state.syncing {
+                                egui::Sense::hover()
+                            } else {
+                                egui::Sense::click()
+                            },
+                        );
+                        response.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                !state.syncing,
+                                "Sync vault",
+                            )
+                        });
+                        let mut tooltip = "Sync vault · Ctrl+R".to_string();
+                        if let Some(at) =
+                            state.sync_status.as_ref().and_then(|s| s.last_synced_unix)
+                        {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let minutes = now.saturating_sub(at) / 60;
+                            tooltip.push_str(&if minutes == 0 {
+                                "\nLast synced less than a minute ago".into()
+                            } else {
+                                format!("\nLast synced {minutes} min ago")
+                            });
+                        }
+                        if response.on_hover_text(tooltip).clicked() {
+                            action = Some(SearchAction::Sync);
+                        }
+                    }
+                }
+            });
     }
 
-    egui::TopBottomPanel::top("header")
+    egui::Panel::top("header")
         .frame(widgets::header_frame())
-        .show(ctx, |ui| draw_search_field(ui, state));
+        .show(root, |ui| draw_search_field(ui, state));
 
     egui::CentralPanel::default()
         .frame(widgets::body_frame())
-        .show(ctx, |ui| {
+        .show(root, |ui| {
             if state.view == SearchView::Settings {
                 if let Some(settings_action) = draw_settings(ui, state, settings, ssh_agent_status)
                 {
                     action = Some(settings_action);
                 }
-            } else if state.query.trim().is_empty() {
-                widgets::empty_state(
-                    ui,
-                    t.icon("\u{f002}", "🔎"),
-                    "Type to search your vault · \"settings\" and \"lock\" are commands",
-                    false,
+            } else if state.showing_start_list() && !state.results.is_empty() {
+                ui.label(
+                    RichText::new(state.start_list.label())
+                        .size(t.small())
+                        .color(t.text_muted),
                 );
+                ui.add_space(2.0);
+                if let Some(row_action) = draw_results(ui, state, icons) {
+                    action = Some(row_action);
+                }
+            } else if state.showing_start_list() && state.in_flight {
+                widgets::empty_state(ui, "", "Loading…", true);
+            } else if state.query.trim().is_empty() && !state.view.is_item_list() {
+                let hint = if state.start_list == StartList::RecentlyUsed {
+                    "Items you open show up here · type to search"
+                } else {
+                    "Type to search · commands: settings, lock, archived, deleted, new"
+                };
+                widgets::empty_state(ui, t.icon("\u{f002}", "🔎"), hint, false);
             } else if state.display_entry_count() == 0 {
-                if state.in_flight || state.last_query.is_empty() {
+                let empty_text = match state.view {
+                    _ if !state.query.trim().is_empty() => "No matching items",
+                    SearchView::Archived => "No archived items",
+                    SearchView::Trash => "Trash is empty",
+                    _ => "No matching items",
+                };
+                if state.in_flight || state.last_query.is_empty() || state.last_query == "\u{0}" {
                     widgets::empty_state(ui, "", "Searching…", true);
                 } else {
-                    widgets::empty_state(ui, t.icon("\u{f05e}", "∅"), "No matching items", false);
+                    widgets::empty_state(ui, t.icon("\u{f05e}", "∅"), empty_text, false);
                 }
             } else if let Some(row_action) = draw_results(ui, state, icons) {
                 action = Some(row_action);
@@ -291,8 +627,9 @@ fn handle_keys(
                 state.settings_selected =
                     (state.settings_selected + SETTINGS_ROWS - 1) % SETTINGS_ROWS;
             }
-            if input.consume_key(egui::Modifiers::NONE, egui::Key::Space)
-                || input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+            if (input.consume_key(egui::Modifiers::NONE, egui::Key::Space)
+                || input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+                && (state.settings_selected != SCREEN_CAPTURE_ROW || !state.capture_pending)
             {
                 *action = toggle_setting(state.settings_selected, settings);
             }
@@ -302,12 +639,51 @@ fn handle_keys(
                 state.close_settings_panel();
             }
         }
-        SearchView::Results => {
+        SearchView::Results | SearchView::Archived | SearchView::Trash => {
+            if state.view.is_item_list()
+                && (input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                    || (state.query.is_empty()
+                        && input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)))
+            {
+                state.close_item_list();
+                return;
+            }
+            if state.view.is_item_list() {
+                let sort = state.list_sort;
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
+                    state.change_list_sort(ListSort {
+                        key: sort.key.next(),
+                        ..sort
+                    });
+                }
+                if input.consume_key(egui::Modifiers::COMMAND, egui::Key::ArrowUp) {
+                    state.change_list_sort(ListSort {
+                        descending: false,
+                        ..sort
+                    });
+                }
+                if input.consume_key(egui::Modifiers::COMMAND, egui::Key::ArrowDown) {
+                    state.change_list_sort(ListSort {
+                        descending: true,
+                        ..sort
+                    });
+                }
+            }
             if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
                 state.move_selection(1);
             }
             if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
                 state.move_selection(-1);
+            }
+            // Consume the modified shortcut first: egui's NONE also accepts Shift.
+            if input.consume_key(egui::Modifiers::SHIFT, egui::Key::Enter) {
+                if !state.in_flight {
+                    if let Some(DisplayEntry::VaultItem(idx)) = state.display_entry(state.selected)
+                    {
+                        *action = Some(SearchAction::QuickCopy(idx));
+                    }
+                }
+                return;
             }
             // Right arrow opens only at the end of the query; elsewhere it moves the cursor.
             let open = input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
@@ -321,6 +697,7 @@ fn handle_keys(
                         *action = Some(SearchAction::OpenResult(idx))
                     }
                     OpenSelectedAction::LockVault => *action = Some(SearchAction::LockVault),
+                    OpenSelectedAction::NewItem => *action = Some(SearchAction::NewItem),
                     OpenSelectedAction::None => {}
                 }
             }
@@ -331,7 +708,7 @@ fn handle_keys(
 fn search_cursor_at_end(ctx: &Context, query: &str) -> bool {
     egui::TextEdit::load_state(ctx, egui::Id::new(SEARCH_INPUT_ID))
         .and_then(|edit| edit.cursor.char_range())
-        .is_none_or(|range| range.primary.index >= query.chars().count())
+        .is_none_or(|range| range.primary.index.0 >= query.chars().count())
 }
 
 fn draw_search_field(ui: &mut Ui, state: &mut SearchState) {
@@ -343,13 +720,34 @@ fn draw_search_field(ui: &mut Ui, state: &mut SearchState) {
                 .color(t.text_muted),
         );
         ui.add_space(6.0);
-        let trailing = 44.0;
+        let chip = match state.view {
+            SearchView::Archived => Some((t.icon("\u{f187}", "🗄"), "Archived")),
+            SearchView::Trash => Some((t.icon("\u{f1f8}", "🗑"), "Recently deleted")),
+            _ => None,
+        };
+        if let Some((icon, label)) = chip {
+            egui::Frame::new()
+                .fill(t.surface)
+                .stroke(egui::Stroke::new(1.0_f32, t.border))
+                .corner_radius(t.rounding)
+                .inner_margin(egui::Margin::symmetric(8, 4))
+                .show(ui, |ui| {
+                    ui.label(RichText::new(format!("{icon} {label}")).color(t.accent));
+                });
+            ui.add_space(6.0);
+        }
+        // Room on the right for the count, plus the sort control in the item lists.
+        let trailing = if state.view.is_item_list() {
+            190.0
+        } else {
+            44.0
+        };
         let mut field = egui::TextEdit::singleline(&mut state.query)
             .id(egui::Id::new(SEARCH_INPUT_ID))
             .font(t.font(t.input()))
             .text_color(t.text_strong)
             .hint_text(RichText::new("Search vault").color(t.text_faint))
-            .frame(false)
+            .frame(egui::Frame::NONE)
             .vertical_align(egui::Align::Center);
         if state.focus_search {
             field = field.cursor_at_end(true);
@@ -362,14 +760,60 @@ fn draw_search_field(ui: &mut Ui, state: &mut SearchState) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if state.in_flight {
                 ui.add(egui::Spinner::new().color(t.text_muted));
-            } else if !state.query.trim().is_empty() && state.view == SearchView::Results {
+            } else if !state.query.trim().is_empty() || state.view.is_item_list() {
                 ui.label(RichText::new(state.results.len().to_string()).color(t.text_faint));
+            }
+            if state.view.is_item_list() {
+                draw_sort_control(ui, state);
             }
         });
     });
 }
 
-fn draw_results(ui: &mut Ui, state: &mut SearchState, icons: &mut IconCache) -> Option<SearchAction> {
+/// "Date archived ↓": clicking the name cycles the sort key, the arrow flips the order.
+fn draw_sort_control(ui: &mut Ui, state: &mut SearchState) {
+    let t = theme();
+    let sort = state.list_sort;
+    let arrow = if sort.descending {
+        t.icon("\u{f175}", "↓")
+    } else {
+        t.icon("\u{f176}", "↑")
+    };
+    let order_hint = if sort.descending {
+        "Newest / Z first (Ctrl+↑ for ascending)"
+    } else {
+        "Oldest / A first (Ctrl+↓ for descending)"
+    };
+    if ui
+        .add(egui::Button::new(RichText::new(arrow).color(t.accent)).frame(false))
+        .on_hover_text(order_hint)
+        .clicked()
+    {
+        state.change_list_sort(ListSort {
+            descending: !sort.descending,
+            ..sort
+        });
+    }
+    if ui
+        .add(
+            egui::Button::new(RichText::new(sort.key.label(state.view)).color(t.text_muted))
+                .frame(false),
+        )
+        .on_hover_text("Sort by (Tab)")
+        .clicked()
+    {
+        state.change_list_sort(ListSort {
+            key: sort.key.next(),
+            ..sort
+        });
+    }
+}
+
+fn draw_results(
+    ui: &mut Ui,
+    state: &mut SearchState,
+    icons: &mut IconCache,
+) -> Option<SearchAction> {
     let t = theme();
     let mut action = None;
     let scroll_to = (state.scrolled_to != Some(state.selected)).then_some(state.selected);
@@ -414,6 +858,36 @@ fn draw_results(ui: &mut Ui, state: &mut SearchState, icons: &mut IconCache) -> 
                         Some("command"),
                         selected,
                     ),
+                    DisplayEntry::ArchivedCommand => widgets::paint_row_content(
+                        ui,
+                        rect,
+                        t.icon("\u{f187}", "🗄"),
+                        None,
+                        "Archived items",
+                        Some("Items kept out of search and autofill"),
+                        Some("command"),
+                        selected,
+                    ),
+                    DisplayEntry::NewItemCommand => widgets::paint_row_content(
+                        ui,
+                        rect,
+                        t.icon("\u{f067}", "+"),
+                        None,
+                        "New item",
+                        Some("Add a login or secure note to the vault"),
+                        Some("command"),
+                        selected,
+                    ),
+                    DisplayEntry::TrashCommand => widgets::paint_row_content(
+                        ui,
+                        rect,
+                        t.icon("\u{f1f8}", "🗑"),
+                        None,
+                        "Recently deleted",
+                        Some("Restore or permanently delete trashed items"),
+                        Some("command"),
+                        selected,
+                    ),
                     DisplayEntry::VaultItem(idx) => {
                         let item = &state.results[idx];
                         let image = ui
@@ -432,16 +906,38 @@ fn draw_results(ui: &mut Ui, state: &mut SearchState, icons: &mut IconCache) -> 
                         );
                     }
                 }
+                let label = match entry {
+                    DisplayEntry::VaultItem(idx) => {
+                        let item = &state.results[idx];
+                        format!("{} {}", item.name, item.username.as_deref().unwrap_or(""))
+                    }
+                    DisplayEntry::SettingsCommand => "Settings".into(),
+                    DisplayEntry::LockCommand => "Lock vault".into(),
+                    DisplayEntry::ArchivedCommand => "Archived items".into(),
+                    DisplayEntry::TrashCommand => "Recently deleted".into(),
+                    DisplayEntry::NewItemCommand => "New item".into(),
+                };
+                response.widget_info(|| {
+                    egui::WidgetInfo::selected(
+                        egui::WidgetType::SelectableLabel,
+                        ui.is_enabled(),
+                        selected,
+                        &label,
+                    )
+                });
                 if scroll_to == Some(i) {
                     ui.scroll_to_rect(rect, None);
                 }
                 if response.clicked() {
                     state.selected = i;
                     match entry {
-                        DisplayEntry::SettingsCommand => {
+                        DisplayEntry::SettingsCommand
+                        | DisplayEntry::ArchivedCommand
+                        | DisplayEntry::TrashCommand => {
                             state.open_selected_entry();
                         }
                         DisplayEntry::LockCommand => action = Some(SearchAction::LockVault),
+                        DisplayEntry::NewItemCommand => action = Some(SearchAction::NewItem),
                         DisplayEntry::VaultItem(idx) => {
                             action = Some(SearchAction::OpenResult(idx))
                         }
@@ -457,10 +953,16 @@ fn toggle_setting(row: usize, settings: &AppSettings) -> Option<SearchAction> {
         0 => SearchAction::SetKeyboardShortcuts(!settings.show_keyboard_shortcuts),
         1 => SearchAction::SetCloseAfterCopy(!settings.close_after_copy),
         2 => SearchAction::SetRestoreRecentItem(!settings.restore_recent_item),
-        3 => SearchAction::SetShowWebsiteIcons(!settings.show_website_icons),
-        4 => SearchAction::SetLockOnSystemLock(!settings.lock_on_system_lock),
-        IDLE_TIMEOUT_ROW => SearchAction::SetLockAfterIdleTimeout(!settings.lock_after_idle_timeout),
-        6 => SearchAction::SetSshAgentEnabled(!settings.ssh_agent_enabled),
+        START_LIST_ROW => SearchAction::SetStartList(settings.start_list.next()),
+        4 => SearchAction::SetShowWebsiteIcons(!settings.show_website_icons),
+        SCREEN_CAPTURE_ROW if crate::screen_capture::available() => {
+            SearchAction::SetObscureScreenCapture(!settings.obscure_screen_capture)
+        }
+        6 => SearchAction::SetLockOnSystemLock(!settings.lock_on_system_lock),
+        IDLE_TIMEOUT_ROW => {
+            SearchAction::SetLockAfterIdleTimeout(!settings.lock_after_idle_timeout)
+        }
+        8 => SearchAction::SetSshAgentEnabled(!settings.ssh_agent_enabled),
         _ => return None,
     })
 }
@@ -473,7 +975,8 @@ fn draw_settings(
 ) -> Option<SearchAction> {
     let t = theme();
     let mut action = None;
-    let rows: [(bool, &str, &str); SETTINGS_ROWS] = [
+    // The start list row (a choice, not a toggle) is drawn separately at START_LIST_ROW.
+    let rows: [(bool, &str, &str); SETTINGS_ROWS - 1] = [
         (
             settings.show_keyboard_shortcuts,
             "Show keyboard shortcuts",
@@ -495,6 +998,17 @@ fn draw_settings(
             "Fetch icons from your server's icon service; cached for 30 days",
         ),
         (
+            settings.obscure_screen_capture && crate::screen_capture::available(),
+            "Obscure in screen captures",
+            if state.capture_pending {
+                "Applying screen capture preference…"
+            } else if crate::screen_capture::available() {
+                "Hide this window in screenshots and screen sharing"
+            } else {
+                "Requires Hyprland; capture protection is unavailable here"
+            },
+        ),
+        (
             settings.lock_on_system_lock,
             "Lock when the screen locks",
             "Lock the vault when the desktop session locks",
@@ -512,17 +1026,52 @@ fn draw_settings(
     ];
 
     egui::ScrollArea::vertical()
+        .id_salt("settings-scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            for (idx, (on, title, description)) in rows.iter().enumerate() {
-                let response = widgets::toggle_row(
-                    ui,
-                    state.settings_selected == idx,
-                    *on,
-                    title,
-                    description,
-                );
+            for (row_idx, (on, title, description)) in rows.iter().enumerate() {
+                let idx = if row_idx >= START_LIST_ROW {
+                    row_idx + 1
+                } else {
+                    row_idx
+                };
+                if idx == START_LIST_ROW + 1 {
+                    let response = widgets::choice_row(
+                        ui,
+                        state.settings_selected == START_LIST_ROW,
+                        "Start with",
+                        "What the empty search shows",
+                        settings.start_list.label(),
+                    );
+                    if state.settings_selected == START_LIST_ROW
+                        && state.settings_scrolled_to != Some(START_LIST_ROW)
+                    {
+                        response.scroll_to_me(None);
+                        state.settings_scrolled_to = Some(START_LIST_ROW);
+                    }
+                    if response.clicked() {
+                        state.settings_selected = START_LIST_ROW;
+                        action = toggle_setting(START_LIST_ROW, settings);
+                    }
+                }
+                let enabled = idx != SCREEN_CAPTURE_ROW
+                    || (crate::screen_capture::available() && !state.capture_pending);
+                let response = ui
+                    .add_enabled_ui(enabled, |ui| {
+                        widgets::toggle_row(
+                            ui,
+                            state.settings_selected == idx,
+                            *on,
+                            title,
+                            description,
+                        )
+                    })
+                    .inner;
+                if state.settings_selected == idx && state.settings_scrolled_to != Some(idx) {
+                    response.scroll_to_me(None);
+                    state.settings_scrolled_to = Some(idx);
+                }
                 if response.clicked() {
                     state.settings_selected = idx;
                     action = toggle_setting(idx, settings);
@@ -597,17 +1146,22 @@ fn draw_settings(
 }
 
 pub enum SearchAction {
+    Sync,
+    QuickCopy(usize),
     OpenResult(usize),
     SetKeyboardShortcuts(bool),
     SetCloseAfterCopy(bool),
     SetRestoreRecentItem(bool),
     SetShowWebsiteIcons(bool),
+    SetObscureScreenCapture(bool),
     SetLockOnSystemLock(bool),
     SetLockAfterIdleTimeout(bool),
     SetIdleLockTimeoutMinutes(u64),
     SetSshAgentEnabled(bool),
     SetSshAgentSocketPath(String),
+    SetStartList(StartList),
     LockVault,
+    NewItem,
 }
 
 #[cfg(test)]
@@ -622,7 +1176,82 @@ mod tests {
             folder: None,
             item_type: "login".to_string(),
             icon_host: None,
+            state: Default::default(),
+            dates: Default::default(),
         }
+    }
+
+    #[test]
+    fn settings_keyboard_scrolls_both_directions_and_wraps() {
+        let ctx = Context::default();
+        let mut state = SearchState {
+            view: SearchView::Settings,
+            ..Default::default()
+        };
+        let mut time = 0.0;
+        let mut frame = |key: Option<egui::Key>| {
+            let mut offset = 0.0;
+            for tick in 0..20 {
+                time += 0.05;
+                let mut input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(680., 280.),
+                    )),
+                    time: Some(time),
+                    ..Default::default()
+                };
+                if tick < 2
+                    && let Some(key) = key
+                {
+                    input.events.push(egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed: tick == 0,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+                ctx.run_ui(input, |root| {
+                    handle_keys(root.ctx(), &mut state, &AppSettings::default(), &mut None);
+                    egui::CentralPanel::default().show(root, |ui| {
+                        let id = ui.make_persistent_id(egui::IdSalt::new("settings-scroll"));
+                        draw_settings(
+                            ui,
+                            &mut state,
+                            &AppSettings::default(),
+                            &crate::ssh_agent::disabled_status(),
+                        );
+                        offset = egui::scroll_area::State::load(&ctx, id).unwrap().offset.y;
+                    });
+                })
+                .textures_delta
+                .clear();
+            }
+            (state.settings_selected, offset)
+        };
+        assert_eq!(frame(None), (0, 0.0));
+        let (selected, bottom) = frame(Some(egui::Key::ArrowUp));
+        assert_eq!(selected, SETTINGS_ROWS - 1);
+        assert!(
+            bottom > 200.,
+            "last setting must scroll into view: {bottom}"
+        );
+        let (selected, top) = frame(Some(egui::Key::ArrowDown));
+        assert_eq!(selected, 0);
+        assert!(
+            top < 1.,
+            "wrapping to first setting must scroll back: {top}"
+        );
+        for _ in 0..SETTINGS_ROWS - 1 {
+            frame(Some(egui::Key::ArrowDown));
+        }
+        let (_, offset) = frame(Some(egui::Key::ArrowUp));
+        assert!(offset > 0.);
+        for _ in 0..SETTINGS_ROWS - 2 {
+            frame(Some(egui::Key::ArrowUp));
+        }
+        assert!(frame(None).1 < 1.);
     }
 
     #[test]
@@ -741,5 +1370,260 @@ mod tests {
         assert_eq!(state.selected, 0);
         state.move_selection(-1);
         assert_eq!(state.selected, 2);
+    }
+
+    #[test]
+    fn new_item_command_opens_the_create_form() {
+        assert!(new_item_command_matches("new"));
+        assert!(new_item_command_matches("add"));
+        assert!(!new_item_command_matches("n"));
+        let mut state = SearchState {
+            query: "new".into(),
+            ..SearchState::default()
+        };
+
+        assert_eq!(state.open_selected_entry(), OpenSelectedAction::NewItem);
+    }
+
+    fn dated(id: &str, name: &str, changed: &str, revised: &str) -> BwItem {
+        let mut item = item(id);
+        item.name = name.into();
+        item.dates.state_changed_at = Some(changed.into());
+        item.dates.revision_date = Some(revised.into());
+        item
+    }
+
+    fn names(state: &SearchState) -> Vec<&str> {
+        state
+            .results
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn item_lists_sort_newest_first_and_cycle_sort_keys() {
+        let mut state = SearchState {
+            view: SearchView::Archived,
+            ..SearchState::default()
+        };
+        state.set_results(vec![
+            dated("1", "Bravo", "2026-01-01", "2026-05-01"),
+            dated("2", "alpha", "2026-03-01", "2026-02-01"),
+            dated("3", "Charlie", "2026-02-01", "2026-04-01"),
+        ]);
+        assert_eq!(names(&state), ["alpha", "Charlie", "Bravo"]);
+
+        state.change_list_sort(ListSort {
+            descending: false,
+            ..state.list_sort
+        });
+        assert_eq!(names(&state), ["Bravo", "Charlie", "alpha"]);
+
+        state.change_list_sort(ListSort {
+            key: state.list_sort.key.next(),
+            ..state.list_sort
+        });
+        assert_eq!(state.list_sort.key, ListSortKey::Name);
+        assert_eq!(names(&state), ["alpha", "Bravo", "Charlie"]);
+
+        state.change_list_sort(ListSort {
+            key: state.list_sort.key.next(),
+            ..state.list_sort
+        });
+        assert_eq!(state.list_sort.key, ListSortKey::Modified);
+        assert_eq!(names(&state), ["alpha", "Charlie", "Bravo"]);
+    }
+
+    fn with_dates(id: &str, revised: Option<&str>, created: Option<&str>) -> BwItem {
+        let mut item = item(id);
+        item.dates.revision_date = revised.map(Into::into);
+        item.dates.creation_date = created.map(Into::into);
+        item
+    }
+
+    #[test]
+    fn start_lists_pick_recent_items() {
+        let items = vec![
+            with_dates("a", Some("2026-01-01"), Some("2020-01-01")),
+            with_dates("b", Some("2026-03-01"), None),
+            with_dates("c", Some("2026-02-01"), Some("2024-01-01")),
+        ];
+        let ids = |items: Vec<BwItem>| items.into_iter().map(|item| item.id).collect::<Vec<_>>();
+        let usage = ["c".to_string(), "gone".to_string(), "a".to_string()];
+
+        assert_eq!(
+            ids(start_list_items(
+                StartList::RecentlyUsed,
+                items.clone(),
+                &usage
+            )),
+            ["c", "a"]
+        );
+        assert_eq!(
+            ids(start_list_items(
+                StartList::RecentlyEdited,
+                items.clone(),
+                &[]
+            )),
+            ["b", "c", "a"]
+        );
+        assert_eq!(
+            ids(start_list_items(
+                StartList::RecentlyCreated,
+                items.clone(),
+                &[]
+            )),
+            ["c", "a"]
+        );
+        assert!(start_list_items(StartList::None, items, &[]).is_empty());
+    }
+
+    #[test]
+    fn start_list_loads_on_empty_query_and_survives_reset() {
+        let mut state = SearchState {
+            start_list: StartList::RecentlyEdited,
+            ..SearchState::default()
+        };
+        state.force_refresh();
+        assert!(
+            state.needs_search(),
+            "the empty search loads the start list"
+        );
+        state.mark_queried();
+        state.results = vec![item("1")];
+
+        state.reset_results_for_empty_query();
+
+        assert_eq!(state.results.len(), 1);
+        state.start_list = StartList::None;
+        state.reset_results_for_empty_query();
+        assert!(state.results.is_empty());
+    }
+
+    #[test]
+    fn main_search_keeps_relevance_order() {
+        let mut state = SearchState::default();
+        state.set_results(vec![
+            dated("1", "Zulu", "2026-01-01", "2026-01-01"),
+            dated("2", "Alpha", "2026-03-01", "2026-03-01"),
+        ]);
+        assert_eq!(names(&state), ["Zulu", "Alpha"]);
+    }
+
+    #[test]
+    fn archived_and_trash_commands_match_their_names() {
+        assert!(archived_command_matches("ar"));
+        assert!(archived_command_matches("Archived"));
+        assert!(!archived_command_matches("a"));
+        assert!(trash_command_matches("tr"));
+        assert!(trash_command_matches("dele"));
+        assert!(trash_command_matches("recently"));
+        assert!(!trash_command_matches("github"));
+    }
+
+    #[test]
+    fn opening_trash_command_switches_to_unfiltered_trash_list() {
+        let mut state = SearchState {
+            query: "trash".into(),
+            results: vec![item("1")],
+            ..SearchState::default()
+        };
+        assert_eq!(state.display_entry(0), Some(DisplayEntry::TrashCommand));
+
+        assert_eq!(state.open_selected_entry(), OpenSelectedAction::None);
+
+        assert_eq!(state.view, SearchView::Trash);
+        assert!(state.query.is_empty());
+        assert!(state.results.is_empty());
+        assert!(
+            state.needs_search(),
+            "the list loads even with an empty query"
+        );
+    }
+
+    #[test]
+    fn item_lists_show_only_items_and_keep_results_for_empty_query() {
+        let mut state = SearchState {
+            view: SearchView::Archived,
+            query: "lock".into(),
+            results: vec![item("1")],
+            ..SearchState::default()
+        };
+        assert_eq!(state.display_entry(0), Some(DisplayEntry::VaultItem(0)));
+
+        state.query.clear();
+        state.reset_results_for_empty_query();
+        assert_eq!(state.view, SearchView::Archived);
+        assert_eq!(state.results.len(), 1);
+
+        state.close_item_list();
+        assert_eq!(state.view, SearchView::Results);
+        assert!(state.results.is_empty());
+    }
+    #[test]
+    fn search_results_expose_names_to_assistive_technology() {
+        let ctx = Context::default();
+        ctx.enable_accesskit();
+        let mut state = SearchState::default();
+        state.query = "Audit".into();
+        let mut fixture = item("audit");
+        fixture.name = "Audit example account".into();
+        state.set_results(vec![fixture]);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(680., 460.),
+            )),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ctx| {
+            draw_search(
+                ctx,
+                &mut state,
+                &AppSettings::default(),
+                &crate::ssh_agent::disabled_status(),
+                &mut IconCache::new(false),
+            );
+        });
+        out.textures_delta.clear();
+        let tree = out.platform_output.accesskit_update.unwrap();
+        assert!(tree.nodes.iter().any(|(_, node)| {
+            node.label()
+                .is_some_and(|label| label.contains("Audit example account"))
+        }));
+    }
+
+    #[test]
+    fn shift_enter_copies_only_a_settled_vault_result() {
+        let ctx = Context::default();
+        let mut state = SearchState::default();
+        state.query = "Audit".into();
+        state.set_results(vec![item("audit")]);
+        let mut action = None;
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::SHIFT,
+            }],
+            ..Default::default()
+        };
+        ctx.run_ui(input.clone(), |ctx| {
+            handle_keys(ctx.ctx(), &mut state, &AppSettings::default(), &mut action)
+        })
+        .textures_delta
+        .clear();
+        assert!(matches!(action, Some(SearchAction::QuickCopy(0))));
+        state.in_flight = true;
+        action = None;
+        ctx.run_ui(input, |ctx| {
+            handle_keys(ctx.ctx(), &mut state, &AppSettings::default(), &mut action)
+        })
+        .textures_delta
+        .clear();
+        assert!(action.is_none());
     }
 }

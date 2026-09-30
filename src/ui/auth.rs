@@ -70,7 +70,8 @@ fn default_server() -> String {
         .unwrap_or_else(|| DEFAULT_SERVER.to_string())
 }
 
-pub fn draw_auth(ctx: &Context, state: &mut AuthState) -> Option<AuthAction> {
+pub fn draw_auth(root: &mut egui::Ui, state: &mut AuthState) -> Option<AuthAction> {
+    let ctx = &root.ctx().clone();
     let mut action = None;
     let t = theme();
 
@@ -79,16 +80,16 @@ pub fn draw_auth(ctx: &Context, state: &mut AuthState) -> Option<AuthAction> {
     } else {
         &[("⏎", "Log in"), ("Tab", "Next field"), ("Esc", "Hide")]
     };
-    egui::TopBottomPanel::bottom("footer")
+    egui::Panel::bottom("footer")
         .frame(widgets::footer_frame())
-        .show(ctx, |ui| widgets::footer(ui, hints, None));
+        .show(root, |ui| widgets::footer(ui, hints, None));
 
     if state.has_saved_session {
-        draw_unlock_header(ctx, state, &mut action);
+        draw_unlock_header(root, state, &mut action);
     } else {
-        egui::TopBottomPanel::top("header")
+        egui::Panel::top("header")
             .frame(widgets::header_frame())
-            .show(ctx, |ui| {
+            .show(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(t.icon("\u{f023}", "🔐"))
@@ -110,7 +111,7 @@ pub fn draw_auth(ctx: &Context, state: &mut AuthState) -> Option<AuthAction> {
 
     egui::CentralPanel::default()
         .frame(widgets::body_frame())
-        .show(ctx, |ui| {
+        .show(root, |ui| {
             if state.has_saved_session {
                 draw_unlock_body(ui, state);
             } else {
@@ -129,11 +130,11 @@ pub fn draw_auth(ctx: &Context, state: &mut AuthState) -> Option<AuthAction> {
     action
 }
 
-fn draw_unlock_header(ctx: &Context, state: &mut AuthState, action: &mut Option<AuthAction>) {
+fn draw_unlock_header(root: &mut egui::Ui, state: &mut AuthState, action: &mut Option<AuthAction>) {
     let t = theme();
-    egui::TopBottomPanel::top("header")
+    egui::Panel::top("header")
         .frame(widgets::header_frame())
-        .show(ctx, |ui| {
+        .show(root, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(t.icon("\u{f023}", "🔐"))
@@ -156,7 +157,7 @@ fn draw_unlock_header(ctx: &Context, state: &mut AuthState, action: &mut Option<
                         .text_color(t.text_strong)
                         .hint_text(RichText::new(hint).color(t.text_faint))
                         .password(true)
-                        .frame(false)
+                        .frame(egui::Frame::NONE)
                         .vertical_align(egui::Align::Center),
                 );
                 if state.focus_password {
@@ -282,57 +283,20 @@ fn draw_login_form(ui: &mut egui::Ui, state: &mut AuthState, action: &mut Option
 }
 
 fn draw_forget_dialog(ctx: &Context, state: &mut AuthState, action: &mut Option<AuthAction>) {
-    let t = theme();
-    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-        state.confirm_forget = false;
-        return;
+    let dialog = widgets::ConfirmDialog {
+        title: "Use another account?",
+        body: "This removes the saved unlock session for this account from this device.",
+        confirm_label: "Forget account",
+        danger: true,
+        key: widgets::ConfirmKey::None,
+        busy: false,
+        error: None,
+    };
+    match widgets::confirm_dialog(ctx, &dialog) {
+        Some(true) => *action = Some(AuthAction::ForgetUser),
+        Some(false) => state.confirm_forget = false,
+        None => {}
     }
-    egui::Window::new("Use another account?")
-        .collapsible(false)
-        .resizable(false)
-        .title_bar(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .frame(
-            egui::Frame::window(&ctx.style())
-                .fill(t.bg)
-                .stroke(egui::Stroke::new(1.0_f32, t.accent))
-                .inner_margin(egui::Margin::same(16)),
-        )
-        .show(ctx, |ui| {
-            ui.set_width(360.0);
-            ui.label(
-                RichText::new("Use another account?")
-                    .size(t.title())
-                    .color(t.text_strong),
-            );
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(
-                    "This removes the saved unlock session for this account from this device.",
-                )
-                .color(t.text_muted),
-            );
-            ui.add_space(14.0);
-            ui.horizontal(|ui| {
-                if widgets::button(ui, "Cancel", false, true).clicked() {
-                    state.confirm_forget = false;
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new("Forget account").color(t.danger))
-                                .fill(t.surface)
-                                .stroke(egui::Stroke::new(1.0_f32, t.danger))
-                                .corner_radius(t.rounding)
-                                .min_size(egui::vec2(96.0, 32.0)),
-                        )
-                        .clicked()
-                    {
-                        *action = Some(AuthAction::ForgetUser);
-                    }
-                });
-            });
-        });
 }
 
 pub enum AuthAction {

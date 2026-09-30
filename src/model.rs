@@ -8,6 +8,118 @@ pub struct BwItem {
     /// Public hostname of the item's first website, used to look up its icon.
     #[serde(default)]
     pub icon_host: Option<String>,
+    #[serde(default)]
+    pub state: ItemState,
+    #[serde(default)]
+    pub dates: ItemDates,
+}
+
+/// Server timestamps (ISO 8601 UTC, so they sort as strings) used to order the archived
+/// and trash lists.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ItemDates {
+    /// When the item was archived or trashed, for items in those states.
+    #[serde(default)]
+    pub state_changed_at: Option<String>,
+    #[serde(default)]
+    pub revision_date: Option<String>,
+    #[serde(default)]
+    pub creation_date: Option<String>,
+}
+
+/// Where an item lives in the vault. A trashed item that was also archived counts as
+/// deleted: it only shows up under "Recently deleted".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ItemState {
+    #[default]
+    Active,
+    Archived,
+    Deleted,
+}
+
+/// A change to an item's place in the vault. Editing its contents goes through `ItemDraft`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ItemAction {
+    Archive,
+    Unarchive,
+    Trash,
+    Restore,
+    DeleteForever,
+}
+
+impl ItemAction {
+    /// Short past-tense status line shown after the action succeeds.
+    pub fn done_message(self) -> &'static str {
+        match self {
+            Self::Archive => "Archived",
+            Self::Unarchive => "Moved back to the vault",
+            Self::Trash => "Moved to trash",
+            Self::Restore => "Restored",
+            Self::DeleteForever => "Deleted permanently",
+        }
+    }
+}
+
+/// Editable plaintext copy of an item. `original_index` ties a row back to the entry it
+/// came from, so renames keep the entry and its extra settings (URI match, linked id).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ItemDraft {
+    pub name: String,
+    pub notes: String,
+    pub login: Option<LoginDraft>,
+    pub fields: Vec<DraftField>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LoginDraft {
+    pub username: String,
+    pub password: String,
+    pub totp: String,
+    pub uris: Vec<DraftUri>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DraftUri {
+    pub uri: String,
+    pub original_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DraftField {
+    pub name: String,
+    pub value: String,
+    pub kind: DraftFieldKind,
+    pub original_index: Option<usize>,
+}
+
+/// Bitwarden custom field types 0..=3. Linked fields point at another field of the item
+/// and have no value of their own, so the editor only lets you rename them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DraftFieldKind {
+    Text,
+    Hidden,
+    Boolean,
+    Linked,
+}
+
+impl DraftFieldKind {
+    pub fn from_type(field_type: i64) -> Self {
+        match field_type {
+            1 => Self::Hidden,
+            2 => Self::Boolean,
+            3 => Self::Linked,
+            _ => Self::Text,
+        }
+    }
+
+    pub fn type_id(self) -> i64 {
+        match self {
+            Self::Text => 0,
+            Self::Hidden => 1,
+            Self::Boolean => 2,
+            Self::Linked => 3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -30,6 +142,10 @@ pub struct BwItemDetail {
     pub folder: Option<String>,
     pub item_type: String,
     pub ssh_key: Option<SshKey>,
+    #[serde(default)]
+    pub state: ItemState,
+    #[serde(default)]
+    pub dates: ItemDates,
 }
 
 /// A generated TOTP code plus the time step it belongs to, so the UI can show the real
@@ -142,8 +258,114 @@ pub struct SshAgentStatus {
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SyncStatus {
+    #[serde(default)]
+    pub last_synced_unix: Option<u64>,
     pub server_ciphers: usize,
     pub decrypted_items: usize,
     pub skipped_items: usize,
     pub first_error: Option<String>,
+}
+
+impl BwItemDetail {
+    /// Bind a copy request to the exact item shown, including field ordering.
+    pub fn copy_version(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let encoded = zeroize::Zeroizing::new(serde_json::to_vec(self).expect("serializable item"));
+        Sha256::digest(encoded.as_slice()).into()
+    }
+
+    pub fn copy_value_checked(&self, index: usize, version: &[u8; 32]) -> Result<String, String> {
+        if &self.copy_version() != version {
+            return Err("Item changed. Reopen it before copying.".into());
+        }
+        self.copy_value(index)
+    }
+
+    /// The same field ordering used by the detail view. TOTP is generated at copy time.
+    pub fn copy_value(&self, index: usize) -> Result<String, String> {
+        let mut values = Vec::new();
+        if let Some(value) = &self.username {
+            values.push(Some(value.as_str()));
+        }
+        if let Some(value) = &self.password {
+            values.push(Some(value.as_str()));
+        }
+        if self.totp.is_some() {
+            values.push(None);
+        }
+        values.extend(self.uris.iter().map(|s| Some(s.as_str())));
+        if let Some(key) = &self.ssh_key {
+            values.push(Some(key.public_key.as_str()));
+            if let Some(value) = &key.fingerprint {
+                values.push(Some(value.as_str()));
+            }
+            values.push(Some(key.private_key.as_str()));
+        }
+        values.extend(self.custom_fields.iter().map(|f| Some(f.value.as_str())));
+        if let Some(value) = &self.notes {
+            values.push(Some(value.as_str()));
+        }
+        match values.get(index) {
+            Some(Some(value)) => Ok((*value).to_owned()),
+            Some(None) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|e| e.to_string())?
+                    .as_secs();
+                crate::bw::generate_totp(self.totp.as_deref().ok_or("No TOTP secret")?, now)
+                    .map(|code| code.code)
+                    .map_err(|e| e.to_string())
+            }
+            None => Err("Field is no longer available".into()),
+        }
+    }
+}
+
+impl zeroize::Zeroize for BwItemDetail {
+    fn zeroize(&mut self) {
+        self.name.zeroize();
+        self.username.zeroize();
+        self.password.zeroize();
+        self.uris.zeroize();
+        self.totp.zeroize();
+        self.notes.zeroize();
+        self.folder.zeroize();
+        for field in &mut self.custom_fields {
+            field.name.zeroize();
+            field.value.zeroize();
+        }
+        if let Some(key) = &mut self.ssh_key {
+            key.private_key.zeroize();
+        }
+    }
+}
+impl zeroize::Zeroize for ItemDraft {
+    fn zeroize(&mut self) {
+        self.name.zeroize();
+        self.notes.zeroize();
+        if let Some(login) = &mut self.login {
+            login.zeroize();
+        }
+        for field in &mut self.fields {
+            field.name.zeroize();
+            field.value.zeroize();
+        }
+    }
+}
+impl zeroize::Zeroize for LoginDraft {
+    fn zeroize(&mut self) {
+        self.username.zeroize();
+        self.password.zeroize();
+        self.totp.zeroize();
+        for uri in &mut self.uris {
+            uri.uri.zeroize();
+        }
+    }
+}
+
+impl Drop for SshKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.private_key.zeroize();
+    }
 }

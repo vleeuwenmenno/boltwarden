@@ -85,7 +85,11 @@ pub fn paint_row_content(
                 egui::Align2::CENTER_CENTER,
                 icon,
                 t.font(t.body()),
-                if selected { t.selected_text } else { t.text_muted },
+                if selected {
+                    t.selected_text
+                } else {
+                    t.text_muted
+                },
             );
         }
     }
@@ -160,8 +164,42 @@ pub fn text_input(
                     .text_color(t.text_strong)
                     .hint_text(RichText::new(hint).color(t.text_faint))
                     .password(password)
-                    .frame(false)
+                    .frame(egui::Frame::NONE)
                     .margin(egui::Margin::ZERO)
+                    .desired_width(f32::INFINITY),
+            )
+        })
+        .inner
+}
+
+/// A bordered multi-line input, styled like [`text_input`].
+pub fn text_area(
+    ui: &mut Ui,
+    id: egui::Id,
+    value: &mut String,
+    hint: &str,
+    rows: usize,
+) -> Response {
+    let t = theme();
+    let focused = ui.memory(|m| m.has_focus(id));
+    egui::Frame::new()
+        .fill(t.surface)
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            if focused { t.accent } else { t.border },
+        ))
+        .corner_radius(t.rounding)
+        .inner_margin(egui::Margin::symmetric(10, 7))
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(value)
+                    .id(id)
+                    .font(t.font(t.body()))
+                    .text_color(t.text_strong)
+                    .hint_text(RichText::new(hint).color(t.text_faint))
+                    .frame(egui::Frame::NONE)
+                    .margin(egui::Margin::ZERO)
+                    .desired_rows(rows)
                     .desired_width(f32::INFINITY),
             )
         })
@@ -190,9 +228,170 @@ pub fn button(ui: &mut Ui, text: &str, primary: bool, enabled: bool) -> Response
     )
 }
 
+/// Secondary button in the danger color, for destructive confirmations.
+pub fn danger_button(ui: &mut Ui, text: &str, enabled: bool) -> Response {
+    let t = theme();
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(RichText::new(text).color(t.danger))
+            .fill(t.surface)
+            .stroke(egui::Stroke::new(1.0_f32, t.danger))
+            .corner_radius(t.rounding)
+            .min_size(egui::vec2(96.0, 32.0)),
+    )
+}
+
+/// Which key, besides clicking the button, confirms a [`confirm_dialog`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmKey {
+    None,
+    Enter,
+    /// For actions that cannot be undone, so a stray Enter does not trigger them.
+    CtrlEnter,
+}
+
+pub struct ConfirmDialog<'a> {
+    pub title: &'a str,
+    pub body: &'a str,
+    pub confirm_label: &'a str,
+    pub danger: bool,
+    pub key: ConfirmKey,
+    pub busy: bool,
+    pub error: Option<&'a str>,
+}
+
+/// A centered modal with Cancel and a confirm button. Returns `Some(true)` when the
+/// action is confirmed and `Some(false)` when it is cancelled (button or Escape).
+pub fn confirm_dialog(ctx: &egui::Context, dialog: &ConfirmDialog<'_>) -> Option<bool> {
+    let t = theme();
+    let mut result = None;
+    if !dialog.busy {
+        ctx.input_mut(|input| {
+            if input.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                result = Some(false);
+            }
+            let confirmed = match dialog.key {
+                ConfirmKey::None => false,
+                ConfirmKey::Enter => input.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                ConfirmKey::CtrlEnter => {
+                    input.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)
+                }
+            };
+            if confirmed {
+                result = Some(true);
+            }
+        });
+    }
+    egui::Window::new(dialog.title)
+        .collapsible(false)
+        .resizable(false)
+        .title_bar(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .frame(
+            egui::Frame::window(&ctx.global_style())
+                .fill(t.bg)
+                .stroke(egui::Stroke::new(
+                    1.0_f32,
+                    if dialog.danger { t.danger } else { t.accent },
+                ))
+                .inner_margin(egui::Margin::same(16)),
+        )
+        .show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.label(
+                RichText::new(dialog.title)
+                    .size(t.title())
+                    .color(t.text_strong),
+            );
+            ui.add_space(6.0);
+            ui.label(RichText::new(dialog.body).color(t.text_muted));
+            if let Some(error) = dialog.error {
+                ui.add_space(6.0);
+                error_line(ui, error);
+            }
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                if button(ui, "Cancel", false, !dialog.busy).clicked() {
+                    result = Some(false);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let confirm = if dialog.danger {
+                        danger_button(ui, dialog.confirm_label, !dialog.busy)
+                    } else {
+                        button(ui, dialog.confirm_label, true, !dialog.busy)
+                    };
+                    if confirm.clicked() {
+                        result = Some(true);
+                    }
+                    if dialog.busy {
+                        ui.add(egui::Spinner::new().color(t.text_muted));
+                    } else if dialog.key == ConfirmKey::CtrlEnter {
+                        ui.label(RichText::new("Ctrl+⏎").size(t.small()).color(t.text_faint));
+                    }
+                });
+            });
+        });
+    result
+}
+
 pub fn error_line(ui: &mut Ui, text: &str) {
     let t = theme();
     ui.label(RichText::new(format!("{} {text}", t.icon("\u{f071}", "⚠"))).color(t.danger));
+}
+
+/// A settings row that picks one of several values; Space, Enter or a click moves to
+/// the next value, shown on the right.
+pub fn choice_row(
+    ui: &mut Ui,
+    selected: bool,
+    title: &str,
+    description: &str,
+    value: &str,
+) -> Response {
+    let t = theme();
+    let (rect, response) = row(ui, selected, ROW_HEIGHT + 4.0);
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            format!("{title}: {value}. {description}"),
+        )
+    });
+    let painter = ui.painter_at(rect);
+    painter.text(
+        egui::pos2(rect.left() + 28.0, rect.center().y),
+        egui::Align2::CENTER_CENTER,
+        t.icon("\u{f0ca}", "☰"),
+        t.font(t.body()),
+        t.accent,
+    );
+    let left = rect.left() + 54.0;
+    painter.text(
+        egui::pos2(left, rect.top() + 7.0),
+        egui::Align2::LEFT_TOP,
+        title,
+        t.font(t.body()),
+        if selected {
+            t.selected_text
+        } else {
+            t.text_strong
+        },
+    );
+    painter.text(
+        egui::pos2(left, rect.bottom() - 7.0),
+        egui::Align2::LEFT_BOTTOM,
+        description,
+        t.font(t.small()),
+        t.text_muted,
+    );
+    painter.text(
+        egui::pos2(rect.right() - 14.0, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        format!("{value}  {}", t.icon("\u{f105}", "›")),
+        t.font(t.body()),
+        t.accent,
+    );
+    response
 }
 
 /// A settings-style row with an on/off indicator, title and one-line description.
@@ -205,6 +404,14 @@ pub fn toggle_row(
 ) -> Response {
     let t = theme();
     let (rect, response) = row(ui, selected, ROW_HEIGHT + 4.0);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Checkbox,
+            ui.is_enabled(),
+            on,
+            format!("{title}. {description}"),
+        )
+    });
     let painter = ui.painter_at(rect);
 
     let track = egui::Rect::from_center_size(
@@ -273,7 +480,11 @@ pub fn empty_state(ui: &mut Ui, icon: &str, text: &str, spinner: bool) {
 }
 
 /// Footer with keyboard hints on the left and an optional status message on the right.
-pub fn footer(ui: &mut Ui, hints: &[(&str, &str)], status: Option<(&str, Color32)>) {
+pub fn footer(
+    ui: &mut Ui,
+    hints: &[(&str, &str)],
+    status: Option<(&str, Color32)>,
+) -> Option<egui::Rect> {
     let t = theme();
     let height = 24.0;
     let (rect, _) = ui.allocate_exact_size(
@@ -283,9 +494,14 @@ pub fn footer(ui: &mut Ui, hints: &[(&str, &str)], status: Option<(&str, Color32
     let painter = ui.painter_at(rect);
 
     let mut status_left = rect.right();
+    let mut status_rect = None;
     if let Some((text, color)) = status {
         let galley = painter.layout_no_wrap(text.to_owned(), t.font(t.small()), color);
         status_left = rect.right() - galley.size().x;
+        status_rect = Some(egui::Rect::from_min_max(
+            egui::pos2(status_left, rect.top()),
+            rect.right_bottom(),
+        ));
         painter.galley(
             egui::pos2(status_left, rect.center().y - galley.size().y / 2.0),
             galley,
@@ -315,6 +531,7 @@ pub fn footer(ui: &mut Ui, hints: &[(&str, &str)], status: Option<(&str, Color32
         );
         cursor += label_galley.size().x + 16.0;
     }
+    status_rect
 }
 
 fn keycap_size(key: &str) -> egui::Vec2 {

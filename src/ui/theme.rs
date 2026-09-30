@@ -201,7 +201,7 @@ impl Theme {
             }
         }
 
-        let mut style = (*ctx.style()).clone();
+        let mut style = (*ctx.global_style()).clone();
         style.text_styles = [
             (TextStyle::Small, self.font(self.small())),
             (TextStyle::Body, self.font(self.body())),
@@ -267,7 +267,8 @@ impl Theme {
             widget.expansion = 0.0;
         }
 
-        ctx.set_style(style);
+        ctx.set_style_of(egui::Theme::Dark, style.clone());
+        ctx.set_style_of(egui::Theme::Light, style);
     }
 
     /// Icon for a vault item type: a Nerd Font glyph when available, else an emoji

@@ -481,7 +481,7 @@ mod tests {
             .tx
             .send((
                 "ready.example.org".into(),
-                Some(egui::ColorImage::new([8, 8], egui::Color32::WHITE)),
+                Some(egui::ColorImage::filled([8, 8], egui::Color32::WHITE)),
             ))
             .unwrap();
 

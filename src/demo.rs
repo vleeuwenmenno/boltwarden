@@ -6,9 +6,11 @@
 use crate::backend::{BackendError, SearchResult};
 use crate::bw::TwoFactorProvider;
 use crate::model::{
-    BwItem, BwItemDetail, CustomField, SshAgentClientInfo, SshApprovalKind, SshApprovalRequest,
+    BwItem, BwItemDetail, CustomField, DraftField, DraftFieldKind, DraftUri, ItemAction, ItemDates,
+    ItemDraft, ItemState, LoginDraft, SshAgentClientInfo, SshApprovalKind, SshApprovalRequest,
     SshApprovalStatus, SshApprovalStatusKind, SshKey, SyncStatus, TotpCode,
 };
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const DEMO_TOTP_SEED: &str = "JBSWY3DPEHPK3PXP";
@@ -16,6 +18,7 @@ const DEMO_TOTP_SEED: &str = "JBSWY3DPEHPK3PXP";
 pub struct DemoBackend {
     unlocked: AtomicBool,
     ssh_request_pending: AtomicBool,
+    items: Mutex<Vec<BwItemDetail>>,
 }
 
 pub fn enabled() -> bool {
@@ -28,6 +31,7 @@ impl DemoBackend {
         Self {
             unlocked: AtomicBool::new(mode != "locked"),
             ssh_request_pending: AtomicBool::new(mode == "ssh"),
+            items: Mutex::new(details()),
         }
     }
 
@@ -59,11 +63,20 @@ impl DemoBackend {
         self.unlocked.store(false, Ordering::Relaxed);
     }
 
-    pub fn list_items(&self, query: &str) -> Result<SearchResult, BackendError> {
+    fn items(&self) -> Result<std::sync::MutexGuard<'_, Vec<BwItemDetail>>, BackendError> {
+        self.items
+            .lock()
+            .map_err(|_| BackendError::Message("demo items lock poisoned".into()))
+    }
+
+    pub fn list_items(&self, state: ItemState, query: &str) -> Result<SearchResult, BackendError> {
         std::thread::sleep(std::time::Duration::from_millis(120));
         let query = query.to_lowercase();
-        let items: Vec<BwItem> = details()
-            .into_iter()
+        let items: Vec<BwItem> = self
+            .items()?
+            .iter()
+            .filter(|item| item.state == state)
+            .cloned()
             .filter(|item| {
                 item.name.to_lowercase().contains(&query)
                     || item
@@ -78,6 +91,8 @@ impl DemoBackend {
                 folder: detail.folder,
                 icon_host: crate::icons::icon_host(&detail.uris),
                 item_type: detail.item_type,
+                state: detail.state,
+                dates: detail.dates,
             })
             .collect();
         Ok(SearchResult {
@@ -95,10 +110,119 @@ impl DemoBackend {
     }
 
     pub fn get_item(&self, id: &str) -> Result<BwItemDetail, BackendError> {
-        details()
-            .into_iter()
+        self.items()?
+            .iter()
             .find(|item| item.id == id)
+            .cloned()
             .ok_or_else(|| BackendError::Message("item not found".into()))
+    }
+
+    pub fn apply_action(&self, id: &str, action: ItemAction) -> Result<(), BackendError> {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let mut items = self.items()?;
+        let idx = items
+            .iter()
+            .position(|item| item.id == id)
+            .ok_or_else(|| BackendError::Message("item not found".into()))?;
+        if !crate::bw::action_allowed(action, items[idx].state) {
+            return Err(BackendError::Message(format!(
+                "{action:?} is not available for this item"
+            )));
+        }
+        if action == ItemAction::DeleteForever {
+            items.remove(idx);
+        } else {
+            items[idx].state = crate::bw::state_after(action);
+            items[idx].dates.state_changed_at =
+                (items[idx].state != ItemState::Active).then(|| crate::bw::iso8601_now());
+        }
+        Ok(())
+    }
+
+    pub fn edit_draft(&self, id: &str) -> Result<ItemDraft, BackendError> {
+        let item = self.get_item(id)?;
+        let login = (item.item_type == "login").then(|| LoginDraft {
+            username: item.username.clone().unwrap_or_default(),
+            password: item.password.clone().unwrap_or_default(),
+            totp: item.totp.clone().unwrap_or_default(),
+            uris: item
+                .uris
+                .iter()
+                .enumerate()
+                .map(|(idx, uri)| DraftUri {
+                    uri: uri.clone(),
+                    original_index: Some(idx),
+                })
+                .collect(),
+        });
+        Ok(ItemDraft {
+            name: item.name,
+            notes: item.notes.unwrap_or_default(),
+            login,
+            fields: item
+                .custom_fields
+                .into_iter()
+                .enumerate()
+                .map(|(idx, field)| DraftField {
+                    name: field.name,
+                    value: field.value,
+                    kind: if field.hidden {
+                        DraftFieldKind::Hidden
+                    } else {
+                        DraftFieldKind::Text
+                    },
+                    original_index: Some(idx),
+                })
+                .collect(),
+        })
+    }
+
+    pub fn create_item(&self, draft: &ItemDraft) -> Result<BwItemDetail, BackendError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut item = detail(&id, &draft.name, None, None);
+        item.password = None;
+        if draft.login.is_none() {
+            item.item_type = "secureNote".into();
+        }
+        self.items()?.push(item);
+        self.save_item(&id, draft)
+    }
+
+    pub fn save_item(&self, id: &str, draft: &ItemDraft) -> Result<BwItemDetail, BackendError> {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        if draft.name.trim().is_empty() {
+            return Err(BackendError::Message("name is required".into()));
+        }
+        let mut items = self.items()?;
+        let item = items
+            .iter_mut()
+            .find(|item| item.id == id)
+            .ok_or_else(|| BackendError::Message("item not found".into()))?;
+        let non_empty = |value: &str| (!value.is_empty()).then(|| value.to_string());
+        item.name = draft.name.clone();
+        item.notes = non_empty(&draft.notes);
+        if let Some(login) = &draft.login {
+            item.username = non_empty(&login.username);
+            item.password = non_empty(&login.password);
+            item.totp = non_empty(&login.totp);
+            item.uris = login
+                .uris
+                .iter()
+                .filter(|uri| !uri.uri.trim().is_empty())
+                .map(|uri| uri.uri.clone())
+                .collect();
+        }
+        item.custom_fields = draft
+            .fields
+            .iter()
+            .filter(|field| !field.name.trim().is_empty())
+            .map(|field| CustomField {
+                name: field.name.clone(),
+                value: field.value.clone(),
+                hidden: field.kind == DraftFieldKind::Hidden,
+            })
+            .collect();
+        Ok(item.clone())
     }
 
     pub fn get_totp(&self) -> Result<TotpCode, BackendError> {
@@ -150,6 +274,8 @@ fn detail(id: &str, name: &str, username: Option<&str>, folder: Option<&str>) ->
         folder: folder.map(Into::into),
         item_type: "login".into(),
         ssh_key: None,
+        state: ItemState::Active,
+        dates: ItemDates::default(),
     }
 }
 
@@ -226,6 +352,59 @@ fn details() -> Vec<BwItemDetail> {
     });
 
     let mut items = vec![github, gitlab, bank, note, card, ssh];
+    // Archived and trashed items with different dates, so the list sort is visible.
+    for (id, name, uri, state, changed, revised) in [
+        (
+            "dropbox",
+            "Dropbox (old)",
+            "https://www.dropbox.com/login",
+            ItemState::Archived,
+            "2026-03-02",
+            "2025-11-20",
+        ),
+        (
+            "evernote",
+            "Evernote",
+            "https://www.evernote.com",
+            ItemState::Archived,
+            "2026-08-14",
+            "2024-06-01",
+        ),
+        (
+            "aws-old",
+            "AWS (old account)",
+            "https://aws.amazon.com",
+            ItemState::Archived,
+            "2025-12-24",
+            "2026-01-05",
+        ),
+        (
+            "myspace",
+            "MySpace",
+            "https://myspace.com",
+            ItemState::Deleted,
+            "2026-09-12",
+            "2019-02-02",
+        ),
+        (
+            "icq",
+            "ICQ",
+            "https://icq.com",
+            ItemState::Deleted,
+            "2026-09-28",
+            "2012-07-07",
+        ),
+    ] {
+        let mut item = detail(id, name, Some("menno"), None);
+        item.uris = vec![uri.into()];
+        item.state = state;
+        item.dates = ItemDates {
+            state_changed_at: Some(format!("{changed}T10:00:00.000Z")),
+            revision_date: Some(format!("{revised}T10:00:00.000Z")),
+            creation_date: Some("2018-01-01T10:00:00.000Z".into()),
+        };
+        items.push(item);
+    }
     for (idx, (name, uri)) in [
         ("Grafana", "https://grafana.com"),
         ("Gmail", "https://mail.google.com"),
@@ -237,9 +416,29 @@ fn details() -> Vec<BwItemDetail> {
     .iter()
     .enumerate()
     {
-        let mut item = detail(&format!("extra-{idx}"), name, Some("menno"), Some("Homelab"));
+        let mut item = detail(
+            &format!("extra-{idx}"),
+            name,
+            Some("menno"),
+            Some("Homelab"),
+        );
         item.uris = vec![(*uri).into()];
         items.push(item);
+    }
+    // Spread edit and creation dates over the active items so the start lists differ.
+    for (idx, item) in items.iter_mut().enumerate() {
+        if item.state == ItemState::Active {
+            let day = |offset: usize| {
+                format!(
+                    "2026-{:02}-{:02}T09:00:00.000Z",
+                    1 + idx % 9,
+                    1 + (idx * 7 + offset) % 28
+                )
+            };
+            item.dates.revision_date = Some(day(idx * 3));
+            item.dates.creation_date =
+                Some(format!("20{:02}-06-01T09:00:00.000Z", 15 + (idx * 5) % 11));
+        }
     }
     items
 }

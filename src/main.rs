@@ -8,7 +8,9 @@ mod demo;
 mod icons;
 mod instance;
 mod model;
+mod random;
 mod rpc;
+mod screen_capture;
 mod ssh_agent;
 mod tray;
 mod ui;
@@ -30,7 +32,6 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tray::TrayCommand;
 
-const AUTO_LOCK_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const POPUP_TOKEN_PREFIX: &str = "token ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +50,9 @@ struct PopupProcess {
 type PopupChild = Arc<Mutex<Option<PopupProcess>>>;
 
 struct VaultState {
+    popup: PopupChild,
+    clipboard: clipboard::Clipboard,
+    auto_lock_warning: Option<String>,
     bw: BwClient,
     pending_two_factor: Option<TwoFactorChallenge>,
     ssh_agent: Option<SshAgentHandle>,
@@ -58,6 +62,14 @@ struct VaultState {
 }
 
 fn main() -> eframe::Result<()> {
+    unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, 0);
+        let limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        libc::setrlimit(libc::RLIMIT_CORE, &limit);
+    }
     if std::env::args().any(|arg| arg == "--popup") {
         return run_popup();
     }
@@ -80,6 +92,9 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
     let ssh_approvals = SshApprovalService::new(approval_show_tx);
     let ssh_key_store = SshKeyStore::new(unlock_show_tx);
     let vault = Arc::new(Mutex::new(VaultState {
+        clipboard: clipboard::Clipboard::default(),
+        popup: popup.clone(),
+        auto_lock_warning: None,
         bw: BwClient::new(),
         pending_two_factor: None,
         ssh_agent: None,
@@ -111,6 +126,7 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
             DaemonCommand::Quit => {
                 quit_popup(&popup);
                 if let Ok(mut state) = vault.lock() {
+                    state.clipboard.clear();
                     stop_ssh_agent(&mut state);
                     state.ssh_approvals.clear_all("daemon quit");
                 }
@@ -123,64 +139,68 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
 }
 
 fn start_auto_lock_monitor(vault: Arc<Mutex<VaultState>>) {
+    let events = auto_lock::subscribe();
     std::thread::spawn(move || {
         let mut idle_seen_at: Option<Instant> = None;
         loop {
+            let event = match events.recv_timeout(Duration::from_secs(20)) {
+                Ok(event) => event,
+                Err(_) => {
+                    // Keep enforcing a lock after worker failure without a busy loop.
+                    std::thread::sleep(Duration::from_secs(1));
+                    auto_lock::Event::Unavailable("Session monitor stopped responding".into())
+                }
+            };
             let settings = config::load_settings();
-            if !settings.lock_on_system_lock && !settings.lock_after_idle_timeout {
+            let Ok(mut state) = vault.lock() else {
+                break;
+            };
+            let enabled = settings.lock_on_system_lock || settings.lock_after_idle_timeout;
+            if !enabled {
+                if state.auto_lock_warning.take().is_some() {
+                    notify_popup(&state.popup, "lock-warning\n");
+                }
                 idle_seen_at = None;
-                std::thread::sleep(AUTO_LOCK_POLL_INTERVAL);
                 continue;
             }
-
-            let has_session = vault
-                .lock()
-                .map(|state| state.bw.has_session())
-                .unwrap_or(false);
-            if !has_session {
-                idle_seen_at = None;
-                std::thread::sleep(AUTO_LOCK_POLL_INTERVAL);
-                continue;
-            }
-
-            let session_state = match auto_lock::current_session_state() {
-                Ok(state) => state,
-                Err(e) => {
-                    debug_log(&format!("auto-lock monitor unavailable: {e}"));
-                    std::thread::sleep(AUTO_LOCK_POLL_INTERVAL);
-                    continue;
+            let reason = match event {
+                auto_lock::Event::Unavailable(error) => {
+                    idle_seen_at = None;
+                    let message = format!(
+                        "Automatic locking unavailable: {error}. Vault locked for safety. Restore the desktop session service or disable automatic locking in Settings."
+                    );
+                    if state.auto_lock_warning.as_ref() != Some(&message) {
+                        eprintln!("{message}");
+                        state.auto_lock_warning = Some(message);
+                        notify_popup(&state.popup, "lock-warning\n");
+                    }
+                    Some("session monitoring unavailable")
                 }
-            };
-
-            let lock_reason = if settings.lock_on_system_lock && session_state.locked {
-                idle_seen_at = None;
-                Some("screen locked")
-            } else if settings.lock_after_idle_timeout && session_state.idle {
-                if idle_seen_at.is_none() {
-                    idle_seen_at = Some(Instant::now());
+                auto_lock::Event::LockRequested(reason) => {
+                    settings.lock_on_system_lock.then_some(reason)
                 }
-                let observed_idle_for = idle_seen_at.map(|seen| seen.elapsed());
-                let idle_for = session_state.idle_for.or(observed_idle_for);
-                if idle_for.is_some_and(|idle_for| idle_for >= idle_lock_timeout(&settings)) {
-                    Some("idle timeout")
-                } else {
-                    None
-                }
-            } else {
-                idle_seen_at = None;
-                None
-            };
-
-            if let Some(reason) = lock_reason {
-                if let Ok(mut state) = vault.lock() {
-                    if state.bw.has_session() {
-                        lock_vault_state(&mut state, reason);
+                auto_lock::Event::State(session) => {
+                    if state.auto_lock_warning.take().is_some() {
+                        notify_popup(&state.popup, "lock-warning\n");
+                    }
+                    if settings.lock_on_system_lock && session.locked {
+                        idle_seen_at = None;
+                        Some("screen locked")
+                    } else if settings.lock_after_idle_timeout && session.idle {
+                        let seen = idle_seen_at.get_or_insert_with(Instant::now);
+                        let idle_for = session.idle_for.unwrap_or_else(|| seen.elapsed());
+                        (idle_for >= idle_lock_timeout(&settings)).then_some("idle timeout")
+                    } else {
+                        idle_seen_at = None;
+                        None
                     }
                 }
-                idle_seen_at = None;
+            };
+            if let Some(reason) = reason {
+                if state.bw.has_session() || state.pending_two_factor.is_some() {
+                    lock_vault_state(&mut state, reason);
+                }
             }
-
-            std::thread::sleep(AUTO_LOCK_POLL_INTERVAL);
         }
     });
 }
@@ -191,9 +211,11 @@ fn run_popup() -> eframe::Result<()> {
     let backend = if demo::enabled() {
         AppBackend::demo()
     } else {
-        popup_rpc_socket_arg()
-            .map(|path| AppBackend::remote(rpc::RpcClient::new(path, read_popup_token())))
-            .unwrap_or_else(AppBackend::local)
+        let Some(path) = popup_rpc_socket_arg() else {
+            eprintln!("--popup is internal. Run bw-quick-access without --popup.");
+            return Ok(());
+        };
+        AppBackend::remote(rpc::RpcClient::new(path, read_popup_token()))
     };
     let (popup_tx, popup_rx) = mpsc::channel();
     start_popup_stdin_listener(popup_tx);
@@ -322,6 +344,7 @@ fn handle_rpc_stream(
     };
 
     if let Ok(payload) = serde_json::to_vec(&response) {
+        let payload = zeroize::Zeroizing::new(payload);
         let _ = stream.write_all(&payload);
     }
 }
@@ -336,7 +359,7 @@ fn read_authenticated_request(stream: &mut UnixStream, token: &str) -> Result<Rp
     }
     // A client that never finishes writing must not pin a thread forever.
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let mut body = Vec::new();
+    let mut body = zeroize::Zeroizing::new(Vec::new());
     (&mut *stream)
         .take(rpc::MAX_REQUEST_BYTES + 1)
         .read_to_end(&mut body)
@@ -380,18 +403,59 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
 
     match request {
         RpcRequest::HasSession => RpcResponse::HasSession(state.bw.has_session()),
+        RpcRequest::CopyField { id, index, version } => {
+            let result = state
+                .bw
+                .get_item(&id)
+                .map_err(|e| e.to_string())
+                .and_then(|item| zeroize::Zeroizing::new(item).copy_value_checked(index, &version))
+                .and_then(|value| {
+                    let value = zeroize::Zeroizing::new(value);
+                    if value.is_empty() {
+                        return Err("This field is empty".into());
+                    }
+                    state.clipboard.copy(&value)
+                });
+            RpcResponse::Copied(result)
+        }
+        RpcRequest::Sync => {
+            let result = state.bw.sync_now().map_err(rpc_error_from_bw);
+            if result.is_ok() {
+                refresh_ssh_key_store_from_vault(&mut state);
+            }
+            RpcResponse::Synced(result)
+        }
+        RpcRequest::SecurityWarning => {
+            RpcResponse::SecurityWarning(state.auto_lock_warning.clone())
+        }
+        RpcRequest::AuthorizeItem { id, mut password } => {
+            use zeroize::Zeroize;
+            let result = state
+                .bw
+                .authorize_item(&id, &password)
+                .map_err(rpc_error_from_bw);
+            password.zeroize();
+            RpcResponse::Detail(result)
+        }
+        RpcRequest::RevokeItemGrants => {
+            state.bw.revoke_item_grants();
+            RpcResponse::LockVault(Ok(()))
+        }
         RpcRequest::Login {
             server_url,
             email,
             password,
             remember,
-        } => RpcResponse::Login(login_vault(
-            &mut state,
-            &server_url,
-            &email,
-            &password,
-            remember,
-        )),
+        } => {
+            let password = zeroize::Zeroizing::new(password);
+            RpcResponse::Login(login_vault(
+                &mut state,
+                &server_url,
+                &email,
+                &password,
+                remember,
+            ))
+        }
         RpcRequest::CompleteTwoFactor {
             provider,
             token,
@@ -399,13 +463,21 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
         } => RpcResponse::TwoFactor(complete_vault_two_factor(
             &mut state, provider, &token, remember,
         )),
-        RpcRequest::ListItems { query } => {
-            let result = state.bw.list_items(&query).map(|items| SearchPayload {
-                items,
-                warning: state.bw.sync_warning(),
-                status: state.bw.sync_status(),
-                icons_url: Some(state.bw.icons_url()),
-            });
+        RpcRequest::ListItems {
+            query,
+            state: item_state,
+        } => {
+            state.bw.sync_if_stale();
+            refresh_ssh_key_store_from_vault(&mut state);
+            let result = state
+                .bw
+                .list_items_in(item_state, &query)
+                .map(|items| SearchPayload {
+                    items,
+                    warning: state.bw.sync_warning(),
+                    status: state.bw.sync_status(),
+                    icons_url: Some(state.bw.icons_url()),
+                });
             RpcResponse::Search(result.map_err(rpc_error_from_bw))
         }
         RpcRequest::GetItem { id } => {
@@ -413,6 +485,28 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
         }
         RpcRequest::GetTotp { id } => {
             RpcResponse::Totp(state.bw.get_totp(&id).map_err(rpc_error_from_bw))
+        }
+        RpcRequest::ItemAction { id, action } => {
+            let result = state
+                .bw
+                .apply_action(&id, action)
+                .map_err(rpc_error_from_bw);
+            // Archived and trashed SSH keys must leave the agent, restored ones come back.
+            refresh_ssh_key_store_from_vault(&mut state);
+            RpcResponse::ItemAction(result)
+        }
+        RpcRequest::GetEditDraft { id } => {
+            RpcResponse::EditDraft(state.bw.edit_draft(&id).map_err(rpc_error_from_bw))
+        }
+        RpcRequest::SaveItem { id, draft } => {
+            let draft = zeroize::Zeroizing::new(draft);
+            let result = state.bw.save_item(&id, &draft).map_err(rpc_error_from_bw);
+            refresh_ssh_key_store_from_vault(&mut state);
+            RpcResponse::Saved(result)
+        }
+        RpcRequest::CreateItem { draft } => {
+            let draft = zeroize::Zeroizing::new(draft);
+            RpcResponse::Created(state.bw.create_item(&draft).map_err(rpc_error_from_bw))
         }
         RpcRequest::ApplySettings(settings) => {
             let result = config::save_settings(&settings)
@@ -431,6 +525,8 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
         RpcRequest::ClearSavedSession => {
             let result = config::clear_saved_session().map_err(|e| e.to_string());
             if result.is_ok() {
+                state.clipboard.clear();
+                notify_popup(&state.popup, "vault-locked\n");
                 state.bw = BwClient::new();
                 state.pending_two_factor = None;
                 state.ssh_key_store.set_locked();
@@ -453,18 +549,20 @@ fn login_vault(
     password: &str,
     remember: bool,
 ) -> Result<(), RpcError> {
+    let mut candidate = BwClient::new();
     let saved = config::load_saved_session();
     let result = if let Some(saved) = saved.filter(|saved| {
         saved.server_url.trim_end_matches('/') == server_url.trim_end_matches('/')
             && saved.email.eq_ignore_ascii_case(email.trim())
     }) {
-        state.bw.unlock_saved_session(&saved, password)
+        candidate.unlock_saved_session(&saved, password)
     } else {
-        state.bw.login(server_url, email, password, remember)
+        candidate.login(server_url, email, password, remember)
     };
 
     match result {
         Ok(()) => {
+            state.bw = candidate;
             state.pending_two_factor = None;
             refresh_ssh_key_store_from_vault(state);
             apply_ssh_agent_settings(state);
@@ -488,11 +586,10 @@ fn complete_vault_two_factor(
     let Some(challenge) = state.pending_two_factor.clone() else {
         return Err(RpcError::Message("missing two factor challenge".into()));
     };
-    match state
-        .bw
-        .complete_two_factor(&challenge, provider, token, remember)
-    {
+    let mut candidate = BwClient::new();
+    match candidate.complete_two_factor(&challenge, provider, token, remember) {
         Ok(()) => {
+            state.bw = candidate;
             state.pending_two_factor = None;
             refresh_ssh_key_store_from_vault(state);
             apply_ssh_agent_settings(state);
@@ -565,6 +662,8 @@ fn stop_ssh_agent(state: &mut VaultState) {
 }
 
 fn lock_vault_state(state: &mut VaultState, reason: &str) {
+    state.clipboard.clear();
+    notify_popup(&state.popup, "vault-locked\n");
     state.bw = BwClient::new();
     state.pending_two_factor = None;
     state.ssh_key_store.set_locked();
@@ -619,6 +718,7 @@ fn idle_lock_timeout(settings: &config::AppSettings) -> Duration {
 
 fn rpc_error_from_bw(error: BwError) -> RpcError {
     match error {
+        BwError::RepromptRequired => RpcError::RepromptRequired,
         BwError::TwoFactorRequired(challenge) => RpcError::TwoFactorRequired {
             providers: challenge.providers().to_vec(),
         },
@@ -695,7 +795,7 @@ fn show_popup_with_command(
         }
     }
 
-    match std::env::current_exe().and_then(|exe| {
+    match popup_exe().and_then(|exe| {
         let mut command = Command::new(exe);
         command
             .arg("--popup")
@@ -739,6 +839,18 @@ fn show_popup_with_command(
     }
 }
 
+/// Binary to spawn the popup from. After the installed binary is replaced (for example
+/// by `make install`), `current_exe()` resolves to "<path> (deleted)" and spawning it
+/// fails with ENOENT. `/proc/self/exe` still opens the running daemon's own binary, which
+/// also keeps the popup on the same RPC protocol version as the daemon.
+fn popup_exe() -> std::io::Result<PathBuf> {
+    let proc_exe = PathBuf::from("/proc/self/exe");
+    if proc_exe.exists() {
+        return Ok(proc_exe);
+    }
+    std::env::current_exe()
+}
+
 fn hide_popup(popup: &PopupChild) {
     let Ok(mut child_slot) = popup.lock() else {
         return;
@@ -751,8 +863,6 @@ fn hide_popup(popup: &PopupChild) {
             }
             Ok(None) => {
                 let _ = send_popup_command(process, "hide\n");
-                wait_or_kill_popup(process);
-                *child_slot = None;
             }
             Err(_) => {
                 *child_slot = None;
@@ -774,8 +884,6 @@ fn toggle_popup(popup: &PopupChild, rpc_socket: Option<&RpcEndpoint>) {
             }
             Ok(None) => {
                 let _ = send_popup_command(process, "hide\n");
-                wait_or_kill_popup(process);
-                *child_slot = None;
                 true
             }
         },
@@ -808,21 +916,17 @@ fn quit_popup(popup: &PopupChild) {
     *child_slot = None;
 }
 
+fn notify_popup(popup: &PopupChild, command: &str) {
+    if let Ok(mut slot) = popup.lock() {
+        if let Some(process) = slot.as_mut() {
+            let _ = send_popup_command(process, command);
+        }
+    }
+}
+
 fn send_popup_command(process: &mut PopupProcess, command: &str) -> std::io::Result<()> {
     process.stdin.write_all(command.as_bytes())?;
     process.stdin.flush()
-}
-
-fn wait_or_kill_popup(process: &mut PopupProcess) {
-    for _ in 0..20 {
-        match process.child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
-            Err(_) => return,
-        }
-    }
-    let _ = process.child.kill();
-    let _ = process.child.wait();
 }
 
 fn start_popup_stdin_listener(tx: mpsc::Sender<PopupCommand>) {
@@ -832,9 +936,16 @@ fn start_popup_stdin_listener(tx: mpsc::Sender<PopupCommand>) {
         loop {
             line.clear();
             match stdin.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
+                Ok(0) | Err(_) => {
+                    if popup_rpc_socket_arg().is_some() {
+                        let _ = tx.send(PopupCommand::VaultLocked);
+                    }
+                    break;
+                }
                 Ok(_) => {
                     let command = match line.trim() {
+                        "vault-locked" => Some(PopupCommand::VaultLocked),
+                        "lock-warning" => Some(PopupCommand::LockWarning),
                         "show" => Some(PopupCommand::Show),
                         "hide" => Some(PopupCommand::Hide),
                         "toggle" => Some(PopupCommand::Toggle),
@@ -876,7 +987,11 @@ fn popup_options() -> eframe::NativeOptions {
             // Wayland app_id / X11 class, so compositor window rules can match the popup.
             // Demo mode shows no real secrets, so it gets its own id and escapes rules
             // such as no_screen_share (handy for screenshots).
-            .with_app_id(if demo::enabled() { "bw-quick-access-demo" } else { "bw-quick-access" })
+            .with_app_id(if demo::enabled() {
+                "bw-quick-access-demo"
+            } else {
+                "bw-quick-access"
+            })
             .with_decorations(false)
             .with_resizable(false)
             .with_always_on_top()

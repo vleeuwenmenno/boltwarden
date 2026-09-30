@@ -1,11 +1,12 @@
 use crate::bw::TwoFactorProvider;
 use crate::ui::theme::theme;
 use crate::ui::widgets;
-use egui::{Context, RichText};
+use egui::RichText;
 
 pub struct TwoFactorState {
     pub providers: Vec<TwoFactorProvider>,
     pub selected_provider: Option<TwoFactorProvider>,
+    scrolled_to: Option<TwoFactorProvider>,
     pub token: String,
     pub remember: bool,
     pub error: Option<String>,
@@ -18,6 +19,7 @@ impl Default for TwoFactorState {
         Self {
             providers: Vec::new(),
             selected_provider: None,
+            scrolled_to: None,
             token: String::new(),
             remember: true,
             error: None,
@@ -29,8 +31,9 @@ impl Default for TwoFactorState {
 
 impl TwoFactorState {
     pub fn set_providers(&mut self, providers: Vec<TwoFactorProvider>) {
-        self.selected_provider = providers.first().copied();
+        self.selected_provider = providers.iter().copied().find(|p| p.supports_code_entry());
         self.providers = providers;
+        self.scrolled_to = None;
         self.token.clear();
         self.error = None;
         self.in_flight = false;
@@ -38,26 +41,31 @@ impl TwoFactorState {
     }
 
     fn can_submit(&self) -> bool {
-        !self.in_flight && self.selected_provider.is_some() && !self.token.trim().is_empty()
+        !self.in_flight
+            && self
+                .selected_provider
+                .is_some_and(|p| p.supports_code_entry())
+            && !self.token.trim().is_empty()
     }
 }
 
-pub fn draw_two_factor(ctx: &Context, state: &mut TwoFactorState) -> Option<TwoFactorAction> {
+pub fn draw_two_factor(root: &mut egui::Ui, state: &mut TwoFactorState) -> Option<TwoFactorAction> {
+    let ctx = &root.ctx().clone();
     let mut action = None;
     let t = theme();
 
-    egui::TopBottomPanel::bottom("footer")
+    egui::Panel::bottom("footer")
         .frame(widgets::footer_frame())
-        .show(ctx, |ui| {
+        .show(root, |ui| {
             widgets::footer(
                 ui,
                 &[("⏎", "Verify"), ("↑↓", "Method"), ("Esc", "Back")],
                 None,
             )
         });
-    egui::TopBottomPanel::top("header")
+    egui::Panel::top("header")
         .frame(widgets::header_frame())
-        .show(ctx, |ui| {
+        .show(root, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(t.icon("\u{f132}", "🛡"))
@@ -91,10 +99,10 @@ pub fn draw_two_factor(ctx: &Context, state: &mut TwoFactorState) -> Option<TwoF
 
     egui::CentralPanel::default()
         .frame(widgets::body_frame())
-        .show(ctx, |ui| {
+        .show(root, |ui| {
             let side = ((ui.available_width() - 440.0) / 2.0).max(0.0);
             ui.add_space(6.0);
-            ui.horizontal(|ui| {
+            egui::ScrollArea::vertical().id_salt("two-factor-scroll").show(ui, |ui| { ui.horizontal(|ui| {
                 ui.add_space(side);
                 ui.vertical(|ui| {
                     ui.set_width(440.0);
@@ -113,6 +121,11 @@ pub fn draw_two_factor(ctx: &Context, state: &mut TwoFactorState) -> Option<TwoF
                                 None,
                                 selected,
                             );
+                            response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, ui.is_enabled(), selected, provider.label()));
+                            if selected && state.scrolled_to != Some(provider) {
+                                response.scroll_to_me(None);
+                                state.scrolled_to = Some(provider);
+                            }
                             if response.clicked() {
                                 state.selected_provider = Some(provider);
                                 state.focus_token = true;
@@ -121,6 +134,11 @@ pub fn draw_two_factor(ctx: &Context, state: &mut TwoFactorState) -> Option<TwoF
                         ui.add_space(10.0);
                     }
 
+                    if !state.selected_provider.is_some_and(|p| p.supports_code_entry()) {
+                        ui.label("This login method is not supported here. Use an authenticator or YubiKey OTP method, or sign in with the official Bitwarden app.");
+                        if widgets::button(ui, "Back", false, !state.in_flight).clicked() { action = Some(TwoFactorAction::Back); }
+                        return;
+                    }
                     let label = state
                         .selected_provider
                         .map(|provider| format!("Code from {}", provider.label()))
@@ -164,7 +182,7 @@ pub fn draw_two_factor(ctx: &Context, state: &mut TwoFactorState) -> Option<TwoF
                         widgets::error_line(ui, error);
                     }
                 });
-            });
+            }); });
         });
 
     if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && state.can_submit() {
@@ -187,6 +205,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn keyboard_keeps_selected_method_visible_when_list_overflows() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut state = TwoFactorState::default();
+        state.set_providers(vec![
+            TwoFactorProvider::Authenticator,
+            TwoFactorProvider::Email,
+            TwoFactorProvider::Duo,
+            TwoFactorProvider::Yubikey,
+            TwoFactorProvider::Remember,
+            TwoFactorProvider::OrganizationDuo,
+            TwoFactorProvider::WebAuthn,
+            TwoFactorProvider::RecoveryCode,
+        ]);
+        state.focus_token = false;
+        let mut time = 0.0;
+        for key in [None, Some(egui::Key::ArrowUp), Some(egui::Key::ArrowDown)] {
+            let mut bounds = None;
+            for tick in 0..20 {
+                time += 0.05;
+                let mut input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(680., 280.),
+                    )),
+                    time: Some(time),
+                    ..Default::default()
+                };
+                if let Some(key) = key
+                    && tick < 2
+                {
+                    input.events.push(egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed: tick == 0,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+                let mut out = ctx.run_ui(input, |root| {
+                    draw_two_factor(root, &mut state);
+                });
+                out.textures_delta.clear();
+                for (_, node) in out.platform_output.accesskit_update.unwrap().nodes {
+                    if node.label() == state.selected_provider.map(|p| p.label()) {
+                        bounds = node.bounds();
+                    }
+                }
+            }
+            let bounds = bounds.expect("selected method has accessibility bounds");
+            assert!(
+                bounds.y0 >= 40. && bounds.y1 <= 255.,
+                "selected method must remain in viewport: {bounds:?}"
+            );
+        }
+    }
+
+    #[test]
     fn setting_providers_requests_token_focus_once() {
         let mut state = TwoFactorState {
             focus_token: false,
@@ -200,5 +276,28 @@ mod tests {
             Some(TwoFactorProvider::Authenticator)
         );
         assert!(state.token.is_empty());
+    }
+    #[test]
+    fn unsupported_methods_cannot_be_submitted_as_codes() {
+        let mut state = TwoFactorState::default();
+        state.set_providers(vec![
+            TwoFactorProvider::WebAuthn,
+            TwoFactorProvider::Authenticator,
+        ]);
+        assert_eq!(
+            state.selected_provider,
+            Some(TwoFactorProvider::Authenticator)
+        );
+        state.token = "123456".into();
+        assert!(state.can_submit());
+        for provider in [
+            TwoFactorProvider::WebAuthn,
+            TwoFactorProvider::Duo,
+            TwoFactorProvider::Email,
+            TwoFactorProvider::Unknown(99),
+        ] {
+            state.selected_provider = Some(provider);
+            assert!(!state.can_submit());
+        }
     }
 }

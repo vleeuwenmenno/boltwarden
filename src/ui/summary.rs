@@ -1,9 +1,8 @@
-use crate::clipboard;
 use crate::icons::{self, IconCache};
-use crate::model::{BwItemDetail, TotpCode};
+use crate::model::{BwItemDetail, ItemAction, ItemState, TotpCode};
 use crate::ui::theme::theme;
 use crate::ui::widgets;
-use egui::{Context, RichText, Ui};
+use egui::{RichText, Ui};
 use std::time::{Duration, Instant};
 
 const MASK: &str = "••••••••••••";
@@ -17,11 +16,16 @@ pub struct SummaryState {
     pub error: Option<String>,
     pub in_flight: bool,
     pub reveal_fields: std::collections::HashSet<usize>,
+    revealed_at: Option<Instant>,
     pub selected_field: usize,
     pub copied_field: Option<(String, Instant)>,
     pub totp: Option<TotpCode>,
     pub totp_fetched_at: Option<Instant>,
     pub totp_in_flight: bool,
+    /// Destructive action waiting for confirmation in a dialog.
+    pub confirm: Option<ItemAction>,
+    /// An archive/trash/restore/delete request is running.
+    pub action_in_flight: bool,
     scrolled_to: Option<usize>,
 }
 
@@ -81,6 +85,18 @@ fn fields(detail: &BwItemDetail) -> Vec<Field<'_>> {
     fields
 }
 
+impl Drop for SummaryState {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        if let Some(detail) = &mut self.detail {
+            detail.zeroize();
+        }
+        if let Some(code) = &mut self.totp {
+            code.code.zeroize();
+        }
+    }
+}
+
 impl SummaryState {
     pub fn needs_totp_refresh(&self) -> bool {
         if self.totp_in_flight {
@@ -112,20 +128,62 @@ impl SummaryState {
 }
 
 pub fn draw_summary(
-    ctx: &Context,
+    root: &mut egui::Ui,
     state: &mut SummaryState,
     show_shortcuts: bool,
     icons: &mut IconCache,
+    copy: &mut dyn FnMut(usize) -> Result<(), String>,
 ) -> Option<SummaryAction> {
+    let ctx = &root.ctx().clone();
     let t = theme();
     let mut action = None;
+    if state
+        .revealed_at
+        .is_some_and(|at| at.elapsed() >= Duration::from_secs(15))
+    {
+        state.reveal_fields.clear();
+        state.revealed_at = None;
+    }
     // Take the detail out of the state so rows can borrow it while the state is mutated.
     let detail = state.detail.take();
     let fields = detail.as_ref().map(fields).unwrap_or_default();
 
+    let item_state = detail.as_ref().map(|detail| detail.state);
+    // While a dialog is open or a request runs, keys belong to the dialog.
+    let keys_enabled = state.confirm.is_none() && !state.action_in_flight;
+
     let mut copy_selected = false;
     ctx.input(|input| {
+        if !keys_enabled {
+            return;
+        }
         let total = fields.len().max(1);
+        if let Some(item_state) = item_state
+            && input.modifiers.is_none()
+        {
+            if input.key_pressed(egui::Key::E) && item_state != ItemState::Deleted {
+                action = Some(SummaryAction::Edit);
+            }
+            if input.key_pressed(egui::Key::A) {
+                match item_state {
+                    ItemState::Active => action = Some(SummaryAction::Item(ItemAction::Archive)),
+                    ItemState::Archived => {
+                        action = Some(SummaryAction::Item(ItemAction::Unarchive))
+                    }
+                    ItemState::Deleted => {}
+                }
+            }
+            if input.key_pressed(egui::Key::R) && item_state == ItemState::Deleted {
+                action = Some(SummaryAction::Item(ItemAction::Restore));
+            }
+            if input.key_pressed(egui::Key::Delete) {
+                state.confirm = Some(if item_state == ItemState::Deleted {
+                    ItemAction::DeleteForever
+                } else {
+                    ItemAction::Trash
+                });
+            }
+        }
         if input.key_pressed(egui::Key::Escape) || input.key_pressed(egui::Key::ArrowLeft) {
             action = Some(SummaryAction::Back);
         }
@@ -149,6 +207,8 @@ pub fn draw_summary(
 
     let status = if let Some(error) = &state.error {
         Some((error.clone(), t.danger))
+    } else if state.action_in_flight {
+        Some(("Working…".to_string(), t.text_muted))
     } else {
         state
             .copied_field
@@ -157,19 +217,35 @@ pub fn draw_summary(
             .map(|(label, _)| (format!("Copied {label}"), t.success))
     };
     if show_shortcuts || status.is_some() {
-        let hints: &[(&str, &str)] = if show_shortcuts {
-            &[
+        let hints: &[(&str, &str)] = match (show_shortcuts, item_state) {
+            (false, _) => &[],
+            (true, Some(ItemState::Deleted)) => &[
                 ("↑↓", "Field"),
                 ("⏎", "Copy"),
-                ("Space", "Reveal"),
+                ("R", "Restore"),
+                ("Del", "Delete"),
                 ("←", "Back"),
-            ]
-        } else {
-            &[]
+            ],
+            (true, Some(ItemState::Archived)) => &[
+                ("↑↓", "Field"),
+                ("⏎", "Copy"),
+                ("E", "Edit"),
+                ("A", "Unarchive"),
+                ("Del", "Trash"),
+                ("←", "Back"),
+            ],
+            (true, _) => &[
+                ("↑↓", "Field"),
+                ("⏎", "Copy"),
+                ("E", "Edit"),
+                ("A", "Archive"),
+                ("Del", "Trash"),
+                ("←", "Back"),
+            ],
         };
-        egui::TopBottomPanel::bottom("footer")
+        egui::Panel::bottom("footer")
             .frame(widgets::footer_frame())
-            .show(ctx, |ui| {
+            .show(root, |ui| {
                 widgets::footer(
                     ui,
                     hints,
@@ -178,9 +254,9 @@ pub fn draw_summary(
             });
     }
 
-    egui::TopBottomPanel::top("header")
+    egui::Panel::top("header")
         .frame(widgets::header_frame())
-        .show(ctx, |ui| {
+        .show(root, |ui| {
             ui.horizontal(|ui| {
                 let back = ui.add(
                     egui::Button::new(
@@ -220,18 +296,32 @@ pub fn draw_summary(
                         )
                         .truncate(),
                     );
-                    if let Some(folder) = &detail.folder {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(header_action) =
+                            draw_header_actions(ui, detail.state, keys_enabled)
+                        {
+                            match header_action {
+                                SummaryAction::Item(
+                                    confirm @ (ItemAction::Trash | ItemAction::DeleteForever),
+                                ) => state.confirm = Some(confirm),
+                                other => action = Some(other),
+                            }
+                        }
+                        if state.action_in_flight {
+                            ui.add(egui::Spinner::new().color(t.text_muted));
+                        }
+                        if let Some(folder) = &detail.folder {
+                            ui.add_space(8.0);
                             ui.label(RichText::new(folder).color(t.text_faint));
-                        });
-                    }
+                        }
+                    });
                 }
             });
         });
 
     egui::CentralPanel::default()
         .frame(widgets::body_frame())
-        .show(ctx, |ui| {
+        .show(root, |ui| {
             if detail.is_none() {
                 if state.in_flight {
                     widgets::empty_state(ui, "", "Loading item…", true);
@@ -259,8 +349,15 @@ pub fn draw_summary(
                     ui.spacing_mut().item_spacing.y = 2.0;
                     for (idx, field) in fields.iter().enumerate() {
                         let selected = idx == state.selected_field;
-                        let (copied, rect) =
-                            draw_field(ui, state, idx, field, selected, selected && copy_selected);
+                        let (copied, rect) = draw_field(
+                            ui,
+                            state,
+                            idx,
+                            field,
+                            selected,
+                            selected && copy_selected,
+                            copy,
+                        );
                         if scroll_to == Some(idx) {
                             ui.scroll_to_rect(rect, None);
                         }
@@ -271,8 +368,114 @@ pub fn draw_summary(
                 });
         });
 
+    if let Some(confirm) = state.confirm {
+        let name = detail
+            .as_ref()
+            .map(|detail| detail.name.as_str())
+            .unwrap_or("this item");
+        let (title, body, label, key) = match confirm {
+            ItemAction::DeleteForever => (
+                "Delete permanently?",
+                format!("\"{name}\" will be deleted for good. This cannot be undone."),
+                "Delete forever",
+                widgets::ConfirmKey::CtrlEnter,
+            ),
+            _ => (
+                "Move to trash?",
+                format!("\"{name}\" moves to Recently deleted, where you can restore it."),
+                "Move to trash",
+                widgets::ConfirmKey::Enter,
+            ),
+        };
+        let dialog = widgets::ConfirmDialog {
+            title,
+            body: &body,
+            confirm_label: label,
+            danger: true,
+            key,
+            busy: state.action_in_flight,
+            error: None,
+        };
+        match widgets::confirm_dialog(ctx, &dialog) {
+            Some(true) => action = Some(SummaryAction::Item(confirm)),
+            Some(false) => state.confirm = None,
+            None => {}
+        }
+    }
+
     state.detail = detail;
     action
+}
+
+/// Icon buttons for the item's actions, laid out right to left.
+fn draw_header_actions(ui: &mut Ui, item_state: ItemState, enabled: bool) -> Option<SummaryAction> {
+    let t = theme();
+    let buttons: &[(&str, &str, &str, SummaryAction)] = match item_state {
+        ItemState::Deleted => &[
+            (
+                "\u{f1f8}",
+                "🗑",
+                "Delete forever (Del)",
+                SummaryAction::Item(ItemAction::DeleteForever),
+            ),
+            (
+                "\u{f0e2}",
+                "↩",
+                "Restore (R)",
+                SummaryAction::Item(ItemAction::Restore),
+            ),
+        ],
+        ItemState::Archived => &[
+            (
+                "\u{f1f8}",
+                "🗑",
+                "Move to trash (Del)",
+                SummaryAction::Item(ItemAction::Trash),
+            ),
+            (
+                "\u{f0e2}",
+                "↩",
+                "Unarchive (A)",
+                SummaryAction::Item(ItemAction::Unarchive),
+            ),
+            ("\u{f044}", "✎", "Edit (E)", SummaryAction::Edit),
+        ],
+        ItemState::Active => &[
+            (
+                "\u{f1f8}",
+                "🗑",
+                "Move to trash (Del)",
+                SummaryAction::Item(ItemAction::Trash),
+            ),
+            (
+                "\u{f187}",
+                "🗄",
+                "Archive (A)",
+                SummaryAction::Item(ItemAction::Archive),
+            ),
+            ("\u{f044}", "✎", "Edit (E)", SummaryAction::Edit),
+        ],
+    };
+    let mut clicked = None;
+    for (nerd, fallback, tooltip, action) in buttons {
+        let danger = matches!(action, SummaryAction::Item(ItemAction::DeleteForever));
+        let response = ui
+            .add_enabled(
+                enabled,
+                egui::Button::new(
+                    RichText::new(t.icon(nerd, fallback))
+                        .size(t.body())
+                        .color(if danger { t.danger } else { t.text_muted }),
+                )
+                .frame(false)
+                .min_size(egui::vec2(28.0, 28.0)),
+            )
+            .on_hover_text(*tooltip);
+        if response.clicked() {
+            clicked = Some(*action);
+        }
+    }
+    clicked
 }
 
 /// Draws one field row; returns whether its value was copied, and the row rect.
@@ -283,6 +486,7 @@ fn draw_field(
     field: &Field<'_>,
     selected: bool,
     copy_requested: bool,
+    copy: &mut dyn FnMut(usize) -> Result<(), String>,
 ) -> (bool, egui::Rect) {
     let t = theme();
     let revealed = state.reveal_fields.contains(&idx);
@@ -305,6 +509,14 @@ fn draw_field(
     let height = widgets::ROW_HEIGHT + (lines as f32 - 1.0) * (t.body() + 4.0);
 
     let (rect, response) = widgets::row(ui, selected, height);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            ui.is_enabled(),
+            selected,
+            format!("{}: {}", field.label, value),
+        )
+    });
     let painter = ui.painter_at(rect);
     painter.text(
         egui::pos2(rect.left() + 14.0, rect.top() + 14.0),
@@ -323,7 +535,13 @@ fn draw_field(
         egui::pos2(rect.right() - 20.0, rect.top() + 22.0),
         egui::vec2(28.0, 28.0),
     );
-    let copy_clicked = glyph_button(ui, copy_rect, t.icon("\u{f0c5}", "📋"), ("copy", idx));
+    let copy_clicked = glyph_button(
+        ui,
+        copy_rect,
+        t.icon("\u{f0c5}", "📋"),
+        ("copy", idx),
+        &format!("Copy {}", field.label),
+    );
     let mut value_right = copy_rect.left() - 8.0;
     if field.kind == FieldKind::Secret {
         let eye_rect = copy_rect.translate(egui::vec2(-32.0, 0.0));
@@ -332,7 +550,13 @@ fn draw_field(
         } else {
             t.icon("\u{f06e}", "👁")
         };
-        if glyph_button(ui, eye_rect, eye, ("reveal", idx)) {
+        if glyph_button(
+            ui,
+            eye_rect,
+            eye,
+            ("reveal", idx),
+            &format!("{} {}", if revealed { "Hide" } else { "Show" }, field.label),
+        ) {
             toggle_reveal(state, idx);
         }
         value_right = eye_rect.left() - 8.0;
@@ -408,24 +632,29 @@ fn draw_field(
         state.selected_field = idx;
     }
     if copy_clicked || copy_requested {
-        let text = match field.kind {
-            FieldKind::Totp => totp.map(|code| code.code),
-            _ => Some(field.value.to_string()),
-        };
-        if let Some(text) = text.filter(|text| !text.is_empty()) {
-            if clipboard::copy(&text) {
+        match copy(idx) {
+            Ok(()) => {
                 state.copied_field = Some((field.label.to_string(), Instant::now()));
                 return (true, rect);
             }
-            state.error = Some("could not copy: install wl-clipboard (wl-copy)".into());
+            Err(error) => state.error = Some(error),
         }
     }
     (false, rect)
 }
 
-fn glyph_button(ui: &mut Ui, rect: egui::Rect, glyph: &str, id: (&str, usize)) -> bool {
+fn glyph_button(
+    ui: &mut Ui,
+    rect: egui::Rect,
+    glyph: &str,
+    id: (&str, usize),
+    label: &str,
+) -> bool {
     let t = theme();
     let response = ui.interact(rect, ui.id().with(id), egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
     let color = if response.hovered() {
         t.accent
     } else {
@@ -454,6 +683,7 @@ fn group_digits(code: &str) -> String {
 }
 
 fn toggle_reveal(state: &mut SummaryState, idx: usize) {
+    state.revealed_at = Some(Instant::now());
     if !state.reveal_fields.insert(idx) {
         state.reveal_fields.remove(&idx);
     }
@@ -466,9 +696,13 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+#[derive(Clone, Copy)]
 pub enum SummaryAction {
     Back,
     Copied,
+    Edit,
+    /// Archive, restore and friends; trash and delete arrive here only once confirmed.
+    Item(ItemAction),
 }
 
 #[cfg(test)]

@@ -2,8 +2,8 @@ use crate::bw::{BwClient, BwError, TwoFactorChallenge, TwoFactorProvider};
 use crate::config::{self, AppSettings};
 use crate::demo::DemoBackend;
 use crate::model::{
-    BwItem, BwItemDetail, SshAgentStatus, SshApprovalDecision, SshApprovalRequest,
-    SshApprovalStatus, SyncStatus, TotpCode,
+    BwItem, BwItemDetail, ItemAction, ItemDraft, ItemState, SshAgentStatus, SshApprovalDecision,
+    SshApprovalRequest, SshApprovalStatus, SyncStatus, TotpCode,
 };
 use crate::rpc::{RpcClient, RpcError, RpcRequest, RpcResponse};
 use std::fmt;
@@ -23,6 +23,7 @@ pub struct LocalBackend {
 
 #[derive(Debug, Clone)]
 pub enum BackendError {
+    RepromptRequired,
     Message(String),
     TwoFactorRequired(Vec<TwoFactorProvider>),
 }
@@ -48,6 +49,19 @@ impl AppBackend {
 
     pub fn demo() -> Self {
         Self::Demo(Arc::new(DemoBackend::new()))
+    }
+
+    pub fn security_warning(&self) -> Option<String> {
+        match self {
+            Self::Remote(client) => match client.call(&RpcRequest::SecurityWarning) {
+                Ok(RpcResponse::SecurityWarning(warning)) => warning,
+                _ => Some("Could not check automatic locking status".into()),
+            },
+            Self::Local(_) => {
+                Some("Standalone popup: automatic session locking is unavailable".into())
+            }
+            Self::Demo(_) => None,
+        }
     }
 
     pub fn has_session(&self) -> bool {
@@ -118,13 +132,35 @@ impl AppBackend {
         }
     }
 
-    pub fn list_items(&self, query: &str) -> Result<SearchResult, BackendError> {
+    pub fn sync(&self) -> Result<SyncStatus, BackendError> {
+        match self {
+            Self::Local(local) => local
+                .lock()
+                .map_err(|_| BackendError::Message("session lock poisoned".into()))?
+                .bw
+                .sync_now()
+                .map_err(BackendError::from),
+            Self::Demo(demo) => demo
+                .list_items(ItemState::Active, "")
+                .map(|result| result.status),
+            Self::Remote(client) => match client.call(&RpcRequest::Sync) {
+                Ok(RpcResponse::Synced(result)) => result.map_err(BackendError::from),
+                Err(error) => Err(BackendError::Message(error)),
+                _ => Err(BackendError::Message("Unexpected sync response".into())),
+            },
+        }
+    }
+
+    pub fn list_items(&self, state: ItemState, query: &str) -> Result<SearchResult, BackendError> {
         match self {
             Self::Local(local) => {
                 let backend = local
                     .lock()
                     .map_err(|_| BackendError::Message("session lock poisoned".into()))?;
-                let items = backend.bw.list_items(query).map_err(BackendError::from)?;
+                let items = backend
+                    .bw
+                    .list_items_in(state, query)
+                    .map_err(BackendError::from)?;
                 Ok(SearchResult {
                     items,
                     warning: backend.bw.sync_warning(),
@@ -132,9 +168,10 @@ impl AppBackend {
                     icons_url: Some(backend.bw.icons_url()),
                 })
             }
-            Self::Demo(demo) => demo.list_items(query),
+            Self::Demo(demo) => demo.list_items(state, query),
             Self::Remote(client) => match client.call(&RpcRequest::ListItems {
                 query: query.to_string(),
+                state,
             }) {
                 Ok(RpcResponse::Search(result)) => result
                     .map(|payload| SearchResult {
@@ -149,6 +186,55 @@ impl AppBackend {
                 )),
                 Err(e) => Err(BackendError::Message(e)),
             },
+        }
+    }
+
+    pub fn authorize_item(&self, id: &str, password: &str) -> Result<BwItemDetail, BackendError> {
+        match self {
+            Self::Local(local) => local
+                .lock()
+                .map_err(|_| BackendError::Message("session lock poisoned".into()))?
+                .bw
+                .authorize_item(id, password)
+                .map_err(BackendError::from),
+            Self::Demo(demo) => demo.get_item(id),
+            Self::Remote(client) => match client.call(&RpcRequest::AuthorizeItem {
+                id: id.into(),
+                password: password.into(),
+            }) {
+                Ok(RpcResponse::Detail(result)) => result.map_err(BackendError::from),
+                _ => Err(BackendError::Message("Could not verify item access".into())),
+            },
+        }
+    }
+
+    pub fn revoke_item_grants(&self) {
+        match self {
+            Self::Local(local) => {
+                if let Ok(mut local) = local.lock() {
+                    local.bw.revoke_item_grants();
+                }
+            }
+            Self::Remote(client) => {
+                let _ = client.call(&RpcRequest::RevokeItemGrants);
+            }
+            Self::Demo(_) => {}
+        }
+    }
+
+    pub fn copy_field(&self, id: &str, index: usize, version: [u8; 32]) -> Result<(), String> {
+        match self {
+            Self::Remote(client) => match client.call(&RpcRequest::CopyField {
+                id: id.into(),
+                index,
+                version,
+            }) {
+                Ok(RpcResponse::Copied(result)) => result,
+                Err(error) => Err(error),
+                _ => Err("Unexpected clipboard response".into()),
+            },
+            Self::Demo(_) => Err("Clipboard copying is disabled in demo mode".into()),
+            Self::Local(_) => Err("Run the daemon to use secure clipboard copying".into()),
         }
     }
 
@@ -184,6 +270,92 @@ impl AppBackend {
                 Ok(RpcResponse::Totp(result)) => result.map_err(BackendError::from),
                 Ok(_) => Err(BackendError::Message(
                     "unexpected daemon TOTP response".into(),
+                )),
+                Err(e) => Err(BackendError::Message(e)),
+            },
+        }
+    }
+
+    pub fn apply_action(&self, id: &str, action: ItemAction) -> Result<(), BackendError> {
+        match self {
+            Self::Local(local) => local
+                .lock()
+                .map_err(|_| BackendError::Message("session lock poisoned".into()))?
+                .bw
+                .apply_action(id, action)
+                .map_err(BackendError::from),
+            Self::Demo(demo) => demo.apply_action(id, action),
+            Self::Remote(client) => match client.call(&RpcRequest::ItemAction {
+                id: id.into(),
+                action,
+            }) {
+                Ok(RpcResponse::ItemAction(result)) => result.map_err(BackendError::from),
+                Ok(_) => Err(BackendError::Message(
+                    "unexpected daemon item action response".into(),
+                )),
+                Err(e) => Err(BackendError::Message(e)),
+            },
+        }
+    }
+
+    pub fn edit_draft(&self, id: &str) -> Result<ItemDraft, BackendError> {
+        match self {
+            Self::Local(local) => local
+                .lock()
+                .map_err(|_| BackendError::Message("session lock poisoned".into()))?
+                .bw
+                .edit_draft(id)
+                .map_err(BackendError::from),
+            Self::Demo(demo) => demo.edit_draft(id),
+            Self::Remote(client) => {
+                match client.call(&RpcRequest::GetEditDraft { id: id.into() }) {
+                    Ok(RpcResponse::EditDraft(result)) => result.map_err(BackendError::from),
+                    Ok(_) => Err(BackendError::Message(
+                        "unexpected daemon edit draft response".into(),
+                    )),
+                    Err(e) => Err(BackendError::Message(e)),
+                }
+            }
+        }
+    }
+
+    pub fn save_item(&self, id: &str, draft: &ItemDraft) -> Result<BwItemDetail, BackendError> {
+        match self {
+            Self::Local(local) => local
+                .lock()
+                .map_err(|_| BackendError::Message("session lock poisoned".into()))?
+                .bw
+                .save_item(id, draft)
+                .map_err(BackendError::from),
+            Self::Demo(demo) => demo.save_item(id, draft),
+            Self::Remote(client) => match client.call(&RpcRequest::SaveItem {
+                id: id.into(),
+                draft: draft.clone(),
+            }) {
+                Ok(RpcResponse::Saved(result)) => result.map_err(BackendError::from),
+                Ok(_) => Err(BackendError::Message(
+                    "unexpected daemon save response".into(),
+                )),
+                Err(e) => Err(BackendError::Message(e)),
+            },
+        }
+    }
+
+    pub fn create_item(&self, draft: &ItemDraft) -> Result<BwItemDetail, BackendError> {
+        match self {
+            Self::Local(local) => local
+                .lock()
+                .map_err(|_| BackendError::Message("session lock poisoned".into()))?
+                .bw
+                .create_item(draft)
+                .map_err(BackendError::from),
+            Self::Demo(demo) => demo.create_item(draft),
+            Self::Remote(client) => match client.call(&RpcRequest::CreateItem {
+                draft: draft.clone(),
+            }) {
+                Ok(RpcResponse::Created(result)) => result.map_err(BackendError::from),
+                Ok(_) => Err(BackendError::Message(
+                    "unexpected daemon create response".into(),
                 )),
                 Err(e) => Err(BackendError::Message(e)),
             },
@@ -337,18 +509,20 @@ impl LocalBackend {
         password: &str,
         remember: bool,
     ) -> Result<(), BackendError> {
+        let mut candidate = BwClient::new();
         let saved = config::load_saved_session();
         let result = if let Some(saved) = saved.filter(|saved| {
             saved.server_url.trim_end_matches('/') == server_url.trim_end_matches('/')
                 && saved.email.eq_ignore_ascii_case(email.trim())
         }) {
-            self.bw.unlock_saved_session(&saved, password)
+            candidate.unlock_saved_session(&saved, password)
         } else {
-            self.bw.login(server_url, email, password, remember)
+            candidate.login(server_url, email, password, remember)
         };
 
         match result {
             Ok(()) => {
+                self.bw = candidate;
                 self.pending_two_factor = None;
                 Ok(())
             }
@@ -370,11 +544,10 @@ impl LocalBackend {
         let Some(challenge) = self.pending_two_factor.clone() else {
             return Err(BackendError::Message("missing two factor challenge".into()));
         };
-        match self
-            .bw
-            .complete_two_factor(&challenge, provider, token, remember)
-        {
+        let mut candidate = BwClient::new();
+        match candidate.complete_two_factor(&challenge, provider, token, remember) {
             Ok(()) => {
+                self.bw = candidate;
                 self.pending_two_factor = None;
                 Ok(())
             }
@@ -386,6 +559,7 @@ impl LocalBackend {
 impl From<BwError> for BackendError {
     fn from(error: BwError) -> Self {
         match error {
+            BwError::RepromptRequired => Self::RepromptRequired,
             BwError::TwoFactorRequired(challenge) => {
                 Self::TwoFactorRequired(challenge.providers().to_vec())
             }
@@ -397,6 +571,7 @@ impl From<BwError> for BackendError {
 impl From<RpcError> for BackendError {
     fn from(error: RpcError) -> Self {
         match error {
+            RpcError::RepromptRequired => Self::RepromptRequired,
             RpcError::Message(message) => Self::Message(message),
             RpcError::TwoFactorRequired { providers } => Self::TwoFactorRequired(providers),
         }
@@ -406,6 +581,7 @@ impl From<RpcError> for BackendError {
 impl fmt::Display for BackendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::RepromptRequired => write!(f, "Master password required for this item"),
             Self::Message(message) => write!(f, "{message}"),
             Self::TwoFactorRequired(_) => write!(f, "two factor required"),
         }

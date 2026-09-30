@@ -53,6 +53,8 @@
             ];
 
             buildInputs = runtimeLibs;
+            nativeCheckInputs = [ pkgs.dbus ];
+            RUST_TEST_THREADS = "1";
 
             postInstall = ''
               wrapProgram "$out/bin/bw-quick-access" \
@@ -102,6 +104,7 @@
             packages = with pkgs; [
               cargo
               clippy
+              dbus
               pkg-config
               rustc
               rustfmt

@@ -3,12 +3,47 @@ use std::io;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
+use zeroize::Zeroizing;
 
 const APP_DIR: &str = "bw-quick-access";
 const DEVICE_ID_FILE: &str = "device-id";
 const SESSION_FILE: &str = "session.json";
 const SETTINGS_FILE: &str = "settings.json";
 const RECENT_ITEM_FILE: &str = "recent-item.json";
+const ITEM_USAGE_FILE: &str = "item-usage.json";
+/// How many recently opened items the "Recently used" start list remembers.
+pub const ITEM_USAGE_LIMIT: usize = 20;
+
+/// What an empty search shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartList {
+    #[default]
+    None,
+    RecentlyUsed,
+    RecentlyEdited,
+    RecentlyCreated,
+}
+
+impl StartList {
+    pub fn next(self) -> Self {
+        match self {
+            Self::None => Self::RecentlyUsed,
+            Self::RecentlyUsed => Self::RecentlyEdited,
+            Self::RecentlyEdited => Self::RecentlyCreated,
+            Self::RecentlyCreated => Self::None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::RecentlyUsed => "Recently used",
+            Self::RecentlyEdited => "Recently edited",
+            Self::RecentlyCreated => "Recently created",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -32,6 +67,11 @@ pub struct AppSettings {
     /// Fetch website icons from the vault server's icon service (cached on disk).
     #[serde(default = "default_true")]
     pub show_website_icons: bool,
+    /// Ask Hyprland to obscure this popup in screenshots and screen sharing.
+    #[serde(default = "default_true")]
+    pub obscure_screen_capture: bool,
+    #[serde(default)]
+    pub start_list: StartList,
 }
 
 impl Default for AppSettings {
@@ -46,6 +86,8 @@ impl Default for AppSettings {
             lock_after_idle_timeout: true,
             idle_lock_timeout_minutes: default_idle_lock_timeout_minutes(),
             show_website_icons: true,
+            obscure_screen_capture: true,
+            start_list: StartList::None,
         }
     }
 }
@@ -97,14 +139,34 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct SavedSession {
     pub server_url: String,
     pub email: String,
+    // Read old sessions only. Never serialize a plaintext token again.
+    #[serde(default, skip_serializing)]
     pub refresh_token: String,
+    #[serde(default)]
+    pub encrypted_refresh_token: Option<String>,
     pub master_key_encrypted_user_key: String,
     pub salt: String,
     pub kdf: SavedKdf,
+}
+
+impl Drop for SavedSession {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.refresh_token);
+    }
+}
+
+impl std::fmt::Debug for SavedSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SavedSession")
+            .field("server_url", &self.server_url)
+            .field("email", &self.email)
+            .field("refresh_token", &"<redacted>")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -147,30 +209,22 @@ fn device_identifier_path() -> Option<PathBuf> {
 
 pub fn load_saved_session() -> Option<SavedSession> {
     let path = config_path(SESSION_FILE)?;
-    let data = fs::read_to_string(path).ok()?;
+    let data = Zeroizing::new(fs::read_to_string(path).ok()?);
     serde_json::from_str(&data).ok()
 }
 
 pub fn save_session(session: &SavedSession) -> io::Result<()> {
-    let path = config_path(SESSION_FILE)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "config directory unavailable"))?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    if !session.refresh_token.is_empty() || session.encrypted_refresh_token.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Session token must be encrypted before saving",
+        ));
     }
-    let data = serde_json::to_vec_pretty(session)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-    #[cfg(unix)]
-    {
-        let mut options = fs::OpenOptions::new();
-        options.create(true).truncate(true).write(true).mode(0o600);
-        std::io::Write::write_all(&mut options.open(path)?, &data)?;
-    }
-    #[cfg(not(unix))]
-    {
-        fs::write(path, data)?;
-    }
-    Ok(())
+    let data = Zeroizing::new(
+        serde_json::to_vec_pretty(session)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+    );
+    write_private(SESSION_FILE, &data)
 }
 
 pub fn clear_saved_session() -> io::Result<()> {
@@ -212,28 +266,88 @@ pub fn load_recent_item() -> Option<RecentItem> {
 }
 
 pub fn save_recent_item(id: &str) -> io::Result<()> {
-    let path = config_path(RECENT_ITEM_FILE)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "config directory unavailable"))?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let data = serde_json::to_vec_pretty(&RecentItem {
         id: id.to_string(),
         saved_at_unix_ms: unix_millis_now(),
     })
     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    write_private(RECENT_ITEM_FILE, &data)
+}
 
-    #[cfg(unix)]
-    {
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct ItemUse {
+    id: String,
+    used_at_unix_ms: u64,
+}
+
+/// Ids of recently opened items, most recent first. Only item ids are stored.
+pub fn load_item_usage() -> Vec<String> {
+    read_item_usage()
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect()
+}
+
+fn read_item_usage() -> Vec<ItemUse> {
+    config_path(ITEM_USAGE_FILE)
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|data| serde_json::from_str(&data).ok())
+        .unwrap_or_default()
+}
+
+pub fn record_item_use(id: &str) -> io::Result<()> {
+    let mut entries = read_item_usage();
+    entries.retain(|entry| entry.id != id);
+    entries.insert(
+        0,
+        ItemUse {
+            id: id.to_string(),
+            used_at_unix_ms: unix_millis_now(),
+        },
+    );
+    entries.truncate(ITEM_USAGE_LIMIT);
+    let data = serde_json::to_vec_pretty(&entries)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    write_private(ITEM_USAGE_FILE, &data)
+}
+
+pub fn clear_item_usage() -> io::Result<()> {
+    let Some(path) = config_path(ITEM_USAGE_FILE) else {
+        return Ok(());
+    };
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Writes a config file readable only by the current user.
+fn write_private(file_name: &str, data: &[u8]) -> io::Result<()> {
+    let path = config_path(file_name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "config directory unavailable"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("config directory unavailable"))?;
+    fs::create_dir_all(parent)?;
+    // A private, newly created inode avoids following symlinks or modifying hard links.
+    // Rename preserves the previous session if serialization or writing fails.
+    let temporary = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
         let mut options = fs::OpenOptions::new();
-        options.create(true).truncate(true).write(true).mode(0o600);
-        std::io::Write::write_all(&mut options.open(path)?, &data)?;
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        let mut file = options.open(&temporary)?;
+        std::io::Write::write_all(&mut file, data)?;
+        file.sync_all()?;
+        fs::rename(&temporary, &path)?;
+        fs::File::open(parent)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
     }
-    #[cfg(not(unix))]
-    {
-        fs::write(path, data)?;
-    }
-    Ok(())
+    result
 }
 
 pub fn clear_recent_item() -> io::Result<()> {
@@ -341,7 +455,8 @@ mod tests {
         let expected = SavedSession {
             server_url: "https://vault.example.test".into(),
             email: "me@example.test".into(),
-            refresh_token: "refresh".into(),
+            refresh_token: String::new(),
+            encrypted_refresh_token: Some("2.encrypted-fixture".into()),
             master_key_encrypted_user_key: "2.iv|data|mac".into(),
             salt: "custom-salt".into(),
             kdf: SavedKdf {
@@ -359,8 +474,15 @@ mod tests {
         let _ = fs::remove_dir_all(temp);
         assert_eq!(actual.server_url, expected.server_url);
         assert_eq!(actual.email, expected.email);
-        assert_eq!(actual.refresh_token, expected.refresh_token);
-        assert_eq!(actual.master_key_encrypted_user_key, expected.master_key_encrypted_user_key);
+        assert_eq!(
+            actual.encrypted_refresh_token,
+            expected.encrypted_refresh_token
+        );
+        assert!(actual.refresh_token.is_empty());
+        assert_eq!(
+            actual.master_key_encrypted_user_key,
+            expected.master_key_encrypted_user_key
+        );
         assert_eq!(actual.salt, expected.salt);
         assert_eq!(actual.kdf, expected.kdf);
     }
@@ -382,7 +504,8 @@ mod tests {
         let session = SavedSession {
             server_url: "https://vault.example.test".into(),
             email: "me@example.test".into(),
-            refresh_token: "refresh".into(),
+            refresh_token: String::new(),
+            encrypted_refresh_token: Some("2.encrypted-fixture".into()),
             master_key_encrypted_user_key: "2.iv|data|mac".into(),
             salt: "custom-salt".into(),
             kdf: SavedKdf {
@@ -423,7 +546,11 @@ mod tests {
         assert!(actual.close_after_copy);
         assert!(actual.restore_recent_item);
         assert!(!actual.ssh_agent_enabled);
-        assert_eq!(actual.ssh_agent_socket_path, default_ssh_agent_socket_path());
+        assert_eq!(
+            actual.ssh_agent_socket_path,
+            default_ssh_agent_socket_path()
+        );
+        assert!(actual.obscure_screen_capture);
         assert!(actual.lock_on_system_lock);
         assert!(actual.lock_after_idle_timeout);
         assert_eq!(actual.idle_lock_timeout_minutes, 60);
@@ -453,9 +580,12 @@ mod tests {
             lock_after_idle_timeout: false,
             idle_lock_timeout_minutes: 15,
             show_website_icons: true,
+            obscure_screen_capture: false,
+            start_list: StartList::None,
         })
         .unwrap();
         let actual = load_settings();
+        assert!(!actual.obscure_screen_capture);
         assert!(!actual.show_keyboard_shortcuts);
         assert!(!actual.close_after_copy);
         assert!(!actual.restore_recent_item);
@@ -475,6 +605,8 @@ mod tests {
             lock_after_idle_timeout: true,
             idle_lock_timeout_minutes: 60,
             show_website_icons: true,
+            obscure_screen_capture: true,
+            start_list: StartList::None,
         })
         .unwrap();
         let actual = load_settings();
@@ -482,7 +614,11 @@ mod tests {
         assert!(actual.close_after_copy);
         assert!(actual.restore_recent_item);
         assert!(!actual.ssh_agent_enabled);
-        assert_eq!(actual.ssh_agent_socket_path, default_ssh_agent_socket_path());
+        assert_eq!(
+            actual.ssh_agent_socket_path,
+            default_ssh_agent_socket_path()
+        );
+        assert!(actual.obscure_screen_capture);
         assert!(actual.lock_on_system_lock);
         assert!(actual.lock_after_idle_timeout);
         assert_eq!(actual.idle_lock_timeout_minutes, 60);
@@ -522,7 +658,11 @@ mod tests {
         assert!(actual.close_after_copy);
         assert!(actual.restore_recent_item);
         assert!(!actual.ssh_agent_enabled);
-        assert_eq!(actual.ssh_agent_socket_path, default_ssh_agent_socket_path());
+        assert_eq!(
+            actual.ssh_agent_socket_path,
+            default_ssh_agent_socket_path()
+        );
+        assert!(actual.obscure_screen_capture);
         assert!(actual.lock_on_system_lock);
         assert!(actual.lock_after_idle_timeout);
         assert_eq!(actual.idle_lock_timeout_minutes, 60);
@@ -552,6 +692,35 @@ mod tests {
     }
 
     #[test]
+    fn records_recent_item_usage_newest_first_without_duplicates() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = std::env::temp_dir().join(format!(
+            "bw-quick-access-config-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", temp.join("config"));
+        }
+
+        assert!(load_item_usage().is_empty());
+        for id in ["a", "b", "a", "c"] {
+            record_item_use(id).unwrap();
+        }
+        assert_eq!(load_item_usage(), ["c", "a", "b"]);
+        for idx in 0..(ITEM_USAGE_LIMIT + 5) {
+            record_item_use(&format!("item-{idx}")).unwrap();
+        }
+        assert_eq!(load_item_usage().len(), ITEM_USAGE_LIMIT);
+
+        clear_item_usage().unwrap();
+        assert!(load_item_usage().is_empty());
+
+        restore_var("XDG_CONFIG_HOME", previous_config_home);
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
     fn saves_loads_and_clears_recent_item() {
         let _guard = ENV_LOCK.lock().unwrap();
         let temp = std::env::temp_dir().join(format!(
@@ -569,7 +738,10 @@ mod tests {
         save_recent_item("item-123").unwrap();
         let actual = load_recent_item().unwrap();
         assert_eq!(actual.id, "item-123");
-        assert!(recent_item_is_fresh(&actual, std::time::Duration::from_secs(30)));
+        assert!(recent_item_is_fresh(
+            &actual,
+            std::time::Duration::from_secs(30)
+        ));
 
         clear_recent_item().unwrap();
         assert!(load_recent_item().is_none());
@@ -605,6 +777,39 @@ mod tests {
             &future,
             std::time::Duration::from_secs(30)
         ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn private_writes_replace_links_without_touching_the_target() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = std::env::temp_dir().join(format!("bwqa-private-{}", uuid::Uuid::new_v4()));
+        let app_dir = temp.join(APP_DIR);
+        fs::create_dir_all(&app_dir).unwrap();
+        let target = temp.join("unrelated");
+        fs::write(&target, b"unchanged").unwrap();
+        let path = app_dir.join(SESSION_FILE);
+        symlink(&target, &path).unwrap();
+        let previous = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &temp);
+        }
+        write_private(SESSION_FILE, b"private").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"unchanged");
+        assert_eq!(fs::read(&path).unwrap(), b"private");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(SESSION_FILE, b"replacement").unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        restore_var("XDG_CONFIG_HOME", previous);
+        fs::remove_dir_all(temp).unwrap();
     }
 
     fn restore_var(key: &str, value: Option<std::ffi::OsString>) {

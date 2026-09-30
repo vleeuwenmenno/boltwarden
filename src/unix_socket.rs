@@ -41,7 +41,10 @@ fn ensure_private_dir(path: &Path) -> io::Result<()> {
     if metadata.mode() & 0o077 != 0 {
         return Err(permission_error(
             path,
-            &format!("must not be accessible by group or others (mode {:04o})", metadata.mode() & 0o777),
+            &format!(
+                "must not be accessible by group or others (mode {:04o})",
+                metadata.mode() & 0o777
+            ),
         ));
     }
     Ok(())

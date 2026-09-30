@@ -1,11 +1,10 @@
 use crate::bw::TwoFactorProvider;
 use crate::config::AppSettings;
 use crate::model::{
-    BwItem, BwItemDetail, SshAgentStatus, SshApprovalDecision, SshApprovalRequest,
-    SshApprovalStatus, SyncStatus, TotpCode,
+    BwItem, BwItemDetail, ItemAction, ItemDraft, ItemState, SshAgentStatus, SshApprovalDecision,
+    SshApprovalRequest, SshApprovalStatus, SyncStatus, TotpCode,
 };
 use crate::unix_socket;
-use std::fs;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -16,6 +15,18 @@ const SOCKET_NAME: &str = "bw-quick-access-rpc.sock";
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum RpcRequest {
     HasSession,
+    SecurityWarning,
+    Sync,
+    CopyField {
+        id: String,
+        index: usize,
+        version: [u8; 32],
+    },
+    AuthorizeItem {
+        id: String,
+        password: String,
+    },
+    RevokeItemGrants,
     Login {
         server_url: String,
         email: String,
@@ -29,12 +40,28 @@ pub enum RpcRequest {
     },
     ListItems {
         query: String,
+        #[serde(default)]
+        state: ItemState,
     },
     GetItem {
         id: String,
     },
     GetTotp {
         id: String,
+    },
+    ItemAction {
+        id: String,
+        action: ItemAction,
+    },
+    GetEditDraft {
+        id: String,
+    },
+    SaveItem {
+        id: String,
+        draft: ItemDraft,
+    },
+    CreateItem {
+        draft: ItemDraft,
     },
     ApplySettings(AppSettings),
     GetSshAgentStatus,
@@ -48,11 +75,18 @@ pub enum RpcRequest {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum RpcResponse {
     HasSession(bool),
+    SecurityWarning(Option<String>),
+    Synced(Result<SyncStatus, RpcError>),
+    Copied(Result<(), String>),
     Login(Result<(), RpcError>),
     TwoFactor(Result<(), RpcError>),
     Search(Result<SearchPayload, RpcError>),
     Detail(Result<BwItemDetail, RpcError>),
     Totp(Result<TotpCode, RpcError>),
+    ItemAction(Result<(), RpcError>),
+    EditDraft(Result<ItemDraft, RpcError>),
+    Saved(Result<BwItemDetail, RpcError>),
+    Created(Result<BwItemDetail, RpcError>),
     SettingsApplied(Result<SshAgentStatus, String>),
     SshAgentStatus(SshAgentStatus),
     SshApproval(Option<SshApprovalRequest>),
@@ -66,6 +100,7 @@ pub enum RpcResponse {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum RpcError {
+    RepromptRequired,
     Message(String),
     TwoFactorRequired { providers: Vec<TwoFactorProvider> },
 }
@@ -112,7 +147,7 @@ impl RpcClient {
 
     pub fn call(&self, request: &RpcRequest) -> Result<RpcResponse, String> {
         let mut stream = self.write_request(request)?;
-        let mut response = String::new();
+        let mut response = zeroize::Zeroizing::new(String::new());
         stream
             .read_to_string(&mut response)
             .map_err(|e| format!("could not read daemon response: {e}"))?;
@@ -131,12 +166,20 @@ impl RpcClient {
     fn write_request(&self, request: &RpcRequest) -> Result<UnixStream, String> {
         let mut stream = UnixStream::connect(&self.socket_path)
             .map_err(|e| format!("could not connect to daemon: {e}"))?;
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(45)))
+            .map_err(|e| e.to_string())?;
+        stream
+            .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+            .map_err(|e| e.to_string())?;
         let envelope = EnvelopeRef {
             token: &self.token,
             request,
         };
-        let payload = serde_json::to_vec(&envelope)
-            .map_err(|e| format!("could not encode daemon request: {e}"))?;
+        let payload = zeroize::Zeroizing::new(
+            serde_json::to_vec(&envelope)
+                .map_err(|e| format!("could not encode daemon request: {e}"))?,
+        );
         stream
             .write_all(&payload)
             .map_err(|e| format!("could not send daemon request: {e}"))?;
@@ -159,20 +202,14 @@ pub fn prepare_listener() -> io::Result<(RpcEndpoint, UnixListener)> {
 }
 
 fn generate_token() -> io::Result<String> {
-    let mut bytes = [0u8; 32];
-    fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    let bytes = crate::random::random_bytes::<32>()?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// Constant-time comparison so response timing does not reveal how much of a guess matched.
 pub fn token_matches(expected: &str, candidate: &str) -> bool {
-    let (expected, candidate) = (expected.as_bytes(), candidate.as_bytes());
-    expected.len() == candidate.len()
-        && expected
-            .iter()
-            .zip(candidate)
-            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
-            == 0
+    use subtle::ConstantTimeEq;
+    bool::from(expected.as_bytes().ct_eq(candidate.as_bytes()))
 }
 
 #[cfg(test)]

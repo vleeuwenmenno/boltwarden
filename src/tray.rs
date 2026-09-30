@@ -1,4 +1,4 @@
-use std::sync::{mpsc, LazyLock};
+use std::sync::{LazyLock, mpsc};
 
 use ksni::blocking::{Handle, TrayMethods};
 
@@ -96,9 +96,7 @@ impl ksni::Tray for AppTray {
 }
 
 pub fn spawn(tx: mpsc::Sender<TrayCommand>) -> Result<Handle<AppTray>, ksni::Error> {
-    AppTray::new(tx)
-        .assume_sni_available(true)
-        .spawn()
+    AppTray::new(tx).assume_sni_available(true).spawn()
 }
 
 fn render_tray_icon(size: i32) -> ksni::Icon {
