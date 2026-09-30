@@ -87,7 +87,7 @@ pub fn icons_url_for_server(server_url: &str) -> String {
     }
 }
 
-pub fn cache_dir() -> Option<PathBuf> {
+fn cache_root() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
@@ -95,9 +95,26 @@ pub fn cache_dir() -> Option<PathBuf> {
     Some(base.join("bw-quick-access").join("icons"))
 }
 
+/// Versioned so a decoder change (v2: SVG support) does not trust old "no icon" entries.
+pub fn cache_dir() -> Option<PathBuf> {
+    cache_root().map(|root| root.join("v2"))
+}
+
+/// Removes files from before the cache was versioned; they sit directly in the root.
+fn remove_legacy_entries() {
+    let Some(entries) = cache_root().and_then(|root| fs::read_dir(root).ok()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Deletes every cached icon (used when icons are turned off).
 pub fn clear_disk_cache() -> io::Result<()> {
-    match cache_dir() {
+    match cache_root() {
         Some(dir) => match fs::remove_dir_all(&dir) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
@@ -126,6 +143,9 @@ pub struct IconCache {
 
 impl IconCache {
     pub fn new(enabled: bool) -> Self {
+        if enabled {
+            std::thread::spawn(remove_legacy_entries);
+        }
         let (tx, rx) = mpsc::channel();
         Self {
             enabled,
@@ -282,6 +302,63 @@ fn load_icon(
 }
 
 fn decode(bytes: &[u8]) -> Option<image::DynamicImage> {
+    let image = if looks_like_svg(bytes) {
+        render_svg(bytes)?
+    } else {
+        decode_raster(bytes)?
+    };
+    // Icon services answer unknown sites with a blank placeholder; treat that as no icon.
+    let visible = image.to_rgba8().pixels().any(|pixel| pixel[3] > 16);
+    (visible && image.width() >= 8 && image.height() >= 8).then_some(image)
+}
+
+/// Vaultwarden passes a site's SVG favicon through as-is (Gitea and many modern sites
+/// only ship an SVG), even though the endpoint is called icon.png.
+fn looks_like_svg(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(1024)];
+    let text = String::from_utf8_lossy(head);
+    let text = text.trim_start_matches('\u{feff}').trim_start();
+    text.starts_with('<') && text.contains("<svg")
+}
+
+fn render_svg(bytes: &[u8]) -> Option<image::DynamicImage> {
+    use resvg::{tiny_skia, usvg};
+    // Never follow file paths or URLs in <image href>: only inline data: images render.
+    let options = usvg::Options {
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: usvg::ImageHrefResolver::default_data_resolver(),
+            resolve_string: Box::new(|_, _| None),
+        },
+        ..usvg::Options::default()
+    };
+    let tree = usvg::Tree::from_data(bytes, &options).ok()?;
+    let size = tree.size();
+    let longest = size.width().max(size.height());
+    if !longest.is_finite() || longest <= 0.0 {
+        return None;
+    }
+    let scale = ICON_PIXELS as f32 / longest;
+    let offset_x = (ICON_PIXELS as f32 - size.width() * scale) / 2.0;
+    let offset_y = (ICON_PIXELS as f32 - size.height() * scale) / 2.0;
+    let mut pixmap = tiny_skia::Pixmap::new(ICON_PIXELS, ICON_PIXELS)?;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale).post_translate(offset_x, offset_y),
+        &mut pixmap.as_mut(),
+    );
+    // tiny-skia stores premultiplied alpha; image and egui expect straight alpha.
+    let rgba = pixmap
+        .pixels()
+        .iter()
+        .flat_map(|pixel| {
+            let color = pixel.demultiply();
+            [color.red(), color.green(), color.blue(), color.alpha()]
+        })
+        .collect();
+    image::RgbaImage::from_raw(ICON_PIXELS, ICON_PIXELS, rgba).map(image::DynamicImage::ImageRgba8)
+}
+
+fn decode_raster(bytes: &[u8]) -> Option<image::DynamicImage> {
     let mut reader = image::ImageReader::new(io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
@@ -290,10 +367,7 @@ fn decode(bytes: &[u8]) -> Option<image::DynamicImage> {
     limits.max_image_height = Some(MAX_SOURCE_DIMENSION);
     limits.max_alloc = Some(16 * 1024 * 1024);
     reader.limits(limits);
-    let image = reader.decode().ok()?;
-    // Icon services answer unknown sites with a blank placeholder; treat that as no icon.
-    let visible = image.to_rgba8().pixels().any(|pixel| pixel[3] > 16);
-    (visible && image.width() >= 8 && image.height() >= 8).then_some(image)
+    reader.decode().ok()
 }
 
 fn to_color_image(image: &image::DynamicImage) -> egui::ColorImage {
@@ -425,5 +499,29 @@ mod tests {
         assert!(decode(&tiny).is_none());
         assert!(decode(&icon).is_some());
         assert!(decode(b"not an image").is_none());
+    }
+
+    #[test]
+    fn renders_svg_icons() {
+        let svg = br##"<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 320">
+  <rect width="640" height="320" fill="#609926"/>
+</svg>"##;
+        let image = decode(svg).expect("svg renders");
+
+        assert_eq!((image.width(), image.height()), (ICON_PIXELS, ICON_PIXELS));
+        let rgba = image.to_rgba8();
+        // Wide artwork is letterboxed: transparent above, solid green in the middle.
+        assert_eq!(rgba.get_pixel(32, 2)[3], 0);
+        assert_eq!(rgba.get_pixel(32, 32).0, [0x60, 0x99, 0x26, 255]);
+    }
+
+    #[test]
+    fn svg_does_not_load_external_images() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="64" height="64">
+  <image href="/etc/hostname" width="64" height="64"/>
+</svg>"#;
+        // Nothing but the external image to draw, so it comes out blank and is rejected.
+        assert!(decode(svg).is_none());
     }
 }

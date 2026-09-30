@@ -24,6 +24,7 @@ data-encoding = "2"
 url = "2"
 toml = "1"
 image = { version = "0.25", default-features = false, features = ["png", "ico", "jpeg", "gif", "webp", "bmp"] }
+resvg = { version = "0.48", default-features = false }
 argon2 = "0.5"
 ksni = { version = "0.3", features = ["blocking"] }
 ssh-key = { version = "0.7.0-rc.10", features = ["crypto", "encryption", "p256", "p384", "p521"] }
