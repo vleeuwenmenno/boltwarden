@@ -695,7 +695,7 @@ fn show_popup_with_command(
         }
     }
 
-    match std::env::current_exe().and_then(|exe| {
+    match popup_exe().and_then(|exe| {
         let mut command = Command::new(exe);
         command
             .arg("--popup")
@@ -737,6 +737,18 @@ fn show_popup_with_command(
             eprintln!("could not start popup: {e}");
         }
     }
+}
+
+/// Binary to spawn the popup from. After the installed binary is replaced (for example
+/// by `make install`), `current_exe()` resolves to "<path> (deleted)" and spawning it
+/// fails with ENOENT. `/proc/self/exe` still opens the running daemon's own binary, which
+/// also keeps the popup on the same RPC protocol version as the daemon.
+fn popup_exe() -> std::io::Result<PathBuf> {
+    let proc_exe = PathBuf::from("/proc/self/exe");
+    if proc_exe.exists() {
+        return Ok(proc_exe);
+    }
+    std::env::current_exe()
 }
 
 fn hide_popup(popup: &PopupChild) {
