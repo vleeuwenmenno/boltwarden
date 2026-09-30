@@ -2,7 +2,7 @@ use crate::bw::{BwClient, BwError, TwoFactorChallenge, TwoFactorProvider};
 use crate::config::{self, AppSettings};
 use crate::demo::DemoBackend;
 use crate::model::{
-    BwItem, BwItemDetail, SshAgentStatus, SshApprovalDecision, SshApprovalRequest,
+    BwItem, BwItemDetail, ItemAction, ItemDraft, ItemState, SshAgentStatus, SshApprovalDecision, SshApprovalRequest,
     SshApprovalStatus, SyncStatus, TotpCode,
 };
 use crate::rpc::{RpcClient, RpcError, RpcRequest, RpcResponse};
@@ -118,13 +118,16 @@ impl AppBackend {
         }
     }
 
-    pub fn list_items(&self, query: &str) -> Result<SearchResult, BackendError> {
+    pub fn list_items(&self, state: ItemState, query: &str) -> Result<SearchResult, BackendError> {
         match self {
             Self::Local(local) => {
                 let backend = local
                     .lock()
                     .map_err(|_| BackendError::Message("session lock poisoned".into()))?;
-                let items = backend.bw.list_items(query).map_err(BackendError::from)?;
+                let items = backend
+                    .bw
+                    .list_items_in(state, query)
+                    .map_err(BackendError::from)?;
                 Ok(SearchResult {
                     items,
                     warning: backend.bw.sync_warning(),
@@ -132,9 +135,10 @@ impl AppBackend {
                     icons_url: Some(backend.bw.icons_url()),
                 })
             }
-            Self::Demo(demo) => demo.list_items(query),
+            Self::Demo(demo) => demo.list_items(state, query),
             Self::Remote(client) => match client.call(&RpcRequest::ListItems {
                 query: query.to_string(),
+                state,
             }) {
                 Ok(RpcResponse::Search(result)) => result
                     .map(|payload| SearchResult {
@@ -184,6 +188,90 @@ impl AppBackend {
                 Ok(RpcResponse::Totp(result)) => result.map_err(BackendError::from),
                 Ok(_) => Err(BackendError::Message(
                     "unexpected daemon TOTP response".into(),
+                )),
+                Err(e) => Err(BackendError::Message(e)),
+            },
+        }
+    }
+
+    pub fn apply_action(&self, id: &str, action: ItemAction) -> Result<(), BackendError> {
+        match self {
+            Self::Local(local) => local
+                .lock()
+                .map_err(|_| BackendError::Message("session lock poisoned".into()))?
+                .bw
+                .apply_action(id, action)
+                .map_err(BackendError::from),
+            Self::Demo(demo) => demo.apply_action(id, action),
+            Self::Remote(client) => match client.call(&RpcRequest::ItemAction {
+                id: id.into(),
+                action,
+            }) {
+                Ok(RpcResponse::ItemAction(result)) => result.map_err(BackendError::from),
+                Ok(_) => Err(BackendError::Message(
+                    "unexpected daemon item action response".into(),
+                )),
+                Err(e) => Err(BackendError::Message(e)),
+            },
+        }
+    }
+
+    pub fn edit_draft(&self, id: &str) -> Result<ItemDraft, BackendError> {
+        match self {
+            Self::Local(local) => local
+                .lock()
+                .map_err(|_| BackendError::Message("session lock poisoned".into()))?
+                .bw
+                .edit_draft(id)
+                .map_err(BackendError::from),
+            Self::Demo(demo) => demo.edit_draft(id),
+            Self::Remote(client) => match client.call(&RpcRequest::GetEditDraft { id: id.into() }) {
+                Ok(RpcResponse::EditDraft(result)) => result.map_err(BackendError::from),
+                Ok(_) => Err(BackendError::Message(
+                    "unexpected daemon edit draft response".into(),
+                )),
+                Err(e) => Err(BackendError::Message(e)),
+            },
+        }
+    }
+
+    pub fn save_item(&self, id: &str, draft: &ItemDraft) -> Result<BwItemDetail, BackendError> {
+        match self {
+            Self::Local(local) => local
+                .lock()
+                .map_err(|_| BackendError::Message("session lock poisoned".into()))?
+                .bw
+                .save_item(id, draft)
+                .map_err(BackendError::from),
+            Self::Demo(demo) => demo.save_item(id, draft),
+            Self::Remote(client) => match client.call(&RpcRequest::SaveItem {
+                id: id.into(),
+                draft: draft.clone(),
+            }) {
+                Ok(RpcResponse::Saved(result)) => result.map_err(BackendError::from),
+                Ok(_) => Err(BackendError::Message(
+                    "unexpected daemon save response".into(),
+                )),
+                Err(e) => Err(BackendError::Message(e)),
+            },
+        }
+    }
+
+    pub fn create_item(&self, draft: &ItemDraft) -> Result<BwItemDetail, BackendError> {
+        match self {
+            Self::Local(local) => local
+                .lock()
+                .map_err(|_| BackendError::Message("session lock poisoned".into()))?
+                .bw
+                .create_item(draft)
+                .map_err(BackendError::from),
+            Self::Demo(demo) => demo.create_item(draft),
+            Self::Remote(client) => match client.call(&RpcRequest::CreateItem {
+                draft: draft.clone(),
+            }) {
+                Ok(RpcResponse::Created(result)) => result.map_err(BackendError::from),
+                Ok(_) => Err(BackendError::Message(
+                    "unexpected daemon create response".into(),
                 )),
                 Err(e) => Err(BackendError::Message(e)),
             },

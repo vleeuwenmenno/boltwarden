@@ -1,8 +1,11 @@
 use crate::backend::{AppBackend, BackendError};
 use crate::config::{self, AppSettings};
 use crate::icons::IconCache;
-use crate::model::{BwItem, BwItemDetail, SshAgentStatus, SyncStatus, TotpCode};
+use crate::model::{
+    BwItem, BwItemDetail, ItemAction, ItemDraft, ItemState, SshAgentStatus, SyncStatus, TotpCode,
+};
 use crate::ui::auth::{AuthAction, AuthState, draw_auth};
+use crate::ui::edit::{EditAction, EditState, draw_edit};
 use crate::ui::search::{SearchAction, SearchState, SearchView, draw_search};
 use crate::ui::ssh_approval::{SshApprovalAction, SshApprovalUiState, draw_ssh_approval};
 use crate::ui::summary::{SummaryAction, SummaryState, draw_summary};
@@ -32,6 +35,7 @@ enum BwResponse {
     TwoFactor(Result<(), BackendError>),
     Search {
         query: String,
+        state: ItemState,
         result: Result<Vec<BwItem>, BackendError>,
         warning: Option<String>,
         status: SyncStatus,
@@ -46,6 +50,20 @@ enum BwResponse {
         result: Result<TotpCode, BackendError>,
     },
     SshApprovalDecision(Result<(), String>),
+    ItemAction {
+        id: String,
+        action: ItemAction,
+        result: Result<(), BackendError>,
+    },
+    EditDraft {
+        id: String,
+        result: Result<ItemDraft, BackendError>,
+    },
+    Saved {
+        id: String,
+        result: Result<BwItemDetail, BackendError>,
+    },
+    Created(Result<BwItemDetail, BackendError>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +90,8 @@ pub struct App {
     ssh_approval_state: SshApprovalUiState,
     ssh_approval_return: Option<(Screen, bool)>,
     summary_state: SummaryState,
+    /// Open edit form for the item shown in the summary.
+    edit_state: Option<EditState>,
     icons: IconCache,
     rx: mpsc::Receiver<BwResponse>,
     tx: mpsc::Sender<BwResponse>,
@@ -140,6 +160,7 @@ impl App {
             ssh_approval_state: SshApprovalUiState::default(),
             ssh_approval_return: None,
             summary_state: SummaryState::default(),
+            edit_state: None,
             rx,
             tx,
             popup_rx,
@@ -153,6 +174,9 @@ impl App {
             focus_hide_enabled_at: Instant::now() + UNFOCUS_HIDE_GRACE,
             unfocused_since: None,
         };
+        app.search_state.start_list = app.settings.start_list;
+        // Load the start list on the first frame, before anything is typed.
+        app.search_state.force_refresh();
         app.restore_recent_item_on_start();
         app
     }
@@ -183,16 +207,17 @@ impl App {
         });
     }
 
-    fn spawn_search(&self, query: String) {
+    fn spawn_search(&self, query: String, state: ItemState) {
         let tx = self.tx.clone();
         let backend = self.backend.clone();
         std::thread::spawn(move || {
-            let (res, warning, status, icons_url) = match backend.list_items(&query) {
+            let (res, warning, status, icons_url) = match backend.list_items(state, &query) {
                 Ok(result) => (Ok(result.items), result.warning, result.status, result.icons_url),
                 Err(error) => (Err(error), None, SyncStatus::default(), None),
             };
             let _ = tx.send(BwResponse::Search {
                 query,
+                state,
                 result: res,
                 warning,
                 status,
@@ -207,6 +232,42 @@ impl App {
         std::thread::spawn(move || {
             let result = backend.get_item(&id);
             let _ = tx.send(BwResponse::Detail { id, result });
+        });
+    }
+
+    fn spawn_item_action(&self, id: String, action: ItemAction) {
+        let tx = self.tx.clone();
+        let backend = self.backend.clone();
+        std::thread::spawn(move || {
+            let result = backend.apply_action(&id, action);
+            let _ = tx.send(BwResponse::ItemAction { id, action, result });
+        });
+    }
+
+    fn spawn_edit_draft(&self, id: String) {
+        let tx = self.tx.clone();
+        let backend = self.backend.clone();
+        std::thread::spawn(move || {
+            let result = backend.edit_draft(&id);
+            let _ = tx.send(BwResponse::EditDraft { id, result });
+        });
+    }
+
+    fn spawn_save(&self, id: String, draft: ItemDraft) {
+        let tx = self.tx.clone();
+        let backend = self.backend.clone();
+        std::thread::spawn(move || {
+            let result = backend.save_item(&id, &draft);
+            let _ = tx.send(BwResponse::Saved { id, result });
+        });
+    }
+
+    fn spawn_create(&self, draft: ItemDraft) {
+        let tx = self.tx.clone();
+        let backend = self.backend.clone();
+        std::thread::spawn(move || {
+            let result = backend.create_item(&draft);
+            let _ = tx.send(BwResponse::Created(result));
         });
     }
 
@@ -290,6 +351,7 @@ impl App {
                 }
                 BwResponse::Search {
                     query,
+                    state,
                     result,
                     warning,
                     status,
@@ -299,14 +361,18 @@ impl App {
                     // Clear in_flight before the stale check, otherwise needs_search() stays
                     // false and a query typed while this request ran would never be sent.
                     self.search_state.in_flight = false;
-                    if query != self.search_state.query.trim() {
+                    let current_state = self
+                        .search_state
+                        .view
+                        .item_state()
+                        .unwrap_or(ItemState::Active);
+                    if query != self.search_state.query.trim() || state != current_state {
                         ctx.request_repaint();
                         continue;
                     }
                     match result {
                         Ok(items) => {
-                            self.search_state.results = items;
-                            self.search_state.selected = 0;
+                            self.search_state.set_results(items);
                             self.search_state.error = None;
                             self.search_state.warning = warning;
                             self.search_state.sync_status = Some(status);
@@ -349,6 +415,77 @@ impl App {
                         Err(_) => {
                             self.summary_state.totp = None;
                             self.summary_state.totp_fetched_at = Some(Instant::now());
+                        }
+                    }
+                }
+                BwResponse::ItemAction { id, action, result } => {
+                    if self.summary_state.detail_id.as_deref() != Some(id.as_str()) {
+                        continue;
+                    }
+                    self.summary_state.action_in_flight = false;
+                    self.summary_state.confirm = None;
+                    match result {
+                        Ok(()) => {
+                            self.search_state.show_notice(action.done_message());
+                            self.search_state.force_refresh();
+                            if self.summary_open {
+                                self.return_to_search(ctx);
+                            }
+                        }
+                        Err(e) => self.summary_state.error = Some(e.to_string()),
+                    }
+                }
+                BwResponse::EditDraft { id, result } => {
+                    let Some(edit) = self.edit_state.as_mut().filter(|edit| edit.id == id) else {
+                        continue;
+                    };
+                    match result {
+                        Ok(draft) => edit.set_draft(draft),
+                        Err(e) => {
+                            self.edit_state = None;
+                            self.summary_state.error = Some(format!("could not edit: {e}"));
+                        }
+                    }
+                }
+                BwResponse::Saved { id, result } => {
+                    let Some(edit) = self.edit_state.as_mut().filter(|edit| edit.id == id) else {
+                        continue;
+                    };
+                    match result {
+                        Ok(detail) => {
+                            self.edit_state = None;
+                            self.summary_state.detail = Some(detail);
+                            self.summary_state.error = None;
+                            self.summary_state.selected_field = 0;
+                            self.summary_state.reveal_fields.clear();
+                            self.summary_state.copied_field = None;
+                            self.summary_state.totp = None;
+                            self.summary_state.totp_fetched_at = None;
+                            self.search_state.force_refresh();
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        }
+                        Err(e) => {
+                            edit.saving = false;
+                            edit.error = Some(e.to_string());
+                        }
+                    }
+                }
+                BwResponse::Created(result) => {
+                    let Some(edit) = self.edit_state.as_mut().filter(|edit| edit.creating) else {
+                        continue;
+                    };
+                    match result {
+                        Ok(detail) => {
+                            self.edit_state = None;
+                            self.summary_state = SummaryState::default();
+                            self.summary_state.detail_id = Some(detail.id.clone());
+                            self.summary_state.detail = Some(detail);
+                            self.search_state.force_refresh();
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        }
+                        Err(e) => {
+                            edit.saving = false;
+                            edit.error = Some(e.to_string());
                         }
                     }
                 }
@@ -529,7 +666,9 @@ impl App {
             || self.auth_auto_hide
             || self.auth_inhibit_focus_hide
             || self.summary_open
-            || self.search_state.view == SearchView::Settings
+            || self.summary_state.action_in_flight
+            || self.edit_state.is_some()
+            || self.search_state.view != SearchView::Results
             || Instant::now() < self.focus_hide_enabled_at
         {
             self.unfocused_since = None;
@@ -563,12 +702,22 @@ impl App {
             self.summary_state.totp_fetched_at = None;
             self.summary_state.totp_in_flight = false;
             self.summary_state.error = None;
+            self.summary_state.confirm = None;
+            self.summary_state.action_in_flight = false;
+            self.edit_state = None;
             self.summary_open = true;
             self.unfocused_since = None;
-            if self.settings.restore_recent_item {
+            let remember = self.settings.restore_recent_item;
+            let record_use = self.settings.start_list == config::StartList::RecentlyUsed;
+            if remember || record_use {
                 let recent_id = item_id.clone();
                 std::thread::spawn(move || {
-                    let _ = config::save_recent_item(&recent_id);
+                    if remember {
+                        let _ = config::save_recent_item(&recent_id);
+                    }
+                    if record_use {
+                        let _ = config::record_item_use(&recent_id);
+                    }
                 });
             }
             self.spawn_detail(item_id);
@@ -577,6 +726,8 @@ impl App {
 
     fn return_to_search(&mut self, ctx: &Context) {
         self.summary_open = false;
+        self.edit_state = None;
+        self.summary_state.confirm = None;
         self.summary_state.reveal_fields.clear();
         let _ = config::clear_recent_item();
         self.search_state.focus_search = true;
@@ -650,7 +801,7 @@ impl eframe::App for App {
         let escape_handled_by_screen = match self.screen {
             Screen::TwoFactor | Screen::SshApproval => true,
             Screen::Auth => self.auth_state.confirm_forget,
-            Screen::Search => self.summary_open || self.search_state.view == SearchView::Settings,
+            Screen::Search => self.summary_open || self.search_state.view != SearchView::Results,
         };
         if self.window_visible && !escape_handled_by_screen && Self::escape_pressed(ctx) {
             debug_log("hide because escape was pressed");
@@ -667,6 +818,7 @@ impl eframe::App for App {
             Screen::Auth => self.update_auth(ctx),
             Screen::TwoFactor => self.update_two_factor(ctx),
             Screen::SshApproval => self.update_ssh_approval(ctx),
+            Screen::Search if self.summary_open && self.edit_state.is_some() => self.update_edit(ctx),
             Screen::Search if self.summary_open => self.update_summary(ctx),
             Screen::Search => self.update_search(ctx),
         }
@@ -697,6 +849,7 @@ impl App {
                     self.auth_state.confirm_forget = false;
                 } else {
                     let _ = config::clear_recent_item();
+                    let _ = config::clear_item_usage();
                     self.auth_state.reset_to_full_login();
                 }
             }
@@ -747,7 +900,47 @@ impl App {
                 self.hide_quick_access(ctx);
             }
             Some(SummaryAction::Back) => self.return_to_search(ctx),
-            _ => {}
+            Some(SummaryAction::Edit) => {
+                if let Some(id) = self.summary_state.detail_id.clone() {
+                    self.summary_state.error = None;
+                    self.edit_state = Some(EditState::loading(id.clone()));
+                    self.spawn_edit_draft(id);
+                }
+            }
+            Some(SummaryAction::Item(action)) => {
+                if let Some(id) = self.summary_state.detail_id.clone() {
+                    self.summary_state.error = None;
+                    self.summary_state.action_in_flight = true;
+                    self.spawn_item_action(id, action);
+                }
+            }
+            Some(SummaryAction::Copied) => {}
+            None => {}
+        }
+    }
+
+    fn update_edit(&mut self, ctx: &Context) {
+        let Some(edit) = self.edit_state.as_mut() else {
+            return;
+        };
+        match draw_edit(ctx, edit, self.settings.show_keyboard_shortcuts) {
+            Some(EditAction::Save(draft)) => {
+                edit.saving = true;
+                edit.error = None;
+                if edit.creating {
+                    self.spawn_create(draft);
+                } else {
+                    let id = edit.id.clone();
+                    self.spawn_save(id, draft);
+                }
+            }
+            // A new item has no summary to fall back to.
+            Some(EditAction::Cancel) if edit.creating => self.return_to_search(ctx),
+            Some(EditAction::Cancel) => {
+                self.edit_state = None;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            None => {}
         }
     }
 
@@ -757,7 +950,12 @@ impl App {
             self.search_state.in_flight = true;
             self.search_state.error = None;
             self.search_state.mark_queried();
-            self.spawn_search(self.search_state.query.trim().to_string());
+            let state = self
+                .search_state
+                .view
+                .item_state()
+                .unwrap_or(ItemState::Active);
+            self.spawn_search(self.search_state.query.trim().to_string(), state);
         }
 
         let Some(action) = draw_search(
@@ -771,6 +969,22 @@ impl App {
         };
         match action {
             SearchAction::OpenResult(idx) => self.open_result(idx),
+            SearchAction::SetStartList(list) => {
+                self.settings.start_list = list;
+                self.search_state.start_list = list;
+                self.search_state.force_refresh();
+                // Opened items are only remembered while "Recently used" is chosen.
+                if list != config::StartList::RecentlyUsed {
+                    let _ = config::clear_item_usage();
+                }
+                self.save_and_apply_settings();
+            }
+            SearchAction::NewItem => {
+                self.summary_state = SummaryState::default();
+                self.summary_open = true;
+                self.edit_state = Some(EditState::create());
+                self.unfocused_since = None;
+            }
             SearchAction::SetKeyboardShortcuts(show) => {
                 self.settings.show_keyboard_shortcuts = show;
                 self.save_and_apply_settings();
@@ -829,6 +1043,7 @@ impl App {
                     self.summary_open = false;
                     // Drop the decrypted item (password, keys) along with the session.
                     self.summary_state = SummaryState::default();
+                    self.edit_state = None;
                     self.ssh_agent_status = self.backend.ssh_agent_status(&self.settings);
                 }
             }
@@ -853,6 +1068,11 @@ impl App {
             || self.summary_state.totp_in_flight
             || self.auth_state.in_flight
             || self.two_factor_state.in_flight
+            || self.summary_state.action_in_flight
+            || self
+                .edit_state
+                .as_ref()
+                .is_some_and(|edit| edit.saving || edit.draft.is_none())
         {
             ctx.request_repaint_after(Duration::from_millis(50));
         }

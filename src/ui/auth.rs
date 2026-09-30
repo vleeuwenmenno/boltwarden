@@ -282,57 +282,20 @@ fn draw_login_form(ui: &mut egui::Ui, state: &mut AuthState, action: &mut Option
 }
 
 fn draw_forget_dialog(ctx: &Context, state: &mut AuthState, action: &mut Option<AuthAction>) {
-    let t = theme();
-    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-        state.confirm_forget = false;
-        return;
+    let dialog = widgets::ConfirmDialog {
+        title: "Use another account?",
+        body: "This removes the saved unlock session for this account from this device.",
+        confirm_label: "Forget account",
+        danger: true,
+        key: widgets::ConfirmKey::None,
+        busy: false,
+        error: None,
+    };
+    match widgets::confirm_dialog(ctx, &dialog) {
+        Some(true) => *action = Some(AuthAction::ForgetUser),
+        Some(false) => state.confirm_forget = false,
+        None => {}
     }
-    egui::Window::new("Use another account?")
-        .collapsible(false)
-        .resizable(false)
-        .title_bar(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .frame(
-            egui::Frame::window(&ctx.style())
-                .fill(t.bg)
-                .stroke(egui::Stroke::new(1.0_f32, t.accent))
-                .inner_margin(egui::Margin::same(16)),
-        )
-        .show(ctx, |ui| {
-            ui.set_width(360.0);
-            ui.label(
-                RichText::new("Use another account?")
-                    .size(t.title())
-                    .color(t.text_strong),
-            );
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(
-                    "This removes the saved unlock session for this account from this device.",
-                )
-                .color(t.text_muted),
-            );
-            ui.add_space(14.0);
-            ui.horizontal(|ui| {
-                if widgets::button(ui, "Cancel", false, true).clicked() {
-                    state.confirm_forget = false;
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new("Forget account").color(t.danger))
-                                .fill(t.surface)
-                                .stroke(egui::Stroke::new(1.0_f32, t.danger))
-                                .corner_radius(t.rounding)
-                                .min_size(egui::vec2(96.0, 32.0)),
-                        )
-                        .clicked()
-                    {
-                        *action = Some(AuthAction::ForgetUser);
-                    }
-                });
-            });
-        });
 }
 
 pub enum AuthAction {

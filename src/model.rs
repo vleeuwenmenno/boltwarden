@@ -8,6 +8,118 @@ pub struct BwItem {
     /// Public hostname of the item's first website, used to look up its icon.
     #[serde(default)]
     pub icon_host: Option<String>,
+    #[serde(default)]
+    pub state: ItemState,
+    #[serde(default)]
+    pub dates: ItemDates,
+}
+
+/// Server timestamps (ISO 8601 UTC, so they sort as strings) used to order the archived
+/// and trash lists.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ItemDates {
+    /// When the item was archived or trashed, for items in those states.
+    #[serde(default)]
+    pub state_changed_at: Option<String>,
+    #[serde(default)]
+    pub revision_date: Option<String>,
+    #[serde(default)]
+    pub creation_date: Option<String>,
+}
+
+/// Where an item lives in the vault. A trashed item that was also archived counts as
+/// deleted: it only shows up under "Recently deleted".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ItemState {
+    #[default]
+    Active,
+    Archived,
+    Deleted,
+}
+
+/// A change to an item's place in the vault. Editing its contents goes through `ItemDraft`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ItemAction {
+    Archive,
+    Unarchive,
+    Trash,
+    Restore,
+    DeleteForever,
+}
+
+impl ItemAction {
+    /// Short past-tense status line shown after the action succeeds.
+    pub fn done_message(self) -> &'static str {
+        match self {
+            Self::Archive => "Archived",
+            Self::Unarchive => "Moved back to the vault",
+            Self::Trash => "Moved to trash",
+            Self::Restore => "Restored",
+            Self::DeleteForever => "Deleted permanently",
+        }
+    }
+}
+
+/// Editable plaintext copy of an item. `original_index` ties a row back to the entry it
+/// came from, so renames keep the entry and its extra settings (URI match, linked id).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ItemDraft {
+    pub name: String,
+    pub notes: String,
+    pub login: Option<LoginDraft>,
+    pub fields: Vec<DraftField>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LoginDraft {
+    pub username: String,
+    pub password: String,
+    pub totp: String,
+    pub uris: Vec<DraftUri>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DraftUri {
+    pub uri: String,
+    pub original_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DraftField {
+    pub name: String,
+    pub value: String,
+    pub kind: DraftFieldKind,
+    pub original_index: Option<usize>,
+}
+
+/// Bitwarden custom field types 0..=3. Linked fields point at another field of the item
+/// and have no value of their own, so the editor only lets you rename them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DraftFieldKind {
+    Text,
+    Hidden,
+    Boolean,
+    Linked,
+}
+
+impl DraftFieldKind {
+    pub fn from_type(field_type: i64) -> Self {
+        match field_type {
+            1 => Self::Hidden,
+            2 => Self::Boolean,
+            3 => Self::Linked,
+            _ => Self::Text,
+        }
+    }
+
+    pub fn type_id(self) -> i64 {
+        match self {
+            Self::Text => 0,
+            Self::Hidden => 1,
+            Self::Boolean => 2,
+            Self::Linked => 3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -30,6 +142,10 @@ pub struct BwItemDetail {
     pub folder: Option<String>,
     pub item_type: String,
     pub ssh_key: Option<SshKey>,
+    #[serde(default)]
+    pub state: ItemState,
+    #[serde(default)]
+    pub dates: ItemDates,
 }
 
 /// A generated TOTP code plus the time step it belongs to, so the UI can show the real

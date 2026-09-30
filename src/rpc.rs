@@ -1,11 +1,10 @@
 use crate::bw::TwoFactorProvider;
 use crate::config::AppSettings;
 use crate::model::{
-    BwItem, BwItemDetail, SshAgentStatus, SshApprovalDecision, SshApprovalRequest,
+    BwItem, BwItemDetail, ItemAction, ItemDraft, ItemState, SshAgentStatus, SshApprovalDecision, SshApprovalRequest,
     SshApprovalStatus, SyncStatus, TotpCode,
 };
 use crate::unix_socket;
-use std::fs;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -29,12 +28,28 @@ pub enum RpcRequest {
     },
     ListItems {
         query: String,
+        #[serde(default)]
+        state: ItemState,
     },
     GetItem {
         id: String,
     },
     GetTotp {
         id: String,
+    },
+    ItemAction {
+        id: String,
+        action: ItemAction,
+    },
+    GetEditDraft {
+        id: String,
+    },
+    SaveItem {
+        id: String,
+        draft: ItemDraft,
+    },
+    CreateItem {
+        draft: ItemDraft,
     },
     ApplySettings(AppSettings),
     GetSshAgentStatus,
@@ -53,6 +68,10 @@ pub enum RpcResponse {
     Search(Result<SearchPayload, RpcError>),
     Detail(Result<BwItemDetail, RpcError>),
     Totp(Result<TotpCode, RpcError>),
+    ItemAction(Result<(), RpcError>),
+    EditDraft(Result<ItemDraft, RpcError>),
+    Saved(Result<BwItemDetail, RpcError>),
+    Created(Result<BwItemDetail, RpcError>),
     SettingsApplied(Result<SshAgentStatus, String>),
     SshAgentStatus(SshAgentStatus),
     SshApproval(Option<SshApprovalRequest>),
@@ -159,8 +178,7 @@ pub fn prepare_listener() -> io::Result<(RpcEndpoint, UnixListener)> {
 }
 
 fn generate_token() -> io::Result<String> {
-    let mut bytes = [0u8; 32];
-    fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    let bytes = crate::random::random_bytes::<32>()?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 

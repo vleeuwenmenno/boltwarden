@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod edit;
 pub mod search;
 pub mod ssh_approval;
 pub mod summary;

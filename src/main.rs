@@ -8,6 +8,7 @@ mod demo;
 mod icons;
 mod instance;
 mod model;
+mod random;
 mod rpc;
 mod ssh_agent;
 mod tray;
@@ -399,8 +400,8 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
         } => RpcResponse::TwoFactor(complete_vault_two_factor(
             &mut state, provider, &token, remember,
         )),
-        RpcRequest::ListItems { query } => {
-            let result = state.bw.list_items(&query).map(|items| SearchPayload {
+        RpcRequest::ListItems { query, state: item_state } => {
+            let result = state.bw.list_items_in(item_state, &query).map(|items| SearchPayload {
                 items,
                 warning: state.bw.sync_warning(),
                 status: state.bw.sync_status(),
@@ -413,6 +414,23 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
         }
         RpcRequest::GetTotp { id } => {
             RpcResponse::Totp(state.bw.get_totp(&id).map_err(rpc_error_from_bw))
+        }
+        RpcRequest::ItemAction { id, action } => {
+            let result = state.bw.apply_action(&id, action).map_err(rpc_error_from_bw);
+            // Archived and trashed SSH keys must leave the agent, restored ones come back.
+            refresh_ssh_key_store_from_vault(&mut state);
+            RpcResponse::ItemAction(result)
+        }
+        RpcRequest::GetEditDraft { id } => {
+            RpcResponse::EditDraft(state.bw.edit_draft(&id).map_err(rpc_error_from_bw))
+        }
+        RpcRequest::SaveItem { id, draft } => {
+            let result = state.bw.save_item(&id, &draft).map_err(rpc_error_from_bw);
+            refresh_ssh_key_store_from_vault(&mut state);
+            RpcResponse::Saved(result)
+        }
+        RpcRequest::CreateItem { draft } => {
+            RpcResponse::Created(state.bw.create_item(&draft).map_err(rpc_error_from_bw))
         }
         RpcRequest::ApplySettings(settings) => {
             let result = config::save_settings(&settings)

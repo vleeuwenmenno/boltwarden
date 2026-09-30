@@ -1,15 +1,20 @@
 use crate::config;
 use crate::config::{SavedKdf, SavedSession};
-use crate::model::{BwItem, BwItemDetail, CustomField, SshKey, SyncStatus, TotpCode};
+use crate::model::{
+    BwItem, BwItemDetail, CustomField, DraftField, DraftFieldKind, DraftUri, ItemAction,
+    ItemDates, ItemDraft, ItemState, LoginDraft, SshKey, SyncStatus, TotpCode,
+};
 use aes::Aes256;
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
-use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use data_encoding::{BASE32, BASE32_NOPAD};
 use hmac::{Hmac, Mac};
 use pbkdf2::pbkdf2_hmac;
-use reqwest::blocking::Client;
+use reqwest::Method;
+use reqwest::blocking::{Client, Response};
 use serde::Deserialize;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use sha1::Sha1;
 use sha2::Sha256;
@@ -20,8 +25,11 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(12);
 const CLIENT_NAME: &str = "bw-quick-access";
 // Vaultwarden gates newer cipher types, including SSH keys, on this Bitwarden client header.
 const SYNC_COMPAT_CLIENT_VERSION: &str = "2024.12.0";
+// Official clients keep this many old passwords per login.
+const PASSWORD_HISTORY_LIMIT: usize = 5;
 
 type Aes256CbcDec = cbc::Decryptor<Aes256>;
+type Aes256CbcEnc = cbc::Encryptor<Aes256>;
 type HmacSha256 = Hmac<Sha256>;
 type HmacSha1 = Hmac<Sha1>;
 
@@ -34,8 +42,20 @@ pub struct BwClient {
     refresh_token: Option<String>,
     user_key: Option<Vec<u8>>,
     items: Vec<BwItemDetail>,
+    /// Encrypted source of every item in `items`, needed to write changes back without
+    /// dropping the fields this app does not understand.
+    ciphers: HashMap<String, StoredCipher>,
+    folders: HashMap<String, String>,
+    organization_keys: HashMap<String, Vec<u8>>,
     sync_warning: Option<String>,
     sync_status: SyncStatus,
+}
+
+#[derive(Clone)]
+struct StoredCipher {
+    raw: Value,
+    item_key: Vec<u8>,
+    revision_date: Option<String>,
 }
 
 #[derive(Debug)]
@@ -162,6 +182,9 @@ impl BwClient {
             refresh_token: None,
             user_key: None,
             items: Vec::new(),
+            ciphers: HashMap::new(),
+            folders: HashMap::new(),
+            organization_keys: HashMap::new(),
             sync_warning: None,
             sync_status: SyncStatus::default(),
         }
@@ -283,10 +306,13 @@ impl BwClient {
         self.sync()
     }
 
-    pub fn list_items(&self, search: &str) -> Result<Vec<BwItem>, BwError> {
+    pub fn list_items_in(&self, state: ItemState, search: &str) -> Result<Vec<BwItem>, BwError> {
         self.require_unlocked()?;
         let needle = search.trim().to_lowercase();
-        Ok(ranked_search_results(&self.items, &needle))
+        Ok(ranked_search_results(
+            self.items.iter().filter(|item| item.state == state),
+            &needle,
+        ))
     }
 
     /// Base URL of the icon service that belongs to this server.
@@ -358,8 +384,150 @@ impl BwClient {
         Ok(self
             .items
             .iter()
+            .filter(|item| item.state == ItemState::Active)
             .filter_map(|item| item.ssh_key.clone())
             .collect())
+    }
+
+    pub fn apply_action(&mut self, id: &str, action: ItemAction) -> Result<(), BwError> {
+        self.require_unlocked()?;
+        let state = self.get_item(id)?.state;
+        if !action_allowed(action, state) {
+            return Err(BwError::Cli(format!(
+                "{action:?} is not available for an item that is {state:?}"
+            )));
+        }
+        let (method, path) = match action {
+            ItemAction::Archive => (Method::PUT, format!("{}/archive", cipher_path(id)?)),
+            ItemAction::Unarchive => (Method::PUT, format!("{}/unarchive", cipher_path(id)?)),
+            ItemAction::Trash => (Method::PUT, format!("{}/delete", cipher_path(id)?)),
+            ItemAction::Restore => (Method::PUT, format!("{}/restore", cipher_path(id)?)),
+            ItemAction::DeleteForever => (Method::DELETE, cipher_path(id)?),
+        };
+        let response = self.send_authed(method, &path, None)?;
+        let response = expect_success(response, &format!("{action:?}"))?;
+
+        if action == ItemAction::DeleteForever {
+            self.items.retain(|item| item.id != id);
+            self.ciphers.remove(id);
+            return Ok(());
+        }
+
+        // Some endpoints answer with the updated cipher and some with nothing. Either way
+        // the stored copy must carry the new revision date, or the next edit is rejected
+        // as out of date.
+        let body = response.text().unwrap_or_default();
+        let raw = serde_json::from_str::<Value>(&body)
+            .ok()
+            .filter(looks_like_cipher)
+            .map(Ok)
+            .unwrap_or_else(|| self.fetch_cipher(id));
+        match raw.and_then(|raw| self.replace_cipher(raw)) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                // The change went through; keep the list right even if the refresh failed.
+                if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
+                    item.state = state_after(action);
+                    item.dates.state_changed_at =
+                        (item.state != ItemState::Active).then(iso8601_now);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub fn edit_draft(&self, id: &str) -> Result<ItemDraft, BwError> {
+        self.require_unlocked()?;
+        let stored = self.ciphers.get(id).ok_or(BwError::NotFound)?;
+        ensure_editable(&stored.raw)?;
+        draft_from_raw(&stored.raw, &stored.item_key)
+    }
+
+    pub fn save_item(&mut self, id: &str, draft: &ItemDraft) -> Result<BwItemDetail, BwError> {
+        self.require_unlocked()?;
+        if self.get_item(id)?.state == ItemState::Deleted {
+            return Err(BwError::Cli("restore the item before editing it".into()));
+        }
+        let stored = self.ciphers.get(id).cloned().ok_or(BwError::NotFound)?;
+        let body = build_save_request(&stored, draft, &iso8601_now())?;
+        let response = self.send_authed(Method::PUT, &cipher_path(id)?, Some(&body))?;
+        let raw: Value = expect_success(response, "save")?
+            .json()
+            .map_err(|e| BwError::Parse(format!("save response: {e}")))?;
+        self.replace_cipher(raw)?;
+        self.get_item(id)
+    }
+
+    pub fn create_item(&mut self, draft: &ItemDraft) -> Result<BwItemDetail, BwError> {
+        self.require_unlocked()?;
+        let user_key = self.user_key.as_deref().ok_or(BwError::NotUnlocked)?;
+        let body = build_create_request(draft, user_key)?;
+        let response = self.send_authed(Method::POST, "/api/ciphers", Some(&body))?;
+        let raw: Value = expect_success(response, "create")?
+            .json()
+            .map_err(|e| BwError::Parse(format!("create response: {e}")))?;
+        let id = raw_get(&raw, "id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| BwError::Parse("create response has no item id".into()))?;
+        self.replace_cipher(raw)?;
+        self.get_item(&id)
+    }
+
+    fn fetch_cipher(&mut self, id: &str) -> Result<Value, BwError> {
+        let response = self.send_authed(Method::GET, &cipher_path(id)?, None)?;
+        expect_success(response, "load item")?
+            .json()
+            .map_err(|e| BwError::Parse(format!("cipher response: {e}")))
+    }
+
+    fn replace_cipher(&mut self, raw: Value) -> Result<(), BwError> {
+        let user_key = self.user_key.as_deref().ok_or(BwError::NotUnlocked)?;
+        let (detail, stored) =
+            decode_cipher(raw, user_key, &self.organization_keys, &self.folders)?;
+        let id = detail.id.clone();
+        match self.items.iter_mut().find(|item| item.id == id) {
+            Some(slot) => *slot = detail,
+            None => self.items.push(detail),
+        }
+        self.ciphers.insert(id, stored);
+        Ok(())
+    }
+
+    /// Sends an authenticated API request, refreshing the access token once on HTTP 401.
+    fn send_authed(
+        &mut self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Response, BwError> {
+        let response = self.send_authed_once(method.clone(), path, body)?;
+        if response.status().as_u16() == 401 && self.refresh_token.is_some() {
+            self.refresh_session()?;
+            return self.send_authed_once(method, path, body);
+        }
+        Ok(response)
+    }
+
+    fn send_authed_once(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Response, BwError> {
+        let token = self.access_token.as_deref().ok_or(BwError::NotUnlocked)?;
+        let mut request = self
+            .client
+            .request(method, format!("{}{path}", self.base_url))
+            .bearer_auth(token)
+            .header(sync_client_name_header().0, sync_client_name_header().1)
+            .header(sync_client_version_header().0, sync_client_version_header().1);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        request
+            .send()
+            .map_err(|e| BwError::Cli(format!("request to {path} failed: {e}")))
     }
 
     fn require_unlocked(&self) -> Result<(), BwError> {
@@ -449,13 +617,7 @@ impl BwClient {
     }
 
     fn sync(&mut self) -> Result<(), BwError> {
-        let mut response = self.sync_request()?;
-
-        if response.status().as_u16() == 401 && self.refresh_token.is_some() {
-            self.refresh_session()?;
-            response = self.sync_request()?;
-        }
-
+        let response = self.send_authed(Method::GET, "/api/sync?excludeDomains=true", None)?;
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().unwrap_or_default();
@@ -477,20 +639,24 @@ impl BwClient {
         let organization_keys = decrypt_organization_keys(sync.profile, user_key)?;
         let mut skipped = 0usize;
         let mut first_error = None;
-        self.items = sync
-            .ciphers
-            .into_iter()
-            .filter(|cipher| cipher.deleted_date.is_none() && cipher.archived_date.is_none())
-            .filter_map(|cipher| match decrypt_cipher(cipher, user_key, &organization_keys, &folders)
-            {
-                Ok(item) => Some(item),
+        let mut items = Vec::with_capacity(server_ciphers);
+        let mut ciphers = HashMap::with_capacity(server_ciphers);
+        for raw in sync.ciphers {
+            match decode_cipher(raw, user_key, &organization_keys, &folders) {
+                Ok((item, stored)) => {
+                    ciphers.insert(item.id.clone(), stored);
+                    items.push(item);
+                }
                 Err(e) => {
                     skipped += 1;
                     first_error.get_or_insert_with(|| e.to_string());
-                    None
                 }
-            })
-            .collect();
+            }
+        }
+        self.items = items;
+        self.ciphers = ciphers;
+        self.folders = folders;
+        self.organization_keys = organization_keys;
         self.sync_status = SyncStatus {
             server_ciphers,
             decrypted_items: self.items.len(),
@@ -499,18 +665,6 @@ impl BwClient {
         };
         self.sync_warning = decrypt_skip_warning(skipped, first_error);
         Ok(())
-    }
-
-    fn sync_request(&self) -> Result<reqwest::blocking::Response, BwError> {
-        let token = self.access_token.as_deref().ok_or(BwError::NotUnlocked)?;
-        let url = format!("{}/api/sync?excludeDomains=true", self.base_url);
-        self.client
-            .get(url)
-            .bearer_auth(token)
-            .header(sync_client_name_header().0, sync_client_name_header().1)
-            .header(sync_client_version_header().0, sync_client_version_header().1)
-            .send()
-            .map_err(|e| BwError::Cli(format!("sync request failed: {e}")))
     }
 }
 
@@ -562,9 +716,12 @@ fn search_rank(item: &BwItemDetail, needle: &str) -> Option<SearchRank> {
     })
 }
 
-fn ranked_search_results(items: &[BwItemDetail], needle: &str) -> Vec<BwItem> {
+fn ranked_search_results<'a>(
+    items: impl IntoIterator<Item = &'a BwItemDetail>,
+    needle: &str,
+) -> Vec<BwItem> {
     let mut ranked = items
-        .iter()
+        .into_iter()
         .filter_map(|item| {
             search_rank(item, needle).map(|rank| {
                 (
@@ -576,6 +733,8 @@ fn ranked_search_results(items: &[BwItemDetail], needle: &str) -> Vec<BwItem> {
                         folder: item.folder.clone(),
                         item_type: item.item_type.clone(),
                         icon_host: crate::icons::icon_host(&item.uris),
+                        state: item.state,
+                        dates: item.dates.clone(),
                     },
                 )
             })
@@ -820,8 +979,9 @@ struct SyncResponse {
     profile: Option<SyncProfileResponse>,
     #[serde(default, alias = "Folders")]
     folders: Vec<FolderResponse>,
+    /// Kept as raw JSON: edits send the server's own cipher back with only our changes.
     #[serde(default, alias = "Ciphers")]
-    ciphers: Vec<CipherResponse>,
+    ciphers: Vec<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1064,17 +1224,12 @@ fn decrypt_cipher(
     organization_keys: &HashMap<String, Vec<u8>>,
     folders: &HashMap<String, String>,
 ) -> Result<BwItemDetail, BwError> {
-    let wrapping_key = match cipher.organization_id.as_deref() {
-        Some(organization_id) => organization_keys.get(organization_id).ok_or_else(|| {
-            BwError::Cli(format!(
-                "organization cipher {organization_id} is missing an organization key"
-            ))
-        })?,
-        None => user_key,
-    };
-    let item_key = match &cipher.key {
-        Some(key) => decrypt_symmetric_key(key, wrapping_key)?,
-        None => wrapping_key.to_vec(),
+    let item_key = cipher_item_key(&cipher, user_key, organization_keys)?;
+    let state = cipher_state(&cipher);
+    let state_changed_at = match state {
+        ItemState::Deleted => cipher.deleted_date.clone(),
+        ItemState::Archived => cipher.archived_date.clone(),
+        ItemState::Active => None,
     };
     let data = cipher.data.as_ref();
     let encrypted_name = data
@@ -1197,7 +1352,487 @@ fn decrypt_cipher(
             .and_then(|id| folders.get(&id).cloned().or(Some(id))),
         item_type: item_type_name(cipher.item_type).to_string(),
         ssh_key,
+        state,
+        dates: ItemDates {
+            state_changed_at,
+            ..ItemDates::default()
+        },
     })
+}
+
+/// The key the cipher's fields are encrypted with: its own key when it has one, otherwise
+/// the organization key or the user key.
+fn cipher_item_key(
+    cipher: &CipherResponse,
+    user_key: &[u8],
+    organization_keys: &HashMap<String, Vec<u8>>,
+) -> Result<Vec<u8>, BwError> {
+    let wrapping_key = match cipher.organization_id.as_deref() {
+        Some(organization_id) => organization_keys.get(organization_id).ok_or_else(|| {
+            BwError::Cli(format!(
+                "organization cipher {organization_id} is missing an organization key"
+            ))
+        })?,
+        None => user_key,
+    };
+    match &cipher.key {
+        Some(key) => decrypt_symmetric_key(key, wrapping_key),
+        None => Ok(wrapping_key.to_vec()),
+    }
+}
+
+fn cipher_state(cipher: &CipherResponse) -> ItemState {
+    if cipher.deleted_date.is_some() {
+        ItemState::Deleted
+    } else if cipher.archived_date.is_some() {
+        ItemState::Archived
+    } else {
+        ItemState::Active
+    }
+}
+
+fn decode_cipher(
+    raw: Value,
+    user_key: &[u8],
+    organization_keys: &HashMap<String, Vec<u8>>,
+    folders: &HashMap<String, String>,
+) -> Result<(BwItemDetail, StoredCipher), BwError> {
+    let cipher: CipherResponse = serde_json::from_value(raw.clone())
+        .map_err(|e| BwError::Parse(format!("cipher: {e}")))?;
+    let item_key = cipher_item_key(&cipher, user_key, organization_keys)?;
+    let mut detail = decrypt_cipher(cipher, user_key, organization_keys, folders)?;
+    let revision_date = raw_get(&raw, "revisionDate")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    detail.dates.revision_date = revision_date.clone();
+    detail.dates.creation_date = raw_get(&raw, "creationDate")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok((
+        detail,
+        StoredCipher {
+            raw,
+            item_key,
+            revision_date,
+        },
+    ))
+}
+
+pub(crate) fn action_allowed(action: ItemAction, state: ItemState) -> bool {
+    match action {
+        ItemAction::Archive => state == ItemState::Active,
+        ItemAction::Unarchive => state == ItemState::Archived,
+        ItemAction::Trash => state != ItemState::Deleted,
+        ItemAction::Restore | ItemAction::DeleteForever => state == ItemState::Deleted,
+    }
+}
+
+pub(crate) fn state_after(action: ItemAction) -> ItemState {
+    match action {
+        ItemAction::Archive => ItemState::Archived,
+        ItemAction::Trash | ItemAction::DeleteForever => ItemState::Deleted,
+        ItemAction::Unarchive | ItemAction::Restore => ItemState::Active,
+    }
+}
+
+/// Cipher ids are UUIDs; anything else must not end up in a request path.
+fn cipher_path(id: &str) -> Result<String, BwError> {
+    if id.is_empty() || !id.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-') {
+        return Err(BwError::Cli(format!("invalid item id {id:?}")));
+    }
+    Ok(format!("/api/ciphers/{id}"))
+}
+
+fn looks_like_cipher(value: &Value) -> bool {
+    raw_get(value, "id").is_some() && raw_get(value, "type").is_some()
+}
+
+fn expect_success(response: Response, what: &str) -> Result<Response, BwError> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let body = response.text().unwrap_or_default();
+    Err(BwError::Cli(format!(
+        "{what} failed with HTTP {}: {}",
+        status.as_u16(),
+        server_error_message(&body)
+    )))
+}
+
+/// Bitwarden and Vaultwarden put a readable reason in `message`; fall back to the body.
+fn server_error_message(body: &str) -> String {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            raw_get(&value, "message")
+                .and_then(Value::as_str)
+                .filter(|message| !message.trim().is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| body.chars().take(200).collect())
+}
+
+/// Reads a key from server JSON, which uses camelCase but older servers use PascalCase.
+fn raw_get<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+    let object = value.as_object()?;
+    object
+        .get(key)
+        .or_else(|| {
+            let mut chars = key.chars();
+            let pascal = chars
+                .next()
+                .map(|first| first.to_ascii_uppercase().to_string() + chars.as_str())?;
+            object.get(&pascal)
+        })
+        .filter(|value| !value.is_null())
+}
+
+fn raw_decrypt(value: &Value, key: &str, item_key: &[u8]) -> Result<String, BwError> {
+    Ok(
+        decrypt_opt_string(raw_get(value, key).and_then(Value::as_str), item_key)?
+            .unwrap_or_default(),
+    )
+}
+
+/// The type-specific object each item type must carry at the top level.
+fn type_object_key(item_type: i64) -> Option<&'static str> {
+    match item_type {
+        1 => Some("login"),
+        2 => Some("secureNote"),
+        3 => Some("card"),
+        4 => Some("identity"),
+        5 => Some("sshKey"),
+        _ => None,
+    }
+}
+
+/// Edits are sent as the server's own JSON with our changes applied. That only works
+/// for the current camelCase format with the type data at the top level; anything else
+/// could lose data, so it is refused.
+fn ensure_editable(raw: &Value) -> Result<(), BwError> {
+    let unsupported =
+        || BwError::Cli("this item uses a server format that can't be edited here".into());
+    let object = raw.as_object().ok_or_else(unsupported)?;
+    let item_type = object.get("type").and_then(Value::as_i64).ok_or_else(unsupported)?;
+    let type_key = type_object_key(item_type).ok_or_else(unsupported)?;
+    if !object.get("name").is_some_and(Value::is_string) {
+        return Err(unsupported());
+    }
+    if !object.get(type_key).is_some_and(Value::is_object) {
+        return Err(unsupported());
+    }
+    Ok(())
+}
+
+fn draft_from_raw(raw: &Value, item_key: &[u8]) -> Result<ItemDraft, BwError> {
+    let login = match raw_get(raw, "type").and_then(Value::as_i64) {
+        Some(1) => {
+            let login = raw_get(raw, "login").cloned().unwrap_or(Value::Null);
+            let uris = raw_get(&login, "uris")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+                .iter()
+                .enumerate()
+                .map(|(idx, uri)| {
+                    Ok(DraftUri {
+                        uri: raw_decrypt(uri, "uri", item_key)?,
+                        original_index: Some(idx),
+                    })
+                })
+                .collect::<Result<Vec<_>, BwError>>()?;
+            Some(LoginDraft {
+                username: raw_decrypt(&login, "username", item_key)?,
+                password: raw_decrypt(&login, "password", item_key)?,
+                totp: raw_decrypt(&login, "totp", item_key)?,
+                uris,
+            })
+        }
+        _ => None,
+    };
+    let fields = raw_get(raw, "fields")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| {
+            Ok(DraftField {
+                name: raw_decrypt(field, "name", item_key)?,
+                value: raw_decrypt(field, "value", item_key)?,
+                kind: DraftFieldKind::from_type(
+                    raw_get(field, "type").and_then(Value::as_i64).unwrap_or(0),
+                ),
+                original_index: Some(idx),
+            })
+        })
+        .collect::<Result<Vec<_>, BwError>>()?;
+    Ok(ItemDraft {
+        name: raw_decrypt(raw, "name", item_key)?,
+        notes: raw_decrypt(raw, "notes", item_key)?,
+        login,
+        fields,
+    })
+}
+
+fn encrypt_value(plaintext: &str, key: &[u8]) -> Result<Value, BwError> {
+    encrypt_string(plaintext, key).map(Value::String)
+}
+
+/// Empty text is stored as null, the way the official clients do.
+fn encrypt_optional(plaintext: &str, key: &[u8]) -> Result<Value, BwError> {
+    if plaintext.is_empty() {
+        Ok(Value::Null)
+    } else {
+        encrypt_value(plaintext, key)
+    }
+}
+
+fn uri_checksum(uri: &str, key: &[u8]) -> Result<Value, BwError> {
+    let digest = <Sha256 as sha2::Digest>::digest(uri.as_bytes());
+    encrypt_value(&base64::engine::general_purpose::STANDARD.encode(digest), key)
+}
+
+fn validate_draft(draft: &ItemDraft) -> Result<(), BwError> {
+    if draft.name.trim().is_empty() {
+        return Err(BwError::Cli("name is required".into()));
+    }
+    if draft
+        .fields
+        .iter()
+        .any(|field| field.name.trim().is_empty() && !field.value.is_empty())
+    {
+        return Err(BwError::Cli("custom fields with a value need a name".into()));
+    }
+    Ok(())
+}
+
+/// Builds the `POST /api/ciphers` body for a new personal item: a login when the draft
+/// has login data, otherwise a secure note. Everything is encrypted with the user key.
+fn build_create_request(draft: &ItemDraft, key: &[u8]) -> Result<Value, BwError> {
+    validate_draft(draft)?;
+    let fields = draft
+        .fields
+        .iter()
+        .filter(|field| !field.name.trim().is_empty())
+        .map(|field| {
+            let kind = match field.kind {
+                DraftFieldKind::Linked => DraftFieldKind::Text,
+                kind => kind,
+            };
+            Ok(json!({
+                "type": kind.type_id(),
+                "name": encrypt_value(&field.name, key)?,
+                "value": encrypt_optional(&field.value, key)?,
+                "linkedId": null,
+            }))
+        })
+        .collect::<Result<Vec<_>, BwError>>()?;
+    let mut body = json!({
+        "type": if draft.login.is_some() { 1 } else { 2 },
+        "organizationId": null,
+        "folderId": null,
+        "name": encrypt_value(&draft.name, key)?,
+        "notes": encrypt_optional(&draft.notes, key)?,
+        "favorite": false,
+        "reprompt": 0,
+        "fields": if fields.is_empty() { Value::Null } else { Value::Array(fields) },
+        "login": null,
+        "secureNote": null,
+    });
+    match &draft.login {
+        Some(login) => {
+            let uris = login
+                .uris
+                .iter()
+                .filter(|uri| !uri.uri.trim().is_empty())
+                .map(|uri| {
+                    Ok(json!({
+                        "uri": encrypt_value(&uri.uri, key)?,
+                        "uriChecksum": uri_checksum(&uri.uri, key)?,
+                        "match": null,
+                    }))
+                })
+                .collect::<Result<Vec<_>, BwError>>()?;
+            body["login"] = json!({
+                "username": encrypt_optional(&login.username, key)?,
+                "password": encrypt_optional(&login.password, key)?,
+                "totp": encrypt_optional(&login.totp, key)?,
+                "uris": if uris.is_empty() { Value::Null } else { Value::Array(uris) },
+            });
+        }
+        None => body["secureNote"] = json!({ "type": 0 }),
+    }
+    Ok(body)
+}
+
+/// Builds the `PUT /api/ciphers/{id}` body: the stored cipher with only the fields that
+/// differ from the stored plaintext re-encrypted. Everything else (passkeys, URI match
+/// rules, favorite, reprompt, per-cipher key, ...) is sent back untouched.
+fn build_save_request(
+    stored: &StoredCipher,
+    draft: &ItemDraft,
+    now: &str,
+) -> Result<Value, BwError> {
+    ensure_editable(&stored.raw)?;
+    let key = stored.item_key.as_slice();
+    let original = draft_from_raw(&stored.raw, key)?;
+    validate_draft(draft)?;
+
+    let mut body = stored.raw.as_object().cloned().unwrap_or_default();
+    // Vaultwarden's duplicate of the item data; the request only reads the top level.
+    body.remove("data");
+
+    if draft.name != original.name {
+        body.insert("name".into(), encrypt_value(&draft.name, key)?);
+    }
+    if draft.notes != original.notes {
+        body.insert("notes".into(), encrypt_optional(&draft.notes, key)?);
+    }
+
+    if let (Some(new), Some(old)) = (&draft.login, &original.login) {
+        let mut login = body
+            .get("login")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        if new.username != old.username {
+            login.insert("username".into(), encrypt_optional(&new.username, key)?);
+        }
+        if new.totp != old.totp {
+            login.insert("totp".into(), encrypt_optional(&new.totp, key)?);
+        }
+        if new.password != old.password {
+            login.insert("password".into(), encrypt_optional(&new.password, key)?);
+            login.insert("passwordRevisionDate".into(), Value::String(now.into()));
+            if !old.password.is_empty() {
+                let mut history = body
+                    .get("passwordHistory")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                history.insert(
+                    0,
+                    json!({ "password": encrypt_value(&old.password, key)?, "lastUsedDate": now }),
+                );
+                history.truncate(PASSWORD_HISTORY_LIMIT);
+                body.insert("passwordHistory".into(), Value::Array(history));
+            }
+        }
+        let raw_uris = login
+            .get("uris")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut uris = Vec::new();
+        for uri in new.uris.iter().filter(|uri| !uri.uri.trim().is_empty()) {
+            let source = uri
+                .original_index
+                .and_then(|idx| Some((raw_uris.get(idx)?, old.uris.get(idx)?)));
+            match source {
+                Some((raw_uri, old_uri)) if old_uri.uri == uri.uri => uris.push(raw_uri.clone()),
+                Some((raw_uri, _)) => {
+                    let mut entry = raw_uri.as_object().cloned().unwrap_or_default();
+                    entry.insert("uri".into(), encrypt_value(&uri.uri, key)?);
+                    entry.insert("uriChecksum".into(), uri_checksum(&uri.uri, key)?);
+                    uris.push(Value::Object(entry));
+                }
+                None => uris.push(json!({
+                    "uri": encrypt_value(&uri.uri, key)?,
+                    "uriChecksum": uri_checksum(&uri.uri, key)?,
+                    "match": null,
+                })),
+            }
+        }
+        login.insert(
+            "uris".into(),
+            if uris.is_empty() { Value::Null } else { Value::Array(uris) },
+        );
+        body.insert("login".into(), Value::Object(login));
+    }
+
+    let raw_fields = body
+        .get("fields")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut fields = Vec::new();
+    for field in &draft.fields {
+        if field.original_index.is_none() && field.name.trim().is_empty() {
+            continue;
+        }
+        let source = field
+            .original_index
+            .and_then(|idx| Some((raw_fields.get(idx)?, original.fields.get(idx)?)));
+        match source {
+            Some((raw_field, old_field)) => {
+                let mut entry = raw_field.as_object().cloned().unwrap_or_default();
+                if field.name != old_field.name {
+                    entry.insert("name".into(), encrypt_optional(&field.name, key)?);
+                }
+                if field.kind != DraftFieldKind::Linked && field.value != old_field.value {
+                    entry.insert("value".into(), encrypt_optional(&field.value, key)?);
+                }
+                entry.insert("type".into(), json!(field.kind.type_id()));
+                fields.push(Value::Object(entry));
+            }
+            None => {
+                // A new field has nothing to link to, so it can't be a linked field.
+                let kind = match field.kind {
+                    DraftFieldKind::Linked => DraftFieldKind::Text,
+                    kind => kind,
+                };
+                fields.push(json!({
+                    "type": kind.type_id(),
+                    "name": encrypt_optional(&field.name, key)?,
+                    "value": encrypt_optional(&field.value, key)?,
+                    "linkedId": null,
+                }));
+            }
+        }
+    }
+    body.insert(
+        "fields".into(),
+        if fields.is_empty() { Value::Null } else { Value::Array(fields) },
+    );
+
+    if let Some(revision) = &stored.revision_date {
+        body.insert("lastKnownRevisionDate".into(), Value::String(revision.clone()));
+    }
+    Ok(Value::Object(body))
+}
+
+/// Current UTC time as `YYYY-MM-DDTHH:MM:SS.mmmZ`, the format the server uses.
+pub(crate) fn iso8601_now() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    iso8601_from_unix_ms(now.as_millis() as i64)
+}
+
+fn iso8601_from_unix_ms(unix_ms: i64) -> String {
+    let secs = unix_ms.div_euclid(1000);
+    let millis = unix_ms.rem_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let second_of_day = secs.rem_euclid(86_400);
+    // Civil-from-days, from Howard Hinnant's date algorithms.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let mp = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z",
+        second_of_day / 3600,
+        second_of_day % 3600 / 60,
+        second_of_day % 60
+    )
 }
 
 fn decrypt_ssh_key_data(
@@ -1553,6 +2188,42 @@ fn decrypt_symmetric_key(encrypted_key: &str, wrapping_key: &[u8]) -> Result<Vec
     )))
 }
 
+/// Encrypts as type 2 (AES-256-CBC with HMAC-SHA256) under a fresh random IV.
+fn encrypt_string(plaintext: &str, key: &[u8]) -> Result<String, BwError> {
+    let iv = crate::random::random_bytes::<16>()
+        .map_err(|e| BwError::Cli(format!("could not read random bytes: {e}")))?;
+    encrypt_bytes_with_iv(plaintext.as_bytes(), key, iv)
+}
+
+fn encrypt_bytes_with_iv(plaintext: &[u8], key: &[u8], iv: [u8; 16]) -> Result<String, BwError> {
+    let stretched_key;
+    let key = if key.len() == 32 {
+        stretched_key = stretch_key(key)?;
+        stretched_key.as_slice()
+    } else {
+        key
+    };
+    if key.len() < 64 {
+        return Err(BwError::Parse(
+            "AES-CBC-HMAC encryption needs a 64 byte symmetric key".into(),
+        ));
+    }
+    let ciphertext = Aes256CbcEnc::new_from_slices(&key[..32], &iv)
+        .map_err(|e| BwError::Parse(format!("invalid AES-CBC key/iv: {e}")))?
+        .encrypt_padded_vec_mut::<Pkcs7>(plaintext);
+    let mut mac = HmacSha256::new_from_slice(&key[32..64])
+        .map_err(|e| BwError::Parse(format!("invalid HMAC key: {e}")))?;
+    mac.update(&iv);
+    mac.update(&ciphertext);
+    let engine = base64::engine::general_purpose::STANDARD;
+    Ok(format!(
+        "2.{}|{}|{}",
+        engine.encode(iv),
+        engine.encode(ciphertext),
+        engine.encode(mac.finalize().into_bytes())
+    ))
+}
+
 fn decrypt_opt_string(value: Option<&str>, key: &[u8]) -> Result<Option<String>, BwError> {
     value.map(|value| decrypt_string(value, key))
         .transpose()
@@ -1759,29 +2430,13 @@ fn parse_totp_seed(seed: &str) -> Result<(Vec<u8>, u32, u64), BwError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cbc::cipher::BlockEncryptMut;
-
-    type Aes256CbcEnc = cbc::Encryptor<Aes256>;
 
     fn encrypt_string(plaintext: &str, key: &[u8]) -> String {
         encrypt_bytes(plaintext.as_bytes(), key)
     }
 
     fn encrypt_bytes(plaintext: &[u8], key: &[u8]) -> String {
-        let iv = [11u8; 16];
-        let ciphertext = Aes256CbcEnc::new_from_slices(&key[..32], &iv)
-            .unwrap()
-            .encrypt_padded_vec_mut::<Pkcs7>(plaintext);
-        let mut mac = HmacSha256::new_from_slice(&key[32..64]).unwrap();
-        mac.update(&iv);
-        mac.update(&ciphertext);
-        let mac = mac.finalize().into_bytes();
-        format!(
-            "2.{}|{}|{}",
-            base64::engine::general_purpose::STANDARD.encode(iv),
-            base64::engine::general_purpose::STANDARD.encode(ciphertext),
-            base64::engine::general_purpose::STANDARD.encode(mac)
-        )
+        encrypt_bytes_with_iv(plaintext, key, [11u8; 16]).unwrap()
     }
 
     fn empty_cipher(id: &str, name: String) -> CipherResponse {
@@ -2237,6 +2892,8 @@ mod tests {
             folder: Some("Infrastructure".into()),
             item_type: "login".into(),
             ssh_key: None,
+            state: ItemState::Active,
+            dates: ItemDates::default(),
         };
 
         assert!(item_matches_search(&item, "production"));
@@ -2287,6 +2944,8 @@ mod tests {
             folder: None,
             item_type: "login".into(),
             ssh_key: None,
+            state: ItemState::Active,
+            dates: ItemDates::default(),
         }
     }
 
@@ -2330,12 +2989,13 @@ mod tests {
 
         assert_eq!(sync.profile.unwrap().organizations[0].id, "org-1");
         assert_eq!(sync.folders[0].id, "folder-1");
-        assert_eq!(sync.ciphers[0].id, "cipher-1");
-        assert_eq!(sync.ciphers[0].organization_id.as_deref(), Some("org-1"));
-        assert_eq!(sync.ciphers[0].folder_id.as_deref(), Some("folder-1"));
-        assert_eq!(sync.ciphers[0].item_type, 1);
+        let cipher: CipherResponse = serde_json::from_value(sync.ciphers[0].clone()).unwrap();
+        assert_eq!(cipher.id, "cipher-1");
+        assert_eq!(cipher.organization_id.as_deref(), Some("org-1"));
+        assert_eq!(cipher.folder_id.as_deref(), Some("folder-1"));
+        assert_eq!(cipher.item_type, 1);
         assert_eq!(
-            sync.ciphers[0]
+            cipher
                 .login
                 .as_ref()
                 .unwrap()
@@ -2374,7 +3034,7 @@ mod tests {
         )
         .unwrap();
 
-        let cipher = &sync.ciphers[0];
+        let cipher: CipherResponse = serde_json::from_value(sync.ciphers[0].clone()).unwrap();
         assert!(cipher.name.is_none());
         assert_eq!(
             cipher.data.as_ref().unwrap().name.as_deref(),
@@ -2409,5 +3069,272 @@ mod tests {
             response.available_providers(),
             vec![TwoFactorProvider::Authenticator, TwoFactorProvider::Email]
         );
+    }
+
+    #[test]
+    fn encrypt_string_round_trips_with_random_iv() {
+        for key in [vec![21u8; 32], vec![22u8; 64]] {
+            let first = super::encrypt_string("hunter2", &key).unwrap();
+            let second = super::encrypt_string("hunter2", &key).unwrap();
+
+            assert_ne!(first, second, "each value gets its own IV");
+            assert_eq!(decrypt_string(&first, &key).unwrap().as_deref(), Some("hunter2"));
+            assert_eq!(decrypt_string(&second, &key).unwrap().as_deref(), Some("hunter2"));
+        }
+    }
+
+    #[test]
+    fn formats_iso8601_timestamps() {
+        assert_eq!(iso8601_from_unix_ms(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(iso8601_from_unix_ms(951_782_400_123), "2000-02-29T00:00:00.123Z");
+        assert_eq!(iso8601_from_unix_ms(1_790_762_163_576), "2026-09-30T09:56:03.576Z");
+    }
+
+    #[test]
+    fn decodes_item_state_from_dates() {
+        let key = [23u8; 64];
+        let cipher = |deleted: Value, archived: Value| {
+            json!({
+                "id": "c", "type": 2, "name": encrypt_string("Note", &key),
+                "secureNote": {"type": 0},
+                "deletedDate": deleted, "archivedDate": archived,
+                "revisionDate": "2026-01-01T00:00:00.000Z",
+            })
+        };
+        let state = |raw: Value| {
+            decode_cipher(raw, &key, &HashMap::new(), &HashMap::new()).unwrap().0.state
+        };
+
+        assert_eq!(state(cipher(Value::Null, Value::Null)), ItemState::Active);
+        assert_eq!(state(cipher(Value::Null, json!("2026-02-02"))), ItemState::Archived);
+        assert_eq!(state(cipher(json!("2026-02-02"), json!("2026-02-02"))), ItemState::Deleted);
+        let (_, stored) = decode_cipher(
+            cipher(Value::Null, Value::Null),
+            &key,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(stored.revision_date.as_deref(), Some("2026-01-01T00:00:00.000Z"));
+    }
+
+    #[test]
+    fn only_allows_actions_that_fit_the_item_state() {
+        use ItemAction::*;
+        assert!(action_allowed(Archive, ItemState::Active));
+        assert!(!action_allowed(Archive, ItemState::Archived));
+        assert!(action_allowed(Unarchive, ItemState::Archived));
+        assert!(action_allowed(Trash, ItemState::Archived));
+        assert!(!action_allowed(Trash, ItemState::Deleted));
+        assert!(action_allowed(Restore, ItemState::Deleted));
+        assert!(!action_allowed(DeleteForever, ItemState::Active));
+        assert!(action_allowed(DeleteForever, ItemState::Deleted));
+    }
+
+    #[test]
+    fn rejects_ids_that_are_not_uuids_in_paths() {
+        assert_eq!(
+            cipher_path("0b6f-AB12").unwrap(),
+            "/api/ciphers/0b6f-AB12"
+        );
+        assert!(cipher_path("../sync").is_err());
+        assert!(cipher_path("").is_err());
+    }
+
+    fn editable_login(key: &[u8]) -> StoredCipher {
+        let enc = |value: &str| encrypt_string(value, key);
+        let history = (0..5)
+            .map(|idx| json!({"password": enc(&format!("old-{idx}")), "lastUsedDate": "2025-01-01"}))
+            .collect::<Vec<_>>();
+        let raw = json!({
+            "id": "cipher-edit",
+            "type": 1,
+            "name": enc("Example"),
+            "notes": null,
+            "favorite": true,
+            "reprompt": 1,
+            "key": null,
+            "revisionDate": "2026-03-04T05:06:07.000Z",
+            "login": {
+                "username": enc("alice"),
+                "password": enc("current-password"),
+                "totp": null,
+                "uris": [
+                    {"uri": enc("https://one.example"), "match": 0, "uriChecksum": enc("x")},
+                    {"uri": enc("https://two.example"), "match": 3, "uriChecksum": enc("y")},
+                ],
+                "fido2Credentials": [{"credentialId": enc("passkey")}],
+            },
+            "fields": [
+                {"type": 0, "name": enc("Env"), "value": enc("prod"), "linkedId": null},
+                {"type": 3, "name": enc("Linked"), "value": null, "linkedId": 100},
+            ],
+            "passwordHistory": history,
+            "data": {"name": enc("Example")},
+        });
+        StoredCipher {
+            raw,
+            item_key: key.to_vec(),
+            revision_date: Some("2026-03-04T05:06:07.000Z".into()),
+        }
+    }
+
+    #[test]
+    fn draft_reads_login_uris_and_fields() {
+        let key = [24u8; 64];
+        let stored = editable_login(&key);
+
+        let draft = draft_from_raw(&stored.raw, &key).unwrap();
+
+        assert_eq!(draft.name, "Example");
+        let login = draft.login.unwrap();
+        assert_eq!(login.username, "alice");
+        assert_eq!(login.password, "current-password");
+        assert_eq!(login.uris[1].uri, "https://two.example");
+        assert_eq!(login.uris[1].original_index, Some(1));
+        assert_eq!(draft.fields[0].name, "Env");
+        assert_eq!(draft.fields[1].kind, DraftFieldKind::Linked);
+    }
+
+    #[test]
+    fn save_request_changes_only_edited_fields() {
+        let key = [25u8; 64];
+        let stored = editable_login(&key);
+        let mut draft = draft_from_raw(&stored.raw, &key).unwrap();
+        let login = draft.login.as_mut().unwrap();
+        login.password = "new-password".into();
+        login.uris[1].uri = "https://three.example".into();
+        draft.fields[0].name = "Environment".into();
+        draft.fields.push(DraftField {
+            name: "PIN".into(),
+            value: "1234".into(),
+            kind: DraftFieldKind::Hidden,
+            original_index: None,
+        });
+
+        let body = build_save_request(&stored, &draft, "2026-09-30T10:00:00.000Z").unwrap();
+        let raw = &stored.raw;
+        let dec = |value: &Value| decrypt_string(value.as_str().unwrap(), &key).unwrap().unwrap();
+
+        // Untouched data goes back byte for byte.
+        assert_eq!(body["name"], raw["name"]);
+        assert_eq!(body["favorite"], raw["favorite"]);
+        assert_eq!(body["reprompt"], raw["reprompt"]);
+        assert_eq!(body["login"]["username"], raw["login"]["username"]);
+        assert_eq!(body["login"]["fido2Credentials"], raw["login"]["fido2Credentials"]);
+        assert_eq!(body["login"]["uris"][0], raw["login"]["uris"][0]);
+        assert!(body.get("data").is_none());
+        // Edited values are re-encrypted, keeping their extra settings.
+        assert_eq!(dec(&body["login"]["password"]), "new-password");
+        assert_eq!(body["login"]["passwordRevisionDate"], "2026-09-30T10:00:00.000Z");
+        assert_eq!(dec(&body["login"]["uris"][1]["uri"]), "https://three.example");
+        assert_eq!(body["login"]["uris"][1]["match"], 3);
+        assert_eq!(dec(&body["fields"][0]["name"]), "Environment");
+        assert_eq!(body["fields"][0]["value"], raw["fields"][0]["value"]);
+        assert_eq!(body["fields"][1], raw["fields"][1]);
+        assert_eq!(body["fields"][2]["type"], 1);
+        assert_eq!(dec(&body["fields"][2]["value"]), "1234");
+        // The old password leads the history, which stays at five entries.
+        let history = body["passwordHistory"].as_array().unwrap();
+        assert_eq!(history.len(), 5);
+        assert_eq!(dec(&history[0]["password"]), "current-password");
+        assert_eq!(dec(&history[1]["password"]), "old-0");
+        assert_eq!(body["lastKnownRevisionDate"], "2026-03-04T05:06:07.000Z");
+    }
+
+    #[test]
+    fn save_request_drops_removed_uris_and_fields() {
+        let key = [26u8; 64];
+        let stored = editable_login(&key);
+        let mut draft = draft_from_raw(&stored.raw, &key).unwrap();
+        draft.login.as_mut().unwrap().uris.remove(0);
+        draft.fields.clear();
+
+        let body = build_save_request(&stored, &draft, "now").unwrap();
+
+        assert_eq!(body["login"]["uris"].as_array().unwrap().len(), 1);
+        assert_eq!(body["login"]["uris"][0], stored.raw["login"]["uris"][1]);
+        assert!(body["fields"].is_null());
+        assert!(body["passwordHistory"] == stored.raw["passwordHistory"]);
+    }
+
+    #[test]
+    fn save_request_validates_draft() {
+        let key = [27u8; 64];
+        let stored = editable_login(&key);
+        let mut draft = draft_from_raw(&stored.raw, &key).unwrap();
+        draft.name = "  ".into();
+        assert!(build_save_request(&stored, &draft, "now").is_err());
+
+        let mut draft = draft_from_raw(&stored.raw, &key).unwrap();
+        draft.fields[0].name.clear();
+        assert!(build_save_request(&stored, &draft, "now").is_err());
+    }
+
+    #[test]
+    fn refuses_to_edit_nested_only_ciphers() {
+        let key = [28u8; 64];
+        let raw = json!({
+            "id": "c", "type": 1,
+            "data": {"name": encrypt_string("Old format", &key), "username": null},
+        });
+
+        assert!(ensure_editable(&raw).is_err());
+        assert!(ensure_editable(&editable_login(&key).raw).is_ok());
+    }
+
+    #[test]
+    fn create_request_encrypts_login_and_decodes_back() {
+        let key = [29u8; 64];
+        let draft = ItemDraft {
+            name: "Throwaway".into(),
+            notes: String::new(),
+            login: Some(LoginDraft {
+                username: "tester".into(),
+                password: "pw".into(),
+                totp: String::new(),
+                uris: vec![DraftUri { uri: "https://t.example".into(), original_index: None }],
+            }),
+            fields: vec![DraftField {
+                name: "Pin".into(),
+                value: "42".into(),
+                kind: DraftFieldKind::Hidden,
+                original_index: None,
+            }],
+        };
+
+        let mut body = build_create_request(&draft, &key).unwrap();
+
+        assert_eq!(body["type"], 1);
+        assert!(body["notes"].is_null());
+        assert!(body["login"]["totp"].is_null());
+        assert!(body["secureNote"].is_null());
+        // Round-trip the request as if the server echoed it back.
+        body["id"] = json!("new-id");
+        let (detail, _) = decode_cipher(body, &key, &HashMap::new(), &HashMap::new()).unwrap();
+        assert_eq!(detail.name, "Throwaway");
+        assert_eq!(detail.username.as_deref(), Some("tester"));
+        assert_eq!(detail.password.as_deref(), Some("pw"));
+        assert_eq!(detail.uris, vec!["https://t.example".to_string()]);
+        assert_eq!(detail.custom_fields[0].value, "42");
+        assert!(detail.custom_fields[0].hidden);
+    }
+
+    #[test]
+    fn create_request_without_login_is_a_secure_note() {
+        let key = [30u8; 32];
+        let draft = ItemDraft {
+            name: "Note".into(),
+            notes: "text".into(),
+            ..ItemDraft::default()
+        };
+
+        let body = build_create_request(&draft, &key).unwrap();
+
+        assert_eq!(body["type"], 2);
+        assert_eq!(body["secureNote"]["type"], 0);
+        assert!(body["login"].is_null());
+        assert_eq!(decrypt_string(body["notes"].as_str().unwrap(), &key).unwrap().as_deref(), Some("text"));
+        assert!(build_create_request(&ItemDraft::default(), &key).is_err(), "name is required");
     }
 }

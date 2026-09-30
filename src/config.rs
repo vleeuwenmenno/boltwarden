@@ -9,6 +9,40 @@ const DEVICE_ID_FILE: &str = "device-id";
 const SESSION_FILE: &str = "session.json";
 const SETTINGS_FILE: &str = "settings.json";
 const RECENT_ITEM_FILE: &str = "recent-item.json";
+const ITEM_USAGE_FILE: &str = "item-usage.json";
+/// How many recently opened items the "Recently used" start list remembers.
+pub const ITEM_USAGE_LIMIT: usize = 20;
+
+/// What an empty search shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartList {
+    #[default]
+    None,
+    RecentlyUsed,
+    RecentlyEdited,
+    RecentlyCreated,
+}
+
+impl StartList {
+    pub fn next(self) -> Self {
+        match self {
+            Self::None => Self::RecentlyUsed,
+            Self::RecentlyUsed => Self::RecentlyEdited,
+            Self::RecentlyEdited => Self::RecentlyCreated,
+            Self::RecentlyCreated => Self::None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::RecentlyUsed => "Recently used",
+            Self::RecentlyEdited => "Recently edited",
+            Self::RecentlyCreated => "Recently created",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -32,6 +66,8 @@ pub struct AppSettings {
     /// Fetch website icons from the vault server's icon service (cached on disk).
     #[serde(default = "default_true")]
     pub show_website_icons: bool,
+    #[serde(default)]
+    pub start_list: StartList,
 }
 
 impl Default for AppSettings {
@@ -46,6 +82,7 @@ impl Default for AppSettings {
             lock_after_idle_timeout: true,
             idle_lock_timeout_minutes: default_idle_lock_timeout_minutes(),
             show_website_icons: true,
+            start_list: StartList::None,
         }
     }
 }
@@ -234,6 +271,70 @@ pub fn save_recent_item(id: &str) -> io::Result<()> {
         fs::write(path, data)?;
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct ItemUse {
+    id: String,
+    used_at_unix_ms: u64,
+}
+
+/// Ids of recently opened items, most recent first. Only item ids are stored.
+pub fn load_item_usage() -> Vec<String> {
+    read_item_usage().into_iter().map(|entry| entry.id).collect()
+}
+
+fn read_item_usage() -> Vec<ItemUse> {
+    config_path(ITEM_USAGE_FILE)
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|data| serde_json::from_str(&data).ok())
+        .unwrap_or_default()
+}
+
+pub fn record_item_use(id: &str) -> io::Result<()> {
+    let mut entries = read_item_usage();
+    entries.retain(|entry| entry.id != id);
+    entries.insert(
+        0,
+        ItemUse {
+            id: id.to_string(),
+            used_at_unix_ms: unix_millis_now(),
+        },
+    );
+    entries.truncate(ITEM_USAGE_LIMIT);
+    let data = serde_json::to_vec_pretty(&entries)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    write_private(ITEM_USAGE_FILE, &data)
+}
+
+pub fn clear_item_usage() -> io::Result<()> {
+    let Some(path) = config_path(ITEM_USAGE_FILE) else {
+        return Ok(());
+    };
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Writes a config file readable only by the current user.
+fn write_private(file_name: &str, data: &[u8]) -> io::Result<()> {
+    let path = config_path(file_name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "config directory unavailable"))?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    {
+        let mut options = fs::OpenOptions::new();
+        options.create(true).truncate(true).write(true).mode(0o600);
+        std::io::Write::write_all(&mut options.open(path)?, data)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, data)
+    }
 }
 
 pub fn clear_recent_item() -> io::Result<()> {
@@ -453,6 +554,7 @@ mod tests {
             lock_after_idle_timeout: false,
             idle_lock_timeout_minutes: 15,
             show_website_icons: true,
+            start_list: StartList::None,
         })
         .unwrap();
         let actual = load_settings();
@@ -475,6 +577,7 @@ mod tests {
             lock_after_idle_timeout: true,
             idle_lock_timeout_minutes: 60,
             show_website_icons: true,
+            start_list: StartList::None,
         })
         .unwrap();
         let actual = load_settings();
@@ -549,6 +652,35 @@ mod tests {
         assert!(expand_ssh_agent_socket_path("/tmp").is_err());
 
         restore_var("HOME", previous_home);
+    }
+
+    #[test]
+    fn records_recent_item_usage_newest_first_without_duplicates() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = std::env::temp_dir().join(format!(
+            "bw-quick-access-config-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", temp.join("config"));
+        }
+
+        assert!(load_item_usage().is_empty());
+        for id in ["a", "b", "a", "c"] {
+            record_item_use(id).unwrap();
+        }
+        assert_eq!(load_item_usage(), ["c", "a", "b"]);
+        for idx in 0..(ITEM_USAGE_LIMIT + 5) {
+            record_item_use(&format!("item-{idx}")).unwrap();
+        }
+        assert_eq!(load_item_usage().len(), ITEM_USAGE_LIMIT);
+
+        clear_item_usage().unwrap();
+        assert!(load_item_usage().is_empty());
+
+        restore_var("XDG_CONFIG_HOME", previous_config_home);
+        let _ = fs::remove_dir_all(temp);
     }
 
     #[test]
