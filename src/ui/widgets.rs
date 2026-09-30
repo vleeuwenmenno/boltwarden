@@ -334,6 +334,18 @@ pub fn confirm_dialog(ctx: &egui::Context, dialog: &ConfirmDialog<'_>) -> Option
     result
 }
 
+/// "2026-05-17T08:12:00.000Z" -> "17 May 2026". `None` for anything else.
+pub fn format_date(iso: &str) -> Option<String> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let year = iso.get(0..4)?.parse::<u32>().ok()?;
+    let month = iso.get(5..7)?.parse::<usize>().ok()?;
+    let day = iso.get(8..10)?.parse::<u32>().ok()?;
+    let name = MONTHS.get(month.checked_sub(1)?)?;
+    Some(format!("{day} {name} {year}"))
+}
+
 pub fn error_line(ui: &mut Ui, text: &str) {
     let t = theme();
     ui.label(RichText::new(format!("{} {text}", t.icon("\u{f071}", "⚠"))).color(t.danger));
@@ -598,6 +610,19 @@ fn enter_glyph(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
         [egui::pos2(left, mid_y), egui::pos2(left + 3.5, mid_y + 3.0)],
         stroke,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn formats_server_dates() {
+        assert_eq!(
+            super::format_date("2026-05-17T08:12:00.000Z").as_deref(),
+            Some("17 May 2026")
+        );
+        assert_eq!(super::format_date("2026-13-01"), None);
+        assert_eq!(super::format_date("soon"), None);
+    }
 }
 
 fn arrow(painter: &egui::Painter, center: egui::Pos2, delta: egui::Vec2, color: Color32) {

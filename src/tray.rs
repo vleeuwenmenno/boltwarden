@@ -7,6 +7,8 @@ static TRAY_ICONS: LazyLock<Vec<ksni::Icon>> = LazyLock::new(|| {
         render_tray_icon(16),
         render_tray_icon(22),
         render_tray_icon(32),
+        render_tray_icon(48),
+        render_tray_icon(64),
     ]
 });
 
@@ -15,6 +17,7 @@ pub enum TrayCommand {
     Show,
     Hide,
     Toggle,
+    Window,
     Quit,
 }
 
@@ -83,6 +86,13 @@ impl ksni::Tray for AppTray {
                 ..Default::default()
             }
             .into(),
+            StandardItem {
+                label: "Open vault window".into(),
+                icon_name: "view-fullscreen".into(),
+                activate: Box::new(|tray: &mut Self| tray.send(TrayCommand::Window)),
+                ..Default::default()
+            }
+            .into(),
             MenuItem::Separator,
             StandardItem {
                 label: "Quit".into(),
@@ -99,81 +109,41 @@ pub fn spawn(tx: mpsc::Sender<TrayCommand>) -> Result<Handle<AppTray>, ksni::Err
     AppTray::new(tx).assume_sni_available(true).spawn()
 }
 
+/// The Bitwarden shield (Simple Icons' monochrome mark), in the theme's text color so
+/// it sits in the bar like the other tray icons.
+const BITWARDEN_SHIELD: &str = "M21.722.296A.964.964 0 0 0 21.018 0H2.982a.959.959 0 0 0-.703.296.96.96 0 0 0-.297.702v12c0 .895.174 1.783.523 2.665.349.88.783 1.66 1.3 2.345.517.68 1.132 1.346 1.848 1.993a21.807 21.807 0 0 0 1.98 1.609c.605.427 1.235.83 1.893 1.212.657.381 1.125.638 1.4.772.276.134.5.241.664.311a.916.916 0 0 0 .814 0c.168-.073.389-.177.667-.311.275-.134.743-.394 1.401-.772a25.305 25.305 0 0 0 1.894-1.212A21.891 21.891 0 0 0 18.348 20c.716-.647 1.33-1.31 1.847-1.993s.949-1.463 1.3-2.345c.35-.879.524-1.767.524-2.665V1.001a.95.95 0 0 0-.297-.705zm-2.325 12.815c0 4.344-7.397 8.087-7.397 8.087V2.57h7.397v10.54z";
+
 fn render_tray_icon(size: i32) -> ksni::Icon {
-    let mut data = Vec::with_capacity((size * size * 4) as usize);
-    let samples = 4;
-    for y in 0..size {
-        for x in 0..size {
-            let mut coverage = 0.0;
-            let mut highlight = 0.0;
-            let mut cutout = 0.0;
-
-            for sy in 0..samples {
-                for sx in 0..samples {
-                    let px = (x as f32 + (sx as f32 + 0.5) / samples as f32) / size as f32;
-                    let py = (y as f32 + (sy as f32 + 0.5) / samples as f32) / size as f32;
-                    if in_shield(px, py) {
-                        coverage += 1.0;
-                        if py < 0.22 && px > 0.30 && px < 0.70 {
-                            highlight += 1.0;
-                        }
-                        if in_keyhole(px, py) {
-                            cutout += 1.0;
-                        }
-                    }
-                }
-            }
-
-            let total = (samples * samples) as f32;
-            let shield_alpha = coverage / total;
-            let cutout_alpha = (cutout / total).min(shield_alpha);
-            let visible_alpha = (shield_alpha - cutout_alpha).clamp(0.0, 1.0);
-            let highlight_mix = if coverage > 0.0 {
-                (highlight / coverage).clamp(0.0, 1.0) * 0.28
-            } else {
-                0.0
-            };
-
-            let base = [23.0, 93.0, 220.0];
-            let light = [71.0, 147.0, 255.0];
-            let r = mix(base[0], light[0], highlight_mix) as u8;
-            let g = mix(base[1], light[1], highlight_mix) as u8;
-            let b = mix(base[2], light[2], highlight_mix) as u8;
-            let a = (visible_alpha * 255.0).round() as u8;
-
-            data.extend_from_slice(&[a, r, g, b]);
+    use resvg::{tiny_skia, usvg};
+    let color = crate::ui::theme::theme().text;
+    let svg = format!(
+        r##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="#{:02x}{:02x}{:02x}" d="{BITWARDEN_SHIELD}"/></svg>"##,
+        color.r(),
+        color.g(),
+        color.b()
+    );
+    let mut data = vec![0; (size * size * 4) as usize];
+    let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).expect("valid tray icon");
+    if let Some(mut pixmap) = tiny_skia::Pixmap::new(size as u32, size as u32) {
+        // A little inset keeps the shield from touching the bar's edges.
+        let scale = size as f32 * 0.9 / 24.0;
+        let offset = size as f32 * 0.05;
+        resvg::render(
+            &tree,
+            tiny_skia::Transform::from_scale(scale, scale).post_translate(offset, offset),
+            &mut pixmap.as_mut(),
+        );
+        // StatusNotifierItem pixmaps are ARGB32 in network byte order, straight alpha.
+        for (pixel, out) in pixmap.pixels().iter().zip(data.chunks_exact_mut(4)) {
+            let color = pixel.demultiply();
+            out.copy_from_slice(&[color.alpha(), color.red(), color.green(), color.blue()]);
         }
     }
-
     ksni::Icon {
         width: size,
         height: size,
         data,
     }
-}
-
-fn in_shield(x: f32, y: f32) -> bool {
-    let left = if y < 0.22 {
-        0.25
-    } else if y < 0.58 {
-        0.18 + (y - 0.22) * 0.11
-    } else {
-        0.22 + (y - 0.58) * 0.76
-    };
-    let right = 1.0 - left;
-    y >= 0.08 && y <= 0.92 && x >= left && x <= right
-}
-
-fn in_keyhole(x: f32, y: f32) -> bool {
-    let dx = x - 0.50;
-    let dy = y - 0.42;
-    let head = dx * dx + dy * dy <= 0.105 * 0.105;
-    let stem = x >= 0.455 && x <= 0.545 && y >= 0.47 && y <= 0.70;
-    head || stem
-}
-
-fn mix(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
 }
 
 #[cfg(test)]

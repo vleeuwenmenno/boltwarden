@@ -5,6 +5,7 @@ mod bw;
 mod clipboard;
 mod config;
 mod demo;
+mod health;
 mod icons;
 mod instance;
 mod model;
@@ -15,6 +16,7 @@ mod ssh_agent;
 mod tray;
 mod ui;
 mod unix_socket;
+mod window;
 
 use app::{App, PopupCommand};
 use backend::AppBackend;
@@ -33,12 +35,17 @@ use std::time::{Duration, Instant};
 use tray::TrayCommand;
 
 const POPUP_TOKEN_PREFIX: &str = "token ";
+/// Internal flag that starts the vault window process; users run `bw-quick-access window`.
+const WINDOW_FLAG: &str = "--vault-window";
+const POPUP_FLAG: &str = "--popup";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonCommand {
     Show,
     Hide,
     Toggle,
+    ShowWindow,
+    ToggleWindow,
     Quit,
 }
 
@@ -51,6 +58,8 @@ type PopupChild = Arc<Mutex<Option<PopupProcess>>>;
 
 struct VaultState {
     popup: PopupChild,
+    /// The full vault window, a second client process next to the popup.
+    window: PopupChild,
     clipboard: clipboard::Clipboard,
     auto_lock_warning: Option<String>,
     bw: BwClient,
@@ -73,6 +82,9 @@ fn main() -> eframe::Result<()> {
     if std::env::args().any(|arg| arg == "--popup") {
         return run_popup();
     }
+    if std::env::args().any(|arg| arg == WINDOW_FLAG) {
+        return run_window();
+    }
 
     let launch_command = LaunchCommand::from_args(std::env::args().skip(1));
     let show_on_start = launch_command != LaunchCommand::Daemon;
@@ -89,11 +101,13 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
     let (approval_show_tx, approval_show_rx) = mpsc::channel();
     let (unlock_show_tx, unlock_show_rx) = mpsc::channel();
     let popup = Arc::new(Mutex::new(None));
+    let window: PopupChild = Arc::new(Mutex::new(None));
     let ssh_approvals = SshApprovalService::new(approval_show_tx);
     let ssh_key_store = SshKeyStore::new(unlock_show_tx);
     let vault = Arc::new(Mutex::new(VaultState {
         clipboard: clipboard::Clipboard::default(),
         popup: popup.clone(),
+        window: window.clone(),
         auto_lock_warning: None,
         bw: BwClient::new(),
         pending_two_factor: None,
@@ -102,7 +116,7 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
         ssh_approvals: ssh_approvals.clone(),
         ssh_key_store,
     }));
-    let rpc_socket = start_vault_rpc_listener(vault.clone(), ssh_approvals.clone());
+    let rpc_socket = start_vault_rpc_listener(vault.clone(), ssh_approvals.clone(), tx.clone());
 
     start_tray(tx.clone());
     start_activation_listener(listener, tx.clone());
@@ -123,8 +137,11 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
             DaemonCommand::Show => show_popup(&popup, rpc_socket.as_ref()),
             DaemonCommand::Hide => hide_popup(&popup),
             DaemonCommand::Toggle => toggle_popup(&popup, rpc_socket.as_ref()),
+            DaemonCommand::ShowWindow => show_window(&window, rpc_socket.as_ref()),
+            DaemonCommand::ToggleWindow => toggle_window(&window, rpc_socket.as_ref()),
             DaemonCommand::Quit => {
                 quit_popup(&popup);
+                quit_popup(&window);
                 if let Ok(mut state) = vault.lock() {
                     state.clipboard.clear();
                     stop_ssh_agent(&mut state);
@@ -158,7 +175,7 @@ fn start_auto_lock_monitor(vault: Arc<Mutex<VaultState>>) {
             let enabled = settings.lock_on_system_lock || settings.lock_after_idle_timeout;
             if !enabled {
                 if state.auto_lock_warning.take().is_some() {
-                    notify_popup(&state.popup, "lock-warning\n");
+                    notify_clients(&state, "lock-warning\n");
                 }
                 idle_seen_at = None;
                 continue;
@@ -172,7 +189,7 @@ fn start_auto_lock_monitor(vault: Arc<Mutex<VaultState>>) {
                     if state.auto_lock_warning.as_ref() != Some(&message) {
                         eprintln!("{message}");
                         state.auto_lock_warning = Some(message);
-                        notify_popup(&state.popup, "lock-warning\n");
+                        notify_clients(&state, "lock-warning\n");
                     }
                     Some("session monitoring unavailable")
                 }
@@ -181,7 +198,7 @@ fn start_auto_lock_monitor(vault: Arc<Mutex<VaultState>>) {
                 }
                 auto_lock::Event::State(session) => {
                     if state.auto_lock_warning.take().is_some() {
-                        notify_popup(&state.popup, "lock-warning\n");
+                        notify_clients(&state, "lock-warning\n");
                     }
                     if settings.lock_on_system_lock && session.locked {
                         idle_seen_at = None;
@@ -231,6 +248,29 @@ fn run_popup() -> eframe::Result<()> {
     result
 }
 
+fn run_window() -> eframe::Result<()> {
+    debug_log("starting vault window");
+    let backend = if demo::enabled() {
+        AppBackend::demo()
+    } else {
+        let Some(path) = popup_rpc_socket_arg() else {
+            eprintln!("{WINDOW_FLAG} is internal. Run `bw-quick-access window` instead.");
+            return Ok(());
+        };
+        AppBackend::remote(rpc::RpcClient::new(path, read_popup_token()))
+    };
+    let (popup_tx, popup_rx) = mpsc::channel();
+    start_popup_stdin_listener(popup_tx);
+    eframe::run_native(
+        "bw-quick-access",
+        window::options(),
+        Box::new(|cc| {
+            ui::theme::theme().install(&cc.egui_ctx);
+            Ok(Box::new(window::WindowApp::new(backend, popup_rx)))
+        }),
+    )
+}
+
 fn start_tray(tx: mpsc::Sender<DaemonCommand>) {
     let (tray_tx, tray_rx) = mpsc::channel();
     match tray::spawn(tray_tx) {
@@ -242,6 +282,7 @@ fn start_tray(tx: mpsc::Sender<DaemonCommand>) {
                         TrayCommand::Show => DaemonCommand::Show,
                         TrayCommand::Hide => DaemonCommand::Hide,
                         TrayCommand::Toggle => DaemonCommand::Toggle,
+                        TrayCommand::Window => DaemonCommand::ShowWindow,
                         TrayCommand::Quit => DaemonCommand::Quit,
                     };
                     let should_quit = daemon_command == DaemonCommand::Quit;
@@ -272,6 +313,8 @@ fn start_activation_listener(listener: Option<UnixListener>, tx: mpsc::Sender<Da
             let command = match LaunchCommand::parse(&message) {
                 LaunchCommand::Show => DaemonCommand::Show,
                 LaunchCommand::Toggle => DaemonCommand::Toggle,
+                LaunchCommand::Window => DaemonCommand::ShowWindow,
+                LaunchCommand::ToggleWindow => DaemonCommand::ToggleWindow,
                 LaunchCommand::Daemon => continue,
             };
             let _ = tx.send(command);
@@ -306,6 +349,7 @@ fn start_unlock_popup_listener(
 fn start_vault_rpc_listener(
     vault: Arc<Mutex<VaultState>>,
     ssh_approvals: SshApprovalService,
+    daemon: mpsc::Sender<DaemonCommand>,
 ) -> Option<RpcEndpoint> {
     match rpc::prepare_listener() {
         Ok((endpoint, listener)) => {
@@ -315,8 +359,9 @@ fn start_vault_rpc_listener(
                     let vault = vault.clone();
                     let ssh_approvals = ssh_approvals.clone();
                     let token = token.clone();
+                    let daemon = daemon.clone();
                     std::thread::spawn(move || {
-                        handle_rpc_stream(stream, &token, vault, ssh_approvals)
+                        handle_rpc_stream(stream, &token, vault, ssh_approvals, daemon)
                     });
                 }
             });
@@ -334,9 +379,10 @@ fn handle_rpc_stream(
     token: &str,
     vault: Arc<Mutex<VaultState>>,
     ssh_approvals: SshApprovalService,
+    daemon: mpsc::Sender<DaemonCommand>,
 ) {
     let response = match read_authenticated_request(&mut stream, token) {
-        Ok(request) => handle_rpc_request(request, &vault, &ssh_approvals),
+        Ok(request) => handle_rpc_request(request, &vault, &ssh_approvals, &daemon),
         Err(message) => {
             debug_log(&format!("rejected RPC request: {message}"));
             RpcResponse::Error(message)
@@ -379,8 +425,31 @@ fn handle_rpc_request(
     request: RpcRequest,
     vault: &Arc<Mutex<VaultState>>,
     ssh_approvals: &SshApprovalService,
+    daemon: &mpsc::Sender<DaemonCommand>,
 ) -> RpcResponse {
     match request {
+        RpcRequest::OpenWindow => {
+            return RpcResponse::WindowOpened(
+                daemon
+                    .send(DaemonCommand::ShowWindow)
+                    .map_err(|_| "daemon is shutting down".to_string()),
+            );
+        }
+        RpcRequest::VaultHealth => {
+            // The directory download can take seconds; don't hold the vault lock for it.
+            let directory = health::directory();
+            let Ok(mut state) = vault.lock() else {
+                return RpcResponse::Health(Err(RpcError::Message(
+                    "vault state lock poisoned".into(),
+                )));
+            };
+            return RpcResponse::Health(
+                state
+                    .bw
+                    .health_report(&directory)
+                    .map_err(rpc_error_from_bw),
+            );
+        }
         RpcRequest::GetSshApproval => {
             return RpcResponse::SshApproval(ssh_approvals.active_request());
         }
@@ -508,6 +577,28 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
             let draft = zeroize::Zeroizing::new(draft);
             RpcResponse::Created(state.bw.create_item(&draft).map_err(rpc_error_from_bw))
         }
+        RpcRequest::ListFolders => {
+            RpcResponse::Folders(state.bw.folders().map_err(rpc_error_from_bw))
+        }
+        RpcRequest::MoveItem { id, folder_id } => RpcResponse::ItemMoved(
+            state
+                .bw
+                .move_item(&id, folder_id.as_deref())
+                .map_err(rpc_error_from_bw),
+        ),
+        RpcRequest::CreateFolder { name } => {
+            RpcResponse::FolderCreated(state.bw.create_folder(&name).map_err(rpc_error_from_bw))
+        }
+        RpcRequest::RenameFolders { renames } => {
+            let result = state.bw.rename_folders(&renames).map_err(rpc_error_from_bw);
+            refresh_ssh_key_store_from_vault(&mut state);
+            RpcResponse::FoldersChanged(result)
+        }
+        RpcRequest::DeleteFolders { ids } => {
+            let result = state.bw.delete_folders(&ids).map_err(rpc_error_from_bw);
+            refresh_ssh_key_store_from_vault(&mut state);
+            RpcResponse::FoldersChanged(result)
+        }
         RpcRequest::ApplySettings(settings) => {
             let result = config::save_settings(&settings)
                 .map_err(|e| e.to_string())
@@ -526,7 +617,7 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
             let result = config::clear_saved_session().map_err(|e| e.to_string());
             if result.is_ok() {
                 state.clipboard.clear();
-                notify_popup(&state.popup, "vault-locked\n");
+                notify_clients(&state, "vault-locked\n");
                 state.bw = BwClient::new();
                 state.pending_two_factor = None;
                 state.ssh_key_store.set_locked();
@@ -538,7 +629,9 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
         }
         RpcRequest::GetSshApproval
         | RpcRequest::DecideSshApproval(_)
-        | RpcRequest::GetSshApprovalStatus => unreachable!("SSH approval RPC bypasses vault lock"),
+        | RpcRequest::GetSshApprovalStatus
+        | RpcRequest::OpenWindow
+        | RpcRequest::VaultHealth => unreachable!("handled before taking the vault lock"),
     }
 }
 
@@ -663,7 +756,7 @@ fn stop_ssh_agent(state: &mut VaultState) {
 
 fn lock_vault_state(state: &mut VaultState, reason: &str) {
     state.clipboard.clear();
-    notify_popup(&state.popup, "vault-locked\n");
+    notify_clients(state, "vault-locked\n");
     state.bw = BwClient::new();
     state.pending_two_factor = None;
     state.ssh_key_store.set_locked();
@@ -771,6 +864,35 @@ fn show_popup_with_command(
     existing_command: &str,
     new_command: &str,
 ) {
+    show_client(popup, rpc_socket, POPUP_FLAG, existing_command, new_command);
+}
+
+fn show_window(window: &PopupChild, rpc_socket: Option<&RpcEndpoint>) {
+    show_client(window, rpc_socket, WINDOW_FLAG, "show\n", "show\n");
+}
+
+/// Closes the vault window when it is open, opens it otherwise.
+fn toggle_window(window: &PopupChild, rpc_socket: Option<&RpcEndpoint>) {
+    let running = window.lock().is_ok_and(|mut slot| {
+        slot.as_mut()
+            .is_some_and(|process| matches!(process.child.try_wait(), Ok(None)))
+    });
+    if running {
+        hide_popup(window);
+    } else {
+        show_window(window, rpc_socket);
+    }
+}
+
+/// Starts a client process (`--popup` or the vault window) or sends a command to the
+/// running one.
+fn show_client(
+    popup: &PopupChild,
+    rpc_socket: Option<&RpcEndpoint>,
+    flag: &str,
+    existing_command: &str,
+    new_command: &str,
+) {
     let Ok(mut child_slot) = popup.lock() else {
         return;
     };
@@ -798,7 +920,7 @@ fn show_popup_with_command(
     match popup_exe().and_then(|exe| {
         let mut command = Command::new(exe);
         command
-            .arg("--popup")
+            .arg(flag)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -914,6 +1036,11 @@ fn quit_popup(popup: &PopupChild) {
         }
     }
     *child_slot = None;
+}
+
+fn notify_clients(state: &VaultState, command: &str) {
+    notify_popup(&state.popup, command);
+    notify_popup(&state.window, command);
 }
 
 fn notify_popup(popup: &PopupChild, command: &str) {

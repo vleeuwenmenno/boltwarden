@@ -2,8 +2,8 @@ use crate::bw::{BwClient, BwError, TwoFactorChallenge, TwoFactorProvider};
 use crate::config::{self, AppSettings};
 use crate::demo::DemoBackend;
 use crate::model::{
-    BwItem, BwItemDetail, ItemAction, ItemDraft, ItemState, SshAgentStatus, SshApprovalDecision,
-    SshApprovalRequest, SshApprovalStatus, SyncStatus, TotpCode,
+    BwItem, BwItemDetail, Folder, HealthReport, ItemAction, ItemDraft, ItemState, SshAgentStatus,
+    SshApprovalDecision, SshApprovalRequest, SshApprovalStatus, SyncStatus, TotpCode,
 };
 use crate::rpc::{RpcClient, RpcError, RpcRequest, RpcResponse};
 use std::fmt;
@@ -358,6 +358,135 @@ impl AppBackend {
                     "unexpected daemon create response".into(),
                 )),
                 Err(e) => Err(BackendError::Message(e)),
+            },
+        }
+    }
+
+    pub fn folders(&self) -> Result<Vec<Folder>, BackendError> {
+        match self {
+            Self::Local(local) => local
+                .lock()
+                .map_err(|_| BackendError::Message("session lock poisoned".into()))?
+                .bw
+                .folders()
+                .map_err(BackendError::from),
+            Self::Demo(demo) => demo.folders(),
+            Self::Remote(client) => match client.call(&RpcRequest::ListFolders) {
+                Ok(RpcResponse::Folders(result)) => result.map_err(BackendError::from),
+                Ok(_) => Err(BackendError::Message(
+                    "unexpected daemon folders response".into(),
+                )),
+                Err(e) => Err(BackendError::Message(e)),
+            },
+        }
+    }
+
+    fn with_local<T>(
+        local: &Mutex<LocalBackend>,
+        work: impl FnOnce(&mut BwClient) -> Result<T, BwError>,
+    ) -> Result<T, BackendError> {
+        let mut local = local
+            .lock()
+            .map_err(|_| BackendError::Message("session lock poisoned".into()))?;
+        work(&mut local.bw).map_err(BackendError::from)
+    }
+
+    pub fn move_item(&self, id: &str, folder_id: Option<&str>) -> Result<(), BackendError> {
+        match self {
+            Self::Local(local) => Self::with_local(local, |bw| bw.move_item(id, folder_id)),
+            Self::Demo(demo) => demo.move_item(id, folder_id),
+            Self::Remote(client) => match client.call(&RpcRequest::MoveItem {
+                id: id.into(),
+                folder_id: folder_id.map(Into::into),
+            }) {
+                Ok(RpcResponse::ItemMoved(result)) => result.map_err(BackendError::from),
+                Ok(_) => Err(BackendError::Message(
+                    "unexpected daemon move response".into(),
+                )),
+                Err(e) => Err(BackendError::Message(e)),
+            },
+        }
+    }
+
+    pub fn create_folder(&self, name: &str) -> Result<Folder, BackendError> {
+        match self {
+            Self::Local(local) => Self::with_local(local, |bw| bw.create_folder(name)),
+            Self::Demo(demo) => demo.create_folder(name),
+            Self::Remote(client) => {
+                match client.call(&RpcRequest::CreateFolder { name: name.into() }) {
+                    Ok(RpcResponse::FolderCreated(result)) => result.map_err(BackendError::from),
+                    Ok(_) => Err(BackendError::Message(
+                        "unexpected daemon folder response".into(),
+                    )),
+                    Err(e) => Err(BackendError::Message(e)),
+                }
+            }
+        }
+    }
+
+    pub fn rename_folders(&self, renames: &[(String, String)]) -> Result<(), BackendError> {
+        match self {
+            Self::Local(local) => Self::with_local(local, |bw| bw.rename_folders(renames)),
+            Self::Demo(demo) => demo.rename_folders(renames),
+            Self::Remote(client) => match client.call(&RpcRequest::RenameFolders {
+                renames: renames.to_vec(),
+            }) {
+                Ok(RpcResponse::FoldersChanged(result)) => result.map_err(BackendError::from),
+                Ok(_) => Err(BackendError::Message(
+                    "unexpected daemon folder response".into(),
+                )),
+                Err(e) => Err(BackendError::Message(e)),
+            },
+        }
+    }
+
+    pub fn delete_folders(&self, ids: &[String]) -> Result<(), BackendError> {
+        match self {
+            Self::Local(local) => Self::with_local(local, |bw| bw.delete_folders(ids)),
+            Self::Demo(demo) => demo.delete_folders(ids),
+            Self::Remote(client) => {
+                match client.call(&RpcRequest::DeleteFolders { ids: ids.to_vec() }) {
+                    Ok(RpcResponse::FoldersChanged(result)) => result.map_err(BackendError::from),
+                    Ok(_) => Err(BackendError::Message(
+                        "unexpected daemon folder response".into(),
+                    )),
+                    Err(e) => Err(BackendError::Message(e)),
+                }
+            }
+        }
+    }
+
+    pub fn health_report(&self) -> Result<HealthReport, BackendError> {
+        match self {
+            Self::Local(local) => {
+                let directory = crate::health::directory();
+                local
+                    .lock()
+                    .map_err(|_| BackendError::Message("session lock poisoned".into()))?
+                    .bw
+                    .health_report(&directory)
+                    .map_err(BackendError::from)
+            }
+            Self::Demo(demo) => demo.health_report(),
+            Self::Remote(client) => match client.call(&RpcRequest::VaultHealth) {
+                Ok(RpcResponse::Health(result)) => result.map_err(BackendError::from),
+                Ok(_) => Err(BackendError::Message(
+                    "unexpected daemon health response".into(),
+                )),
+                Err(e) => Err(BackendError::Message(e)),
+            },
+        }
+    }
+
+    /// Asks the daemon to show the vault window.
+    pub fn open_window(&self) -> Result<(), String> {
+        match self {
+            Self::Local(_) => Err("Run the daemon to open the vault window".into()),
+            Self::Demo(_) => Err("The vault window runs on its own in demo mode: --window".into()),
+            Self::Remote(client) => match client.call(&RpcRequest::OpenWindow) {
+                Ok(RpcResponse::WindowOpened(result)) => result,
+                Ok(_) => Err("unexpected daemon window response".into()),
+                Err(e) => Err(e),
             },
         }
     }

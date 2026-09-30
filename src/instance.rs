@@ -8,6 +8,9 @@ const SOCKET_NAME: &str = "bw-quick-access.sock";
 pub enum LaunchCommand {
     Show,
     Toggle,
+    /// Open the full vault window.
+    Window,
+    ToggleWindow,
     Daemon,
 }
 
@@ -20,6 +23,12 @@ impl LaunchCommand {
             if arg == "--toggle" || arg == "toggle" {
                 return Self::Toggle;
             }
+            if arg == "--window" || arg == "window" {
+                return Self::Window;
+            }
+            if arg == "--toggle-window" || arg == "toggle-window" {
+                return Self::ToggleWindow;
+            }
         }
         Self::Show
     }
@@ -28,6 +37,8 @@ impl LaunchCommand {
         match self {
             Self::Show => b"show\n",
             Self::Toggle => b"toggle\n",
+            Self::Window => b"window\n",
+            Self::ToggleWindow => b"toggle-window\n",
             Self::Daemon => b"daemon\n",
         }
     }
@@ -35,6 +46,8 @@ impl LaunchCommand {
     pub fn parse(message: &str) -> Self {
         match message.trim() {
             "toggle" => Self::Toggle,
+            "window" => Self::Window,
+            "toggle-window" => Self::ToggleWindow,
             "daemon" => Self::Daemon,
             _ => Self::Show,
         }
@@ -176,6 +189,20 @@ mod tests {
             LaunchCommand::from_args(["--anything-else".to_string()]),
             LaunchCommand::Show
         );
+    }
+
+    #[test]
+    fn launch_command_parses_window_args() {
+        for (arg, command) in [
+            ("--window", LaunchCommand::Window),
+            ("window", LaunchCommand::Window),
+            ("--toggle-window", LaunchCommand::ToggleWindow),
+            ("toggle-window", LaunchCommand::ToggleWindow),
+        ] {
+            assert_eq!(LaunchCommand::from_args([arg.to_string()]), command);
+            let wire = std::str::from_utf8(command.wire()).unwrap();
+            assert_eq!(LaunchCommand::parse(wire), command);
+        }
     }
 
     #[test]

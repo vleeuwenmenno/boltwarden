@@ -25,6 +25,8 @@ shell out to the `bw` CLI.
 - Auto-hide on Escape and focus loss, with confirmation before discarding edits
 - Random password generation, masked TOTP seeds, and timed secret reveal
 - Manual and periodic vault synchronization
+- A full vault window with a folder tree, favorites and an action center
+- Passkeys shown on items; the editor can remove them after a confirmation
 
 ## Install
 
@@ -110,8 +112,27 @@ or:
 bw-quick-access toggle
 ```
 
+Open the vault window, or toggle it:
+
+```bash
+bw-quick-access window
+bw-quick-access toggle-window
+```
+
 If the daemon is already running, these commands send a message to the daemon
-instead of starting a second full instance.
+instead of starting a second full instance. The tray menu has an **Open vault
+window** entry, and typing `window` in the popup offers the same command.
+
+Wayland apps can't grab global shortcuts, so bind the commands in your compositor.
+For Hyprland:
+
+```ini
+bind = SUPER, P, exec, bw-quick-access toggle
+bind = SUPER SHIFT, P, exec, bw-quick-access window
+```
+
+The popup uses the `bw-quick-access` app id and the window `bw-quick-access-window`,
+so window rules for the popup (floating, always on top) don't affect the window.
 
 Typical keybindings:
 
@@ -123,6 +144,57 @@ Typical keybindings:
 - `Ctrl+R`: sync the vault from search
 - `Space`: reveal or conceal the selected secret (conceals automatically after 15 seconds)
 - `Esc`: hide the popup
+
+## Vault window
+
+The vault window is a resizable browser for the whole vault:
+
+- **Sidebar**: All items, Favorites, the Action center, your folders as a tree, items
+  without a folder, Archived and Recently deleted. Bitwarden nests folders by name
+  (`Work/Servers` sits inside `Work`); a folder lists the items of its subfolders
+  too. Click the arrow next to a folder to collapse it.
+- **Item list**: sorted by name, last edit or creation date. A search keeps the
+  relevance order and applies within the selected section.
+- **Item view**: the same fields, copying, reveal and actions as the popup. `F` or
+  the star toggles a favorite. The editor can also move an item to another folder.
+- **Moving items**: drag an item from the list onto a folder, onto **No folder** to
+  take it out of its folder, or onto **Favorites** to star it. Moving works for every
+  item, including ones with master-password reprompt, and reveals nothing.
+- **Folders**: the `+` next to FOLDERS creates one (`Work/Servers` nests it).
+  Right-click a folder for **New subfolder**, **Rename** and **Delete**. Renaming
+  renames its subfolders too; change the part before a `/` to move a folder under
+  another parent. Deleting removes the folder and its subfolders after a confirmation
+  (`Ctrl+Enter`); their items stay in the vault without a folder.
+
+Keys: `Up`/`Down` move through the list, `Ctrl+F` searches, `Ctrl+N` creates an
+item (in the selected folder), `Ctrl+R` syncs and `Ctrl+L` locks. With no input
+focused, the item view keeps its keys (`Enter` copies, `E` edits, `Del` trashes).
+
+Closing the window with unsaved edits asks first. It runs as its own process next to
+the popup and locks together with it.
+
+### Action center
+
+The action center checks active logins for reused passwords, weak passwords (zxcvbn
+score below 3), websites saved with `http://` (local network addresses excepted),
+duplicate logins (same website, username and password), and cards that expired or
+expire within 30 days. The score is the share of passwords with none of the first
+three problems. Each card lists its items.
+
+It also suggests sites that offer two-factor login when no one-time code is saved,
+and sites that support passkeys when none is stored. Those two checks download the
+public [2fa.directory](https://2fa.directory) lists whole, so no vault data or
+hostnames leave the machine. The lists are cached for a day in
+`~/.cache/bw-quick-access/2fa-directory.json`; without network access the two cards
+show as unavailable. All checks run in the daemon: the window only receives item ids.
+
+### Passkeys
+
+Items show their passkeys (user and site, and when it was saved) in the popup and the
+window. Passkeys can't be copied or created here. In the editor, the trash icon next
+to a passkey removes it after a confirmation (`Ctrl+Enter` or the button; a plain
+`Enter` does not confirm). The passkey is deleted from the vault only when you save
+the item; other passkeys go back to the server unchanged.
 
 ## Vaultwarden
 
@@ -307,6 +379,14 @@ use the real desktop session bus. Run checks:
 ```bash
 make check
 RUST_TEST_THREADS=1 make test
+```
+
+Try the popup or the vault window with made-up data and no vault:
+
+```bash
+BWQA_DEMO=1 bw-quick-access --popup
+BWQA_DEMO=1 bw-quick-access --vault-window
+BWQA_DEMO=action bw-quick-access --vault-window   # opens on the action center
 ```
 
 Build a debug binary:

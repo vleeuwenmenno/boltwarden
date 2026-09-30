@@ -1,5 +1,5 @@
 use crate::icons::{self, IconCache};
-use crate::model::{BwItemDetail, ItemAction, ItemState, TotpCode};
+use crate::model::{BwItemDetail, ItemAction, ItemState, Passkey, TotpCode};
 use crate::ui::theme::theme;
 use crate::ui::widgets;
 use egui::{RichText, Ui};
@@ -35,39 +35,53 @@ enum FieldKind {
     Secret,
     Multiline,
     Totp,
+    /// Shown for reference; a passkey has nothing to copy.
+    Passkey,
 }
 
 struct Field<'a> {
     label: &'a str,
-    value: &'a str,
+    value: std::borrow::Cow<'a, str>,
     kind: FieldKind,
 }
 
 /// The copyable fields of an item, in display order. Values borrow from the detail so
 /// secrets are not copied into new strings every frame.
-fn fields(detail: &BwItemDetail) -> Vec<Field<'_>> {
+fn fields<'a>(detail: &'a BwItemDetail) -> Vec<Field<'a>> {
     let mut fields = Vec::new();
-    let mut push = |label, value, kind| fields.push(Field { label, value, kind });
+    let mut push =
+        |label, value: std::borrow::Cow<'a, str>, kind| fields.push(Field { label, value, kind });
     if let Some(username) = &detail.username {
-        push("Username", username.as_str(), FieldKind::Plain);
+        push("Username", username.as_str().into(), FieldKind::Plain);
     }
     if let Some(password) = &detail.password {
-        push("Password", password.as_str(), FieldKind::Secret);
+        push("Password", password.as_str().into(), FieldKind::Secret);
     }
     if detail.totp.is_some() {
-        push("One-time code", "", FieldKind::Totp);
+        push("One-time code", "".into(), FieldKind::Totp);
+    }
+    for passkey in &detail.passkeys {
+        push(
+            "Passkey",
+            passkey_summary(passkey).into(),
+            FieldKind::Passkey,
+        );
     }
     for uri in &detail.uris {
-        push("Website", uri.as_str(), FieldKind::Plain);
+        push("Website", uri.as_str().into(), FieldKind::Plain);
     }
     if let Some(ssh_key) = &detail.ssh_key {
-        push("Public key", ssh_key.public_key.as_str(), FieldKind::Plain);
+        push(
+            "Public key",
+            ssh_key.public_key.as_str().into(),
+            FieldKind::Plain,
+        );
         if let Some(fingerprint) = &ssh_key.fingerprint {
-            push("Fingerprint", fingerprint.as_str(), FieldKind::Plain);
+            push("Fingerprint", fingerprint.as_str().into(), FieldKind::Plain);
         }
         push(
             "Private key",
-            ssh_key.private_key.as_str(),
+            ssh_key.private_key.as_str().into(),
             FieldKind::Secret,
         );
     }
@@ -77,10 +91,10 @@ fn fields(detail: &BwItemDetail) -> Vec<Field<'_>> {
         } else {
             FieldKind::Plain
         };
-        push(field.name.as_str(), field.value.as_str(), kind);
+        push(field.name.as_str(), field.value.as_str().into(), kind);
     }
     if let Some(notes) = &detail.notes {
-        push("Notes", notes.as_str(), FieldKind::Multiline);
+        push("Notes", notes.as_str().into(), FieldKind::Multiline);
     }
     fields
 }
@@ -127,10 +141,13 @@ impl SummaryState {
     }
 }
 
+/// Draws the item view. `embedded` is the vault window's detail pane: the item list
+/// beside it owns the arrow keys and Escape, and there is no back button.
 pub fn draw_summary(
     root: &mut egui::Ui,
     state: &mut SummaryState,
     show_shortcuts: bool,
+    embedded: bool,
     icons: &mut IconCache,
     copy: &mut dyn FnMut(usize) -> Result<(), String>,
 ) -> Option<SummaryAction> {
@@ -149,8 +166,11 @@ pub fn draw_summary(
     let fields = detail.as_ref().map(fields).unwrap_or_default();
 
     let item_state = detail.as_ref().map(|detail| detail.state);
+    let favorite = detail.as_ref().is_some_and(|detail| detail.favorite);
     // While a dialog is open or a request runs, keys belong to the dialog.
     let keys_enabled = state.confirm.is_none() && !state.action_in_flight;
+    // Next to other inputs, letters are for typing unless nothing has focus.
+    let letters_enabled = keys_enabled && !(embedded && ctx.memory(|m| m.focused().is_some()));
 
     let mut copy_selected = false;
     ctx.input(|input| {
@@ -160,9 +180,17 @@ pub fn draw_summary(
         let total = fields.len().max(1);
         if let Some(item_state) = item_state
             && input.modifiers.is_none()
+            && letters_enabled
         {
             if input.key_pressed(egui::Key::E) && item_state != ItemState::Deleted {
                 action = Some(SummaryAction::Edit);
+            }
+            if input.key_pressed(egui::Key::F) && item_state != ItemState::Deleted {
+                action = Some(SummaryAction::Item(if favorite {
+                    ItemAction::Unfavorite
+                } else {
+                    ItemAction::Favorite
+                }));
             }
             if input.key_pressed(egui::Key::A) {
                 match item_state {
@@ -184,14 +212,19 @@ pub fn draw_summary(
                 });
             }
         }
-        if input.key_pressed(egui::Key::Escape) || input.key_pressed(egui::Key::ArrowLeft) {
-            action = Some(SummaryAction::Back);
+        if !embedded {
+            if input.key_pressed(egui::Key::Escape) || input.key_pressed(egui::Key::ArrowLeft) {
+                action = Some(SummaryAction::Back);
+            }
+            if input.key_pressed(egui::Key::ArrowDown) {
+                state.selected_field = (state.selected_field + 1) % total;
+            }
+            if input.key_pressed(egui::Key::ArrowUp) {
+                state.selected_field = (state.selected_field + total - 1) % total;
+            }
         }
-        if input.key_pressed(egui::Key::ArrowDown) {
-            state.selected_field = (state.selected_field + 1) % total;
-        }
-        if input.key_pressed(egui::Key::ArrowUp) {
-            state.selected_field = (state.selected_field + total - 1) % total;
+        if !letters_enabled {
+            return;
         }
         if input.key_pressed(egui::Key::Enter) {
             copy_selected = true;
@@ -230,6 +263,7 @@ pub fn draw_summary(
                 ("↑↓", "Field"),
                 ("⏎", "Copy"),
                 ("E", "Edit"),
+                ("F", "Favorite"),
                 ("A", "Unarchive"),
                 ("Del", "Trash"),
                 ("←", "Back"),
@@ -238,17 +272,24 @@ pub fn draw_summary(
                 ("↑↓", "Field"),
                 ("⏎", "Copy"),
                 ("E", "Edit"),
+                ("F", "Favorite"),
                 ("A", "Archive"),
                 ("Del", "Trash"),
                 ("←", "Back"),
             ],
         };
+        // The window's list owns the arrows, and there is nothing to go back to.
+        let hints = hints
+            .iter()
+            .copied()
+            .filter(|(key, _)| !embedded || !matches!(*key, "↑↓" | "←"))
+            .collect::<Vec<_>>();
         egui::Panel::bottom("footer")
             .frame(widgets::footer_frame())
             .show(root, |ui| {
                 widgets::footer(
                     ui,
-                    hints,
+                    &hints,
                     status.as_ref().map(|(text, color)| (text.as_str(), *color)),
                 )
             });
@@ -258,16 +299,18 @@ pub fn draw_summary(
         .frame(widgets::header_frame())
         .show(root, |ui| {
             ui.horizontal(|ui| {
-                let back = ui.add(
-                    egui::Button::new(
-                        RichText::new(t.icon("\u{f060}", "←"))
-                            .size(t.title())
-                            .color(t.text_muted),
-                    )
-                    .frame(false),
-                );
-                if back.clicked() {
-                    action = Some(SummaryAction::Back);
+                if !embedded {
+                    let back = ui.add(
+                        egui::Button::new(
+                            RichText::new(t.icon("\u{f060}", "←"))
+                                .size(t.title())
+                                .color(t.text_muted),
+                        )
+                        .frame(false),
+                    );
+                    if back.clicked() {
+                        action = Some(SummaryAction::Back);
+                    }
                 }
                 if let Some(detail) = &detail {
                     let website_icon =
@@ -298,7 +341,7 @@ pub fn draw_summary(
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(header_action) =
-                            draw_header_actions(ui, detail.state, keys_enabled)
+                            draw_header_actions(ui, detail.state, detail.favorite, keys_enabled)
                         {
                             match header_action {
                                 SummaryAction::Item(
@@ -408,7 +451,12 @@ pub fn draw_summary(
 }
 
 /// Icon buttons for the item's actions, laid out right to left.
-fn draw_header_actions(ui: &mut Ui, item_state: ItemState, enabled: bool) -> Option<SummaryAction> {
+fn draw_header_actions(
+    ui: &mut Ui,
+    item_state: ItemState,
+    favorite: bool,
+    enabled: bool,
+) -> Option<SummaryAction> {
     let t = theme();
     let buttons: &[(&str, &str, &str, SummaryAction)] = match item_state {
         ItemState::Deleted => &[
@@ -457,15 +505,34 @@ fn draw_header_actions(ui: &mut Ui, item_state: ItemState, enabled: bool) -> Opt
         ],
     };
     let mut clicked = None;
-    for (nerd, fallback, tooltip, action) in buttons {
-        let danger = matches!(action, SummaryAction::Item(ItemAction::DeleteForever));
+    let star = (item_state != ItemState::Deleted).then_some(if favorite {
+        (
+            "\u{f005}",
+            "★",
+            "Remove from favorites (F)",
+            SummaryAction::Item(ItemAction::Unfavorite),
+        )
+    } else {
+        (
+            "\u{f006}",
+            "☆",
+            "Add to favorites (F)",
+            SummaryAction::Item(ItemAction::Favorite),
+        )
+    });
+    for (nerd, fallback, tooltip, action) in buttons.iter().chain(star.as_ref()) {
+        let color = match action {
+            SummaryAction::Item(ItemAction::DeleteForever) => t.danger,
+            SummaryAction::Item(ItemAction::Unfavorite) => t.warning,
+            _ => t.text_muted,
+        };
         let response = ui
             .add_enabled(
                 enabled,
                 egui::Button::new(
                     RichText::new(t.icon(nerd, fallback))
                         .size(t.body())
-                        .color(if danger { t.danger } else { t.text_muted }),
+                        .color(color),
                 )
                 .frame(false)
                 .min_size(egui::vec2(28.0, 28.0)),
@@ -535,13 +602,15 @@ fn draw_field(
         egui::pos2(rect.right() - 20.0, rect.top() + 22.0),
         egui::vec2(28.0, 28.0),
     );
-    let copy_clicked = glyph_button(
-        ui,
-        copy_rect,
-        t.icon("\u{f0c5}", "📋"),
-        ("copy", idx),
-        &format!("Copy {}", field.label),
-    );
+    let copyable = field.kind != FieldKind::Passkey;
+    let copy_clicked = copyable
+        && glyph_button(
+            ui,
+            copy_rect,
+            t.icon("\u{f0c5}", "📋"),
+            ("copy", idx),
+            &format!("Copy {}", field.label),
+        );
     let mut value_right = copy_rect.left() - 8.0;
     if field.kind == FieldKind::Secret {
         let eye_rect = copy_rect.translate(egui::vec2(-32.0, 0.0));
@@ -568,10 +637,10 @@ fn draw_field(
         _ if selected => t.text_strong,
         _ => t.text,
     };
-    let value_font = if field.kind == FieldKind::Totp {
-        t.mono(t.title())
-    } else {
-        t.mono(t.body())
+    let value_font = match field.kind {
+        FieldKind::Totp => t.mono(t.title()),
+        FieldKind::Passkey => t.font(t.body()),
+        _ => t.mono(t.body()),
     };
     let mut job = egui::text::LayoutJob::single_section(
         value,
@@ -631,7 +700,7 @@ fn draw_field(
     if response.clicked() {
         state.selected_field = idx;
     }
-    if copy_clicked || copy_requested {
+    if copy_clicked || (copy_requested && copyable) {
         match copy(idx) {
             Ok(()) => {
                 state.copied_field = Some((field.label.to_string(), Instant::now()));
@@ -670,6 +739,18 @@ fn glyph_button(
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .clicked()
+}
+
+/// "menno on GitHub · saved 17 May 2026".
+fn passkey_summary(passkey: &Passkey) -> String {
+    match passkey
+        .creation_date
+        .as_deref()
+        .and_then(widgets::format_date)
+    {
+        Some(date) => format!("{} · saved {date}", passkey.describe()),
+        None => passkey.describe(),
+    }
 }
 
 /// "123456" -> "123 456", the way authenticator apps show codes.
