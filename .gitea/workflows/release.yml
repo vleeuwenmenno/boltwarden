@@ -36,6 +36,23 @@ jobs:
           sha256sum "dist/${artifact}.tar.gz" > "dist/${artifact}.tar.gz.sha256"
           rm -rf "dist/${artifact}"
 
+      - name: Check and package browser extensions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          nix develop .#extension --command make extension-deps extension-check extension-test extension-zip
+          for browser in chrome firefox sources; do
+            files=(extension/.output/*-"${browser}".zip)
+            if [ "${#files[@]}" -ne 1 ] || [ ! -f "${files[0]}" ]; then
+              echo "Expected one ${browser} extension archive"
+              exit 1
+            fi
+            archive="dist/$(basename "${files[0]}")"
+            cp "${files[0]}" "${archive}"
+            sha256sum "${archive}" > "${archive}.sha256"
+          done
+
       - name: Upload release assets
         shell: bash
         env:

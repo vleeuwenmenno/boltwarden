@@ -151,6 +151,11 @@ impl SshApprovalService {
             return false;
         }
 
+        let Ok(_interaction) = crate::interaction::global().acquire(crate::interaction::Kind::Ssh)
+        else {
+            return false;
+        };
+
         state.recent = Some(approval_status(&request, SshApprovalStatusKind::Pending));
         state.pending = Some(PendingApproval {
             request: request.clone(),
@@ -295,9 +300,14 @@ impl SshKeyStore {
             return Ok((state.keys.clone(), state.generation));
         }
 
+        let _interaction =
+            crate::interaction::global().acquire(crate::interaction::Kind::Unlock)?;
+
         if !state.prompt_pending {
             state.prompt_pending = true;
-            let _ = self.notify_unlock.send(());
+            if !_interaction.shared() {
+                let _ = self.notify_unlock.send(());
+            }
         }
 
         let deadline = std::time::Instant::now() + SSH_UNLOCK_TIMEOUT;
@@ -313,10 +323,21 @@ impl SshKeyStore {
             if state.unlocked {
                 return Ok((state.keys.clone(), state.generation));
             }
+            if _interaction.expired() || !state.prompt_pending {
+                return Err("vault unlock cancelled".into());
+            }
             if wait_result.timed_out() {
                 state.prompt_pending = false;
                 return Err("vault unlock timed out".into());
             }
+        }
+    }
+
+    pub fn cancel_unlock(&self) {
+        let (lock, changed) = &*self.inner;
+        if let Ok(mut state) = lock.lock() {
+            state.prompt_pending = false;
+            changed.notify_all();
         }
     }
 }
@@ -996,12 +1017,10 @@ mod tests {
 
     #[test]
     fn socket_lists_identities_and_signs() {
-        let socket_dir = std::env::current_dir()
-            .unwrap()
-            .join("target")
-            .join("ssh-agent-tests");
-        fs::create_dir_all(&socket_dir).unwrap();
-        let socket_path = socket_dir.join(format!("{}.sock", uuid::Uuid::new_v4()));
+        // Unix socket paths have a small fixed limit; worktree paths can exceed it.
+        let socket_dir = std::env::temp_dir().join(format!("bw-ssh-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&socket_dir).unwrap();
+        let socket_path = socket_dir.join("agent.sock");
         let settings = AppSettings {
             ssh_agent_enabled: true,
             ssh_agent_socket_path: socket_path.display().to_string(),
@@ -1060,6 +1079,7 @@ mod tests {
 
         agent.stop();
         assert!(!socket_path.exists());
+        fs::remove_dir(socket_dir).unwrap();
     }
 
     #[test]

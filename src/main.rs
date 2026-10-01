@@ -1,6 +1,11 @@
 mod app;
 mod auto_lock;
 mod backend;
+mod browser;
+mod browser_approval;
+mod browser_backend;
+#[cfg(test)]
+mod browser_backend_tests;
 mod bw;
 mod clipboard;
 mod config;
@@ -8,8 +13,11 @@ mod demo;
 mod health;
 mod icons;
 mod instance;
+mod interaction;
 mod logo;
 mod model;
+mod offline_cache;
+mod passkeys;
 mod random;
 mod rpc;
 mod screen_capture;
@@ -17,6 +25,7 @@ mod ssh_agent;
 mod tray;
 mod ui;
 mod unix_socket;
+mod uri_match;
 mod window;
 
 use app::{App, PopupCommand};
@@ -58,6 +67,14 @@ struct PopupProcess {
 type PopupChild = Arc<Mutex<Option<PopupProcess>>>;
 
 struct VaultState {
+    browser_hub: Option<browser::BrowserHub>,
+    browser_handler: Option<Arc<browser_backend::DaemonBrowserBackend>>,
+    browser_approvals: browser_approval::BrowserApprovals,
+    browser_enabled: bool,
+    browser_default_match: uri_match::UriMatchType,
+    passkey_verification: config::PasskeyVerification,
+    browser_epoch: u64,
+    browser_unlock: Option<interaction::Lease>,
     popup: PopupChild,
     /// The full vault window, a second client process next to the popup.
     window: PopupChild,
@@ -79,6 +96,23 @@ fn main() -> eframe::Result<()> {
             rlim_max: 0,
         };
         libc::setrlimit(libc::RLIMIT_CORE, &limit);
+    }
+    match std::env::args().nth(1).as_deref() {
+        Some("native-host") => {
+            if let Err(error) = browser::native_host::run_native_host() {
+                eprintln!("native host: {error}");
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        Some("install-browser") => {
+            if let Err(error) = browser::install::run(std::env::args().skip(2)) {
+                eprintln!("install-browser: {error}");
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        _ => {}
     }
     config::migrate_legacy_dirs();
     if std::env::args().any(|arg| arg == "--popup") {
@@ -102,11 +136,20 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
     let (tx, rx) = mpsc::channel();
     let (approval_show_tx, approval_show_rx) = mpsc::channel();
     let (unlock_show_tx, unlock_show_rx) = mpsc::channel();
+    let (browser_approval_tx, browser_approval_rx) = mpsc::channel();
     let popup = Arc::new(Mutex::new(None));
     let window: PopupChild = Arc::new(Mutex::new(None));
     let ssh_approvals = SshApprovalService::new(approval_show_tx);
-    let ssh_key_store = SshKeyStore::new(unlock_show_tx);
+    let ssh_key_store = SshKeyStore::new(unlock_show_tx.clone());
     let vault = Arc::new(Mutex::new(VaultState {
+        browser_hub: None,
+        browser_handler: None,
+        browser_approvals: browser_approval::BrowserApprovals::new(browser_approval_tx),
+        browser_enabled: false,
+        browser_default_match: uri_match::UriMatchType::Host,
+        passkey_verification: config::PasskeyVerification::default(),
+        browser_epoch: 0,
+        browser_unlock: None,
         clipboard: clipboard::Clipboard::default(),
         popup: popup.clone(),
         window: window.clone(),
@@ -124,10 +167,31 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
     start_activation_listener(listener, tx.clone());
     start_approval_popup_listener(approval_show_rx, popup.clone(), rpc_socket.clone());
     start_unlock_popup_listener(unlock_show_rx, popup.clone(), rpc_socket.clone());
+    {
+        let popup = popup.clone();
+        let rpc_socket = rpc_socket.clone();
+        std::thread::spawn(move || {
+            while browser_approval_rx.recv().is_ok() {
+                show_popup_with_command(
+                    &popup,
+                    rpc_socket.as_ref(),
+                    "browser-approval return\n",
+                    "browser-approval auto\n",
+                );
+            }
+        });
+    }
     start_auto_lock_monitor(vault.clone());
     let _daemon_tx_keepalive = tx;
 
     if let Ok(mut state) = vault.lock() {
+        state.browser_handler = Some(Arc::new(browser_backend::DaemonBrowserBackend {
+            vault: Arc::downgrade(&vault),
+            unlock: unlock_show_tx,
+        }));
+        if let Err(error) = apply_browser_settings(&mut state) {
+            eprintln!("browser integration: {error}");
+        }
         apply_ssh_agent_settings(&mut state);
     }
 
@@ -145,6 +209,10 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
                 quit_popup(&popup);
                 quit_popup(&window);
                 if let Ok(mut state) = vault.lock() {
+                    invalidate_browser(&mut state, false);
+                    if let Some(hub) = state.browser_hub.take() {
+                        hub.shutdown();
+                    }
                     state.clipboard.clear();
                     stop_ssh_agent(&mut state);
                     state.ssh_approvals.clear_all("daemon quit");
@@ -461,6 +529,51 @@ fn handle_rpc_request(
         RpcRequest::GetSshApprovalStatus => {
             return RpcResponse::SshApprovalStatus(ssh_approvals.recent_status());
         }
+        RpcRequest::GetBrowserApproval => {
+            return RpcResponse::BrowserApproval(
+                vault
+                    .lock()
+                    .ok()
+                    .and_then(|state| state.browser_approvals.active()),
+            );
+        }
+        RpcRequest::DecideBrowserApproval(decision) => {
+            let result = (|| {
+                let state = vault.lock().map_err(|_| "Vault unavailable".to_string())?;
+                let request = state
+                    .browser_approvals
+                    .active()
+                    .filter(|request| request.id == decision.request_id)
+                    .ok_or_else(|| "Browser request is no longer pending".to_string())?;
+                if decision.approved {
+                    if decision.use_other_device {
+                        return Err("Invalid approval decision".into());
+                    }
+                    if !state.browser_enabled || !state.bw.has_session() {
+                        return Err("Vault is locked or browser integration disabled".into());
+                    }
+                    if request.requires_password_for(decision.selected_id.as_deref())? {
+                        state
+                            .bw
+                            .verify_master_password(&decision.password)
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+                state.browser_approvals.resolve(
+                    &decision.request_id,
+                    if decision.approved {
+                        Ok(decision.selected_id.clone())
+                    } else {
+                        Err(if decision.use_other_device && request.allow_fallback {
+                            "FallbackRequested".into()
+                        } else {
+                            "Denied".into()
+                        })
+                    },
+                )
+            })();
+            return RpcResponse::BrowserApprovalDecided(result);
+        }
         request => {
             return handle_vault_rpc_request(request, vault);
         }
@@ -472,7 +585,12 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
         return RpcResponse::ClearSavedSession(Err("vault state lock poisoned".into()));
     };
 
-    match request {
+    let was_unlocked = state.bw.has_session();
+    let explicit_lock = matches!(
+        request,
+        RpcRequest::LockVault | RpcRequest::ClearSavedSession
+    );
+    let response = match request {
         RpcRequest::HasSession => RpcResponse::HasSession(state.bw.has_session()),
         RpcRequest::CopyField { id, index, version } => {
             let result = state
@@ -491,8 +609,9 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
         }
         RpcRequest::Sync => {
             let result = state.bw.sync_now().map_err(rpc_error_from_bw);
+            refresh_ssh_key_store_from_vault(&mut state);
             if result.is_ok() {
-                refresh_ssh_key_store_from_vault(&mut state);
+                notify_browser_matches(&state);
             }
             RpcResponse::Synced(result)
         }
@@ -538,7 +657,11 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
             query,
             state: item_state,
         } => {
+            let before = state.bw.sync_status().last_synced_unix;
             state.bw.sync_if_stale();
+            if state.bw.sync_status().last_synced_unix != before {
+                notify_browser_matches(&state);
+            }
             refresh_ssh_key_store_from_vault(&mut state);
             let result = state
                 .bw
@@ -564,6 +687,7 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
                 .map_err(rpc_error_from_bw);
             // Archived and trashed SSH keys must leave the agent, restored ones come back.
             refresh_ssh_key_store_from_vault(&mut state);
+            notify_browser_matches(&state);
             RpcResponse::ItemAction(result)
         }
         RpcRequest::GetEditDraft { id } => {
@@ -573,21 +697,26 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
             let draft = zeroize::Zeroizing::new(draft);
             let result = state.bw.save_item(&id, &draft).map_err(rpc_error_from_bw);
             refresh_ssh_key_store_from_vault(&mut state);
+            notify_browser_matches(&state);
             RpcResponse::Saved(result)
         }
         RpcRequest::CreateItem { draft } => {
             let draft = zeroize::Zeroizing::new(draft);
-            RpcResponse::Created(state.bw.create_item(&draft).map_err(rpc_error_from_bw))
+            let result = state.bw.create_item(&draft).map_err(rpc_error_from_bw);
+            notify_browser_matches(&state);
+            RpcResponse::Created(result)
         }
         RpcRequest::ListFolders => {
             RpcResponse::Folders(state.bw.folders().map_err(rpc_error_from_bw))
         }
-        RpcRequest::MoveItem { id, folder_id } => RpcResponse::ItemMoved(
-            state
+        RpcRequest::MoveItem { id, folder_id } => {
+            let result = state
                 .bw
                 .move_item(&id, folder_id.as_deref())
-                .map_err(rpc_error_from_bw),
-        ),
+                .map_err(rpc_error_from_bw);
+            notify_browser_matches(&state);
+            RpcResponse::ItemMoved(result)
+        }
         RpcRequest::CreateFolder { name } => {
             RpcResponse::FolderCreated(state.bw.create_folder(&name).map_err(rpc_error_from_bw))
         }
@@ -604,6 +733,8 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
         RpcRequest::ApplySettings(settings) => {
             let result = config::save_settings(&settings)
                 .map_err(|e| e.to_string())
+                .and_then(|_| apply_browser_settings(&mut state))
+                .and_then(|_| state.bw.apply_offline_setting().map_err(|e| e.to_string()))
                 .map(|_| apply_ssh_agent_settings(&mut state));
             RpcResponse::SettingsApplied(result)
         }
@@ -618,23 +749,47 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
         RpcRequest::ClearSavedSession => {
             let result = config::clear_saved_session().map_err(|e| e.to_string());
             if result.is_ok() {
-                state.clipboard.clear();
-                notify_clients(&state, "vault-locked\n");
-                state.bw = BwClient::new();
-                state.pending_two_factor = None;
-                state.ssh_key_store.set_locked();
-                state.ssh_approvals.clear_all("saved session cleared");
-                apply_ssh_agent_settings(&mut state);
-                let _ = config::clear_recent_item();
+                lock_vault_state(&mut state, "saved session cleared");
             }
             RpcResponse::ClearSavedSession(result)
+        }
+        RpcRequest::ListPairedBrowsers => RpcResponse::PairedBrowsers(
+            state
+                .browser_hub
+                .as_ref()
+                .map(|hub| hub.list_pairings())
+                .unwrap_or_else(|| {
+                    browser::pairing::PairingStore::load()
+                        .map(|store| store.list())
+                        .map_err(|error| format!("Could not load paired browsers: {error}"))
+                }),
+        ),
+        RpcRequest::RevokePairedBrowser { id } => {
+            RpcResponse::BrowserRevoked(match &state.browser_hub {
+                Some(hub) => hub.revoke(&id),
+                None => browser::pairing::PairingStore::load()
+                    .and_then(|mut store| store.revoke(&id))
+                    .map_err(|error| error.to_string()),
+            })
+        }
+        RpcRequest::CancelUnlock => {
+            state.browser_unlock = None;
+            interaction::global().cancel(interaction::Kind::Unlock);
+            state.ssh_key_store.cancel_unlock();
+            RpcResponse::LockVault(Ok(()))
         }
         RpcRequest::GetSshApproval
         | RpcRequest::DecideSshApproval(_)
         | RpcRequest::GetSshApprovalStatus
+        | RpcRequest::GetBrowserApproval
+        | RpcRequest::DecideBrowserApproval(_)
         | RpcRequest::OpenWindow
         | RpcRequest::VaultHealth => unreachable!("handled before taking the vault lock"),
+    };
+    if was_unlocked && !state.bw.has_session() && !explicit_lock {
+        lock_vault_state(&mut state, "session revoked");
     }
+    response
 }
 
 fn login_vault(
@@ -657,6 +812,7 @@ fn login_vault(
 
     match result {
         Ok(()) => {
+            invalidate_browser(state, true);
             state.bw = candidate;
             state.pending_two_factor = None;
             refresh_ssh_key_store_from_vault(state);
@@ -684,6 +840,7 @@ fn complete_vault_two_factor(
     let mut candidate = BwClient::new();
     match candidate.complete_two_factor(&challenge, provider, token, remember) {
         Ok(()) => {
+            invalidate_browser(state, true);
             state.bw = candidate;
             state.pending_two_factor = None;
             refresh_ssh_key_store_from_vault(state);
@@ -756,7 +913,58 @@ fn stop_ssh_agent(state: &mut VaultState) {
     state.ssh_approvals.clear_all("SSH agent stopped");
 }
 
+fn invalidate_browser(state: &mut VaultState, unlocked: bool) {
+    state.browser_epoch = state.browser_epoch.wrapping_add(1);
+    state.browser_approvals.clear();
+    state.browser_unlock = None;
+    if let Some(hub) = &state.browser_hub {
+        hub.invalidate(if unlocked {
+            browser::BrowserEvent::Unlocked {
+                epoch: state.browser_epoch,
+            }
+        } else {
+            browser::BrowserEvent::Locked {
+                epoch: state.browser_epoch,
+            }
+        });
+    }
+}
+
+fn apply_browser_settings(state: &mut VaultState) -> Result<(), String> {
+    let settings = config::load_settings();
+    apply_browser_request_preferences(state, &settings);
+    if !settings.browser_integration_enabled {
+        state.browser_enabled = false;
+        state.browser_approvals.clear();
+        state.browser_unlock = None;
+        if let Some(hub) = state.browser_hub.take() {
+            state.browser_epoch = state.browser_epoch.wrapping_add(1);
+            hub.invalidate(browser::BrowserEvent::Disabled);
+            hub.shutdown();
+        }
+    } else if state.browser_hub.is_none() {
+        let handler = state
+            .browser_handler
+            .clone()
+            .ok_or("Browser integration is unavailable")?;
+        state.browser_hub = Some(browser::BrowserHub::start(handler).map_err(|e| e.to_string())?);
+        state.browser_enabled = true;
+    }
+    Ok(())
+}
+
+fn apply_browser_request_preferences(state: &mut VaultState, settings: &config::AppSettings) {
+    if settings.default_uri_match != state.browser_default_match
+        || settings.passkey_verification != state.passkey_verification
+    {
+        state.browser_default_match = settings.default_uri_match;
+        state.passkey_verification = settings.passkey_verification;
+        invalidate_browser(state, state.bw.has_session());
+    }
+}
+
 fn lock_vault_state(state: &mut VaultState, reason: &str) {
+    invalidate_browser(state, false);
     state.clipboard.clear();
     notify_clients(state, "vault-locked\n");
     state.bw = BwClient::new();
@@ -771,6 +979,14 @@ fn refresh_ssh_key_store_from_vault(state: &mut VaultState) {
     match state.bw.ssh_keys() {
         Ok(keys) => state.ssh_key_store.set_unlocked(keys),
         Err(_) => state.ssh_key_store.set_locked(),
+    }
+}
+
+fn notify_browser_matches(state: &VaultState) {
+    if let Some(hub) = &state.browser_hub {
+        hub.notify(browser::BrowserEvent::MatchesChanged {
+            epoch: state.browser_epoch,
+        });
     }
 }
 
@@ -813,6 +1029,7 @@ fn idle_lock_timeout(settings: &config::AppSettings) -> Duration {
 
 fn rpc_error_from_bw(error: BwError) -> RpcError {
     match error {
+        BwError::Network(message) => RpcError::Network(message),
         BwError::RepromptRequired => RpcError::RepromptRequired,
         BwError::TwoFactorRequired(challenge) => RpcError::TwoFactorRequired {
             providers: challenge.providers().to_vec(),
@@ -1081,6 +1298,12 @@ fn start_popup_stdin_listener(tx: mpsc::Sender<PopupCommand>) {
                         "ssh-approval auto" => Some(PopupCommand::SshApproval { auto_hide: true }),
                         "ssh-approval return" => {
                             Some(PopupCommand::SshApproval { auto_hide: false })
+                        }
+                        "browser-approval auto" => {
+                            Some(PopupCommand::BrowserApproval { auto_hide: true })
+                        }
+                        "browser-approval return" => {
+                            Some(PopupCommand::BrowserApproval { auto_hide: false })
                         }
                         "unlock auto" => Some(PopupCommand::Unlock {
                             auto_hide: true,

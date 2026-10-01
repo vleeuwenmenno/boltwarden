@@ -1,2 +1,6 @@
 /target
 /dist
+/extension/node_modules
+/extension/.wxt
+/extension/.output
+/extension/coverage

@@ -5,8 +5,10 @@ BIN_PATH := $(BINDIR)/$(BIN_NAME)
 SERVICE_NAME ?= boltwarden.service
 SYSTEMD_USER_DIR ?= $(HOME)/.config/systemd/user
 CARGO ?= cargo
+NPM ?= npm
+BROWSER_TARGET ?= all
 
-.PHONY: all build release install install-service uninstall uninstall-service check test clean
+.PHONY: all build release install install-service install-browser uninstall uninstall-service check test clean extension-deps extension-check extension-test extension-build extension-zip
 
 all: release
 
@@ -22,6 +24,9 @@ install:
 install-service:
 	sh scripts/install.sh install-service "$(BIN_PATH)" "$(SERVICE_NAME)" "$(SYSTEMD_USER_DIR)"
 
+install-browser:
+	"$(BIN_PATH)" install-browser --browser "$(BROWSER_TARGET)" --path "$(BIN_PATH)"
+
 uninstall:
 	sh scripts/install.sh uninstall-binary "$(DESTDIR)$(BIN_PATH)"
 
@@ -33,6 +38,21 @@ check:
 
 test:
 	$(CARGO) test
+
+extension-deps:
+	$(NPM) --prefix extension ci
+
+extension-check:
+	$(NPM) --prefix extension run typecheck
+
+extension-test:
+	$(NPM) --prefix extension test
+
+extension-build:
+	$(NPM) --prefix extension run build
+
+extension-zip:
+	$(NPM) --prefix extension run zip
 
 clean:
 	$(CARGO) clean

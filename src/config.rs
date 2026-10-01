@@ -9,6 +9,7 @@ const APP_DIR: &str = "boltwarden";
 /// The directory name before the app was renamed from bw-quick-access.
 const LEGACY_APP_DIR: &str = "bw-quick-access";
 const DEVICE_ID_FILE: &str = "device-id";
+const VAULT_CACHE_FILE: &str = "vault-cache.json";
 const SESSION_FILE: &str = "session.json";
 const SETTINGS_FILE: &str = "settings.json";
 const RECENT_ITEM_FILE: &str = "recent-item.json";
@@ -47,9 +48,46 @@ impl StartList {
     }
 }
 
+/// Master-password verification policy for browser passkey operations.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PasskeyVerification {
+    #[default]
+    Always,
+    WhenRequired,
+    VaultUnlock,
+}
+
+impl PasskeyVerification {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Always => Self::WhenRequired,
+            Self::WhenRequired => Self::VaultUnlock,
+            Self::VaultUnlock => Self::Always,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Always => "Always ask",
+            Self::WhenRequired => "Only when required",
+            Self::VaultUnlock => "Use vault unlock",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
+    /// Browser access is opt-in and always uses a separate paired connection.
+    #[serde(default)]
+    pub browser_integration_enabled: bool,
+    #[serde(default)]
+    pub default_uri_match: crate::uri_match::UriMatchType,
+    #[serde(default)]
+    pub passkey_verification: PasskeyVerification,
+    #[serde(default = "default_true")]
+    pub keep_offline_copy: bool,
     #[serde(default = "default_true")]
     pub show_keyboard_shortcuts: bool,
     #[serde(default = "default_true")]
@@ -79,6 +117,10 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            keep_offline_copy: true,
+            browser_integration_enabled: false,
+            default_uri_match: crate::uri_match::UriMatchType::Host,
+            passkey_verification: PasskeyVerification::Always,
             show_keyboard_shortcuts: true,
             close_after_copy: true,
             restore_recent_item: true,
@@ -92,6 +134,58 @@ impl Default for AppSettings {
             start_list: StartList::None,
         }
     }
+}
+
+/// Local browser registrations, independent of vault and daemon preferences.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct BrowserSetupPreferences {
+    pub configured: bool,
+    pub custom: Vec<crate::browser::install::BrowserRegistration>,
+}
+
+pub fn load_browser_setup() -> io::Result<BrowserSetupPreferences> {
+    let path = config_path("browser-setup.json").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "Configuration directory unavailable",
+        )
+    })?;
+    match fs::read(path) {
+        Ok(data) => {
+            serde_json::from_slice(&data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Default::default()),
+        Err(error) => Err(error),
+    }
+}
+
+pub fn save_browser_setup(preferences: &BrowserSetupPreferences) -> io::Result<()> {
+    let data = serde_json::to_vec(preferences).map_err(io::Error::other)?;
+    write_private("browser-setup.json", &data)
+}
+
+/// The vault window owns this preference independently of popup settings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListOrder {
+    #[default]
+    Name,
+    Modified,
+    Created,
+}
+
+pub fn load_window_order() -> ListOrder {
+    config_path("window-order.json")
+        .and_then(|path| fs::read(path).ok())
+        .and_then(|data| serde_json::from_slice(&data).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_window_order(order: ListOrder) -> io::Result<()> {
+    let data = serde_json::to_vec(&order)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    write_private("window-order.json", &data)
 }
 
 fn default_true() -> bool {
@@ -230,13 +324,33 @@ pub fn save_session(session: &SavedSession) -> io::Result<()> {
 }
 
 pub fn clear_saved_session() -> io::Result<()> {
+    let cache_result = clear_vault_cache();
     let Some(path) = config_path(SESSION_FILE) else {
-        return Ok(());
+        return cache_result;
     };
-    match fs::remove_file(path) {
+    let session_result = match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
+    };
+    session_result.and(cache_result)
+}
+
+pub fn load_vault_cache() -> Option<String> {
+    fs::read_to_string(config_path(VAULT_CACHE_FILE)?).ok()
+}
+
+pub fn save_vault_cache(data: &[u8]) -> io::Result<()> {
+    write_private(VAULT_CACHE_FILE, data)
+}
+
+pub fn clear_vault_cache() -> io::Result<()> {
+    let Some(path) = config_path(VAULT_CACHE_FILE) else {
+        return Ok(());
+    };
+    match fs::remove_file(path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
     }
 }
 
@@ -325,7 +439,7 @@ pub fn clear_item_usage() -> io::Result<()> {
 }
 
 /// Writes a config file readable only by the current user.
-fn write_private(file_name: &str, data: &[u8]) -> io::Result<()> {
+pub(crate) fn write_private(file_name: &str, data: &[u8]) -> io::Result<()> {
     let path = config_path(file_name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "config directory unavailable"))?;
     let parent = path
@@ -378,7 +492,7 @@ fn unix_millis_now() -> u64 {
         .unwrap_or(0)
 }
 
-fn config_path(file_name: &str) -> Option<PathBuf> {
+pub(crate) fn config_path(file_name: &str) -> Option<PathBuf> {
     Some(config_base()?.join(APP_DIR).join(file_name))
 }
 
@@ -416,8 +530,100 @@ fn migrate_dir(old: &std::path::Path, new: &std::path::Path) -> io::Result<()> {
 }
 
 #[cfg(test)]
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn with_test_config(test: impl FnOnce(&std::path::Path)) {
+    let _guard = ENV_LOCK.lock().unwrap();
+    struct Restore {
+        previous: Option<std::ffi::OsString>,
+        dir: PathBuf,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                    None => std::env::remove_var("XDG_CONFIG_HOME"),
+                }
+            }
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+    let restore = Restore {
+        previous: std::env::var_os("XDG_CONFIG_HOME"),
+        dir: std::env::temp_dir().join(format!("boltwarden-offline-test-{}", uuid::Uuid::new_v4())),
+    };
+    unsafe {
+        std::env::set_var("XDG_CONFIG_HOME", &restore.dir);
+    }
+    test(&restore.dir);
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passkey_verification_defaults_safely_and_persists_all_choices() {
+        let migrated: AppSettings =
+            serde_json::from_str(r#"{"browser_integration_enabled":true}"#).unwrap();
+        assert_eq!(migrated.passkey_verification, PasskeyVerification::Always);
+        assert_eq!(PasskeyVerification::Always.label(), "Always ask");
+        assert_eq!(
+            PasskeyVerification::WhenRequired.label(),
+            "Only when required"
+        );
+        assert_eq!(PasskeyVerification::VaultUnlock.label(), "Use vault unlock");
+        with_test_config(|_| {
+            for (choice, serialized) in [
+                (PasskeyVerification::WhenRequired, "when_required"),
+                (PasskeyVerification::VaultUnlock, "vault_unlock"),
+                (PasskeyVerification::Always, "always"),
+            ] {
+                let settings = AppSettings {
+                    passkey_verification: choice,
+                    ..Default::default()
+                };
+                save_settings(&settings).unwrap();
+                assert_eq!(load_settings().passkey_verification, choice);
+                let raw: serde_json::Value =
+                    serde_json::from_slice(&fs::read(config_path(SETTINGS_FILE).unwrap()).unwrap())
+                        .unwrap();
+                assert_eq!(raw["passkey_verification"], serialized);
+            }
+        });
+    }
+
+    #[test]
+    fn offline_cache_storage_is_private_and_forgotten_with_session() {
+        with_test_config(|root| {
+            assert!(load_settings().keep_offline_copy);
+            assert!(
+                serde_json::from_str::<AppSettings>("{}")
+                    .unwrap()
+                    .keep_offline_copy
+            );
+            assert!(load_vault_cache().is_none());
+            save_vault_cache(b"encrypted").unwrap();
+            assert_eq!(load_vault_cache().as_deref(), Some("encrypted"));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    fs::metadata(root.join(APP_DIR).join(VAULT_CACHE_FILE))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+            clear_saved_session().unwrap();
+            assert!(load_vault_cache().is_none());
+            clear_vault_cache().unwrap();
+        });
+    }
 
     #[test]
     fn migrates_the_legacy_directory_once() {
@@ -438,9 +644,6 @@ mod tests {
         assert_eq!(fs::read_to_string(new.join(SESSION_FILE)).unwrap(), "saved");
         let _ = fs::remove_dir_all(temp);
     }
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn reuses_existing_device_identifier_from_xdg_config() {
@@ -611,6 +814,7 @@ mod tests {
         }
 
         save_settings(&AppSettings {
+            keep_offline_copy: true,
             show_keyboard_shortcuts: false,
             close_after_copy: false,
             restore_recent_item: false,
@@ -622,6 +826,7 @@ mod tests {
             show_website_icons: true,
             obscure_screen_capture: false,
             start_list: StartList::None,
+            ..Default::default()
         })
         .unwrap();
         let actual = load_settings();
@@ -636,6 +841,7 @@ mod tests {
         assert_eq!(actual.idle_lock_timeout_minutes, 15);
 
         save_settings(&AppSettings {
+            keep_offline_copy: true,
             show_keyboard_shortcuts: true,
             close_after_copy: true,
             restore_recent_item: true,
@@ -647,6 +853,7 @@ mod tests {
             show_website_icons: true,
             obscure_screen_capture: true,
             start_list: StartList::None,
+            ..Default::default()
         })
         .unwrap();
         let actual = load_settings();
@@ -664,6 +871,27 @@ mod tests {
         assert_eq!(actual.idle_lock_timeout_minutes, 60);
 
         restore_var("XDG_CONFIG_HOME", previous_config_home);
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn window_sort_survives_reload_and_popup_settings_updates() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp =
+            std::env::temp_dir().join(format!("boltwarden-order-test-{}", uuid::Uuid::new_v4()));
+        let previous = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &temp);
+        }
+        assert_eq!(load_window_order(), ListOrder::Name);
+        for order in [ListOrder::Modified, ListOrder::Created, ListOrder::Name] {
+            save_window_order(order).unwrap();
+            save_settings(&AppSettings::default()).unwrap();
+            assert_eq!(load_window_order(), order);
+        }
+        fs::write(temp.join(APP_DIR).join("window-order.json"), "invalid").unwrap();
+        assert_eq!(load_window_order(), ListOrder::Name);
+        restore_var("XDG_CONFIG_HOME", previous);
         let _ = fs::remove_dir_all(temp);
     }
 

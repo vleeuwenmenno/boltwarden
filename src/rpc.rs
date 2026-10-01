@@ -86,6 +86,13 @@ pub enum RpcRequest {
     GetSshApproval,
     DecideSshApproval(SshApprovalDecision),
     GetSshApprovalStatus,
+    GetBrowserApproval,
+    DecideBrowserApproval(crate::browser_approval::BrowserApprovalDecision),
+    ListPairedBrowsers,
+    RevokePairedBrowser {
+        id: String,
+    },
+    CancelUnlock,
     LockVault,
     ClearSavedSession,
 }
@@ -116,6 +123,10 @@ pub enum RpcResponse {
     SshApproval(Option<SshApprovalRequest>),
     SshApprovalDecided(Result<SshApprovalStatus, String>),
     SshApprovalStatus(Option<SshApprovalStatus>),
+    BrowserApproval(Option<crate::browser_approval::BrowserApprovalRequest>),
+    BrowserApprovalDecided(Result<(), String>),
+    PairedBrowsers(Result<Vec<crate::browser::pairing::PairingRecord>, String>),
+    BrowserRevoked(Result<(), String>),
     LockVault(Result<(), String>),
     ClearSavedSession(Result<(), String>),
     /// The request was rejected before it reached a handler (bad token, unreadable body).
@@ -124,6 +135,7 @@ pub enum RpcResponse {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum RpcError {
+    Network(String),
     RepromptRequired,
     Message(String),
     TwoFactorRequired { providers: Vec<TwoFactorProvider> },

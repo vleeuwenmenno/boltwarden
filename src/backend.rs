@@ -24,6 +24,7 @@ pub struct LocalBackend {
 #[derive(Debug, Clone)]
 pub enum BackendError {
     RepromptRequired,
+    Network(String),
     Message(String),
     TwoFactorRequired(Vec<TwoFactorProvider>),
 }
@@ -36,6 +37,58 @@ pub struct SearchResult {
 }
 
 impl AppBackend {
+    pub fn browser_approval(&self) -> Option<crate::browser_approval::BrowserApprovalRequest> {
+        match self {
+            Self::Remote(client) => match client.call(&RpcRequest::GetBrowserApproval) {
+                Ok(RpcResponse::BrowserApproval(request)) => request,
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    pub fn decide_browser_approval(
+        &self,
+        decision: crate::browser_approval::BrowserApprovalDecision,
+    ) -> Result<(), String> {
+        match self {
+            Self::Remote(client) => {
+                match client.call(&RpcRequest::DecideBrowserApproval(decision))? {
+                    RpcResponse::BrowserApprovalDecided(result) => result,
+                    _ => Err("Unexpected browser approval response".into()),
+                }
+            }
+            _ => Err("Browser integration requires the daemon".into()),
+        }
+    }
+
+    pub fn paired_browsers(&self) -> Result<Vec<crate::browser::pairing::PairingRecord>, String> {
+        match self {
+            Self::Remote(client) => match client.call(&RpcRequest::ListPairedBrowsers)? {
+                RpcResponse::PairedBrowsers(result) => result,
+                _ => Err("Unexpected paired browsers response".into()),
+            },
+            Self::Local(_) => Err("Browser integration requires the daemon".into()),
+            Self::Demo(_) => Ok(Vec::new()),
+        }
+    }
+
+    pub fn revoke_browser(&self, id: String) -> Result<(), String> {
+        match self {
+            Self::Remote(client) => match client.call(&RpcRequest::RevokePairedBrowser { id })? {
+                RpcResponse::BrowserRevoked(result) => result,
+                _ => Err("Unexpected browser revocation response".into()),
+            },
+            _ => Err("Browser integration requires the daemon".into()),
+        }
+    }
+
+    pub fn cancel_unlock(&self) {
+        if let Self::Remote(client) = self {
+            let _ = client.send(&RpcRequest::CancelUnlock);
+        }
+    }
+
     pub fn local() -> Self {
         Self::Local(Arc::new(Mutex::new(LocalBackend {
             bw: BwClient::new(),
@@ -154,9 +207,10 @@ impl AppBackend {
     pub fn list_items(&self, state: ItemState, query: &str) -> Result<SearchResult, BackendError> {
         match self {
             Self::Local(local) => {
-                let backend = local
+                let mut backend = local
                     .lock()
                     .map_err(|_| BackendError::Message("session lock poisoned".into()))?;
+                backend.bw.sync_if_stale();
                 let items = backend
                     .bw
                     .list_items_in(state, query)
@@ -539,8 +593,14 @@ impl AppBackend {
 
     pub fn apply_settings(&self, settings: &AppSettings) -> Result<SshAgentStatus, String> {
         match self {
-            Self::Local(_) => {
+            Self::Local(local) => {
                 config::save_settings(settings).map_err(|e| e.to_string())?;
+                local
+                    .lock()
+                    .map_err(|_| "session lock poisoned".to_string())?
+                    .bw
+                    .apply_offline_setting()
+                    .map_err(|e| e.to_string())?;
                 Ok(local_ssh_agent_status(settings))
             }
             Self::Demo(_) => Ok(local_ssh_agent_status(settings)),
@@ -688,6 +748,7 @@ impl LocalBackend {
 impl From<BwError> for BackendError {
     fn from(error: BwError) -> Self {
         match error {
+            BwError::Network(message) => Self::Network(message),
             BwError::RepromptRequired => Self::RepromptRequired,
             BwError::TwoFactorRequired(challenge) => {
                 Self::TwoFactorRequired(challenge.providers().to_vec())
@@ -701,6 +762,7 @@ impl From<RpcError> for BackendError {
     fn from(error: RpcError) -> Self {
         match error {
             RpcError::RepromptRequired => Self::RepromptRequired,
+            RpcError::Network(message) => Self::Network(message),
             RpcError::Message(message) => Self::Message(message),
             RpcError::TwoFactorRequired { providers } => Self::TwoFactorRequired(providers),
         }
@@ -711,10 +773,57 @@ impl fmt::Display for BackendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RepromptRequired => write!(f, "Master password required for this item"),
-            Self::Message(message) => write!(f, "{message}"),
+            Self::Network(message) | Self::Message(message) => write!(f, "{message}"),
             Self::TwoFactorRequired(_) => write!(f, "two factor required"),
         }
     }
 }
 
 impl std::error::Error for BackendError {}
+
+#[cfg(test)]
+mod browser_management_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn paired_browser_list_preserves_daemon_errors_and_rejects_unexpected_responses() {
+        let path = std::env::temp_dir().join(format!("bw-list-test-{}", uuid::Uuid::new_v4()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            for response in [
+                RpcResponse::PairedBrowsers(Err("Pairing store unreadable".into())),
+                RpcResponse::PairedBrowsers(Ok(Vec::new())),
+                RpcResponse::HasSession(true),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = String::new();
+                stream.read_to_string(&mut request).unwrap();
+                let request: crate::rpc::RpcEnvelope = serde_json::from_str(&request).unwrap();
+                assert!(matches!(request.request, RpcRequest::ListPairedBrowsers));
+                stream
+                    .write_all(&serde_json::to_vec(&response).unwrap())
+                    .unwrap();
+            }
+        });
+        let backend = AppBackend::remote(RpcClient::new(path.clone(), "test-token".into()));
+        assert_eq!(
+            backend.paired_browsers().unwrap_err(),
+            "Pairing store unreadable"
+        );
+        assert!(backend.paired_browsers().unwrap().is_empty());
+        assert_eq!(
+            backend.paired_browsers().unwrap_err(),
+            "Unexpected paired browsers response"
+        );
+        server.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(
+            backend
+                .paired_browsers()
+                .unwrap_err()
+                .contains("could not connect to daemon")
+        );
+    }
+}

@@ -1,5 +1,8 @@
 pub mod auth;
+pub mod browser_approval;
+pub mod browser_setup;
 pub mod edit;
+pub mod paired_browsers;
 pub mod search;
 pub mod ssh_approval;
 pub mod summary;

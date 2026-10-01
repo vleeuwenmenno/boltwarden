@@ -17,6 +17,7 @@
       supportedSystems = [ "x86_64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
       packageVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+      browserIdentity = builtins.fromJSON (builtins.readFile ./extension/lib/browser-identities.json);
     in
     {
       packages = forAllSystems (
@@ -59,6 +60,29 @@
             postInstall = ''
               wrapProgram "$out/bin/boltwarden" \
                 --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath runtimeLibs}"
+
+              makeWrapper "$out/bin/boltwarden" "$out/bin/boltwarden-native-host" \
+                --add-flags native-host
+              mkdir -p "$out/lib/mozilla/native-messaging-hosts" \
+                "$out/etc/chromium/native-messaging-hosts"
+              cat > "$out/lib/mozilla/native-messaging-hosts/${browserIdentity.host_name}.json" <<EOF
+              {
+                "name": "${browserIdentity.host_name}",
+                "description": "Boltwarden browser integration",
+                "path": "$out/bin/boltwarden-native-host",
+                "type": "stdio",
+                "allowed_extensions": ["${browserIdentity.firefox_id}"]
+              }
+              EOF
+              cat > "$out/etc/chromium/native-messaging-hosts/${browserIdentity.host_name}.json" <<EOF
+              {
+                "name": "${browserIdentity.host_name}",
+                "description": "Boltwarden browser integration",
+                "path": "$out/bin/boltwarden-native-host",
+                "type": "stdio",
+                "allowed_origins": ["chrome-extension://${browserIdentity.chrome_id}/"]
+              }
+              EOF
             '';
 
             desktopItems = [
@@ -111,6 +135,14 @@
             ];
 
             inputsFrom = [ self.packages.${system}.default ];
+          };
+
+          extension = pkgs.mkShell {
+            packages = with pkgs; [
+              nodejs_22
+              gnumake
+              git
+            ];
           };
         }
       );

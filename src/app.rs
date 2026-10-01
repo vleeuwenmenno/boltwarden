@@ -5,7 +5,11 @@ use crate::model::{
     BwItem, BwItemDetail, ItemAction, ItemDraft, ItemState, SshAgentStatus, SyncStatus, TotpCode,
 };
 use crate::ui::auth::{AuthAction, AuthState, draw_auth};
+use crate::ui::browser_approval::{
+    BrowserApprovalAction, BrowserApprovalUiState, draw_browser_approval,
+};
 use crate::ui::edit::{EditAction, EditState, draw_edit};
+use crate::ui::paired_browsers::PairedBrowsersAction;
 use crate::ui::search::{SearchAction, SearchState, SearchView, draw_search};
 use crate::ui::ssh_approval::{SshApprovalAction, SshApprovalUiState, draw_ssh_approval};
 use crate::ui::summary::{SummaryAction, SummaryState, draw_summary};
@@ -29,9 +33,15 @@ enum Screen {
     TwoFactor,
     Search,
     SshApproval,
+    BrowserApproval,
 }
 
 enum BwResponse {
+    PairedBrowsers(Result<Vec<crate::browser::pairing::PairingRecord>, String>),
+    BrowserRevoked {
+        id: String,
+        result: Result<(), String>,
+    },
     QuickCopied {
         id: String,
         result: Result<(), BackendError>,
@@ -56,6 +66,10 @@ enum BwResponse {
         result: Result<TotpCode, BackendError>,
     },
     SshApprovalDecision(Result<(), String>),
+    BrowserApprovalDecision {
+        id: String,
+        result: Result<(), String>,
+    },
     ItemAction {
         id: String,
         action: ItemAction,
@@ -80,6 +94,9 @@ pub enum PopupCommand {
     Hide,
     Toggle,
     SshApproval {
+        auto_hide: bool,
+    },
+    BrowserApproval {
         auto_hide: bool,
     },
     Unlock {
@@ -108,6 +125,9 @@ pub struct App {
     search_state: SearchState,
     ssh_approval_state: SshApprovalUiState,
     ssh_approval_return: Option<(Screen, bool)>,
+    browser_approval_state: BrowserApprovalUiState,
+    browser_approval_return: Option<(Screen, bool)>,
+    paired_browsers_fetched: Option<Instant>,
     summary_state: SummaryState,
     /// Open edit form for the item shown in the summary.
     edit_state: Option<EditState>,
@@ -155,6 +175,9 @@ impl App {
                 }
                 PopupCommand::SshApproval { auto_hide } => {
                     self.enter_ssh_approval(ctx, auto_hide);
+                }
+                PopupCommand::BrowserApproval { auto_hide } => {
+                    self.enter_browser_approval(ctx, auto_hide)
                 }
                 PopupCommand::Unlock {
                     auto_hide,
@@ -207,6 +230,9 @@ impl App {
             search_state: SearchState::default(),
             ssh_approval_state: SshApprovalUiState::default(),
             ssh_approval_return: None,
+            browser_approval_state: BrowserApprovalUiState::default(),
+            browser_approval_return: None,
+            paired_browsers_fetched: None,
             summary_state: SummaryState::default(),
             edit_state: None,
             rx,
@@ -272,6 +298,7 @@ impl App {
         self.two_factor_state.token.zeroize();
         self.two_factor_state = TwoFactorState::default();
         self.search_state = SearchState::default();
+        self.paired_browsers_fetched = None;
         self.search_state.start_list = self.settings.start_list;
         self.summary_state = SummaryState::default();
         self.summary_open = false;
@@ -282,6 +309,8 @@ impl App {
         self.reprompt_at = None;
         self.ssh_approval_state = SshApprovalUiState::default();
         self.ssh_approval_return = None;
+        self.browser_approval_state = BrowserApprovalUiState::default();
+        self.browser_approval_return = None;
     }
 
     fn spawn_authorize_item(&mut self, id: String) {
@@ -455,6 +484,14 @@ impl App {
     fn poll_responses(&mut self, ctx: &Context) {
         while let Ok(resp) = self.rx.try_recv() {
             match resp {
+                BwResponse::PairedBrowsers(result) => {
+                    self.search_state.paired_browsers.finish_refresh(result);
+                    self.paired_browsers_fetched = Some(Instant::now());
+                }
+                BwResponse::BrowserRevoked { id, result } => {
+                    self.search_state.paired_browsers.finish_revoke(&id, result);
+                    self.paired_browsers_fetched = None;
+                }
                 BwResponse::QuickCopied { id, result } => match result {
                     Ok(()) => {
                         self.quick_copy_after_verify = false;
@@ -490,8 +527,16 @@ impl App {
                             }
                         }
                         Err(error) => {
-                            self.search_state.warning =
-                                Some(format!("Sync failed; showing cached items: {error}"))
+                            if matches!(error, BackendError::Network(_)) {
+                                if let Some(status) = self.search_state.sync_status.as_mut() {
+                                    status.offline = true;
+                                }
+                                self.search_state.warning = Some(format!("Offline: {error}"));
+                            } else {
+                                self.search_state.warning =
+                                    Some(format!("Sync failed; showing cached items: {error}"));
+                            }
+                            self.search_state.force_refresh();
                         }
                     }
                 }
@@ -569,6 +614,13 @@ impl App {
                         .view
                         .item_state()
                         .unwrap_or(ItemState::Active);
+                    if self.search_state.view.item_state().is_none() {
+                        // The reply cannot populate a management view, but the query
+                        // must run again when the user returns to the vault list.
+                        self.search_state.force_refresh();
+                        ctx.request_repaint();
+                        continue;
+                    }
                     if query != self.search_state.query.trim() || state != current_state {
                         ctx.request_repaint();
                         continue;
@@ -576,6 +628,7 @@ impl App {
                     match result {
                         Ok(items) => {
                             self.search_state.set_results(items);
+                            self.search_state.reset_results_for_empty_query();
                             self.search_state.error = None;
                             self.search_state.warning = warning;
                             self.search_state.sync_status = Some(status);
@@ -719,12 +772,47 @@ impl App {
                             Some(format!("could not resolve SSH approval: {e}"));
                     }
                 }
+                BwResponse::BrowserApprovalDecision { id, result } => {
+                    if self
+                        .browser_approval_state
+                        .request
+                        .as_ref()
+                        .is_some_and(|request| request.id == id)
+                    {
+                        self.browser_approval_state.in_flight = false;
+                        match result {
+                            Ok(()) => {
+                                self.browser_approval_state.request = None;
+                                if self.screen == Screen::BrowserApproval {
+                                    self.leave_browser_approval(ctx);
+                                } else {
+                                    self.browser_approval_state = BrowserApprovalUiState::default();
+                                    self.browser_approval_return = None;
+                                    // A newer SSH prompt must not restore this completed screen.
+                                    if self.ssh_approval_return.as_ref().is_some_and(
+                                        |(screen, _)| *screen == Screen::BrowserApproval,
+                                    ) {
+                                        self.ssh_approval_return = None;
+                                    }
+                                }
+                            }
+                            Err(error) => self.browser_approval_state.error = Some(error),
+                        }
+                    }
+                }
             }
             ctx.request_repaint();
         }
     }
 
     fn hide_quick_access(&mut self, ctx: &Context) {
+        if let Some(decision) = self.browser_approval_state.decision(false) {
+            let _ = self.backend.decide_browser_approval(decision);
+            self.browser_approval_state.request = None;
+        }
+        if self.screen == Screen::Auth {
+            self.backend.cancel_unlock();
+        }
         if self
             .edit_state
             .as_ref()
@@ -751,6 +839,10 @@ impl App {
     }
 
     fn exit_now(&mut self) -> ! {
+        if let Some(decision) = self.browser_approval_state.decision(false) {
+            let _ = self.backend.decide_browser_approval(decision);
+        }
+        self.browser_approval_state.password.zeroize();
         // process::exit also skips Drop. Explicitly wipe UI-owned plaintext first.
         self.auth_state.password.zeroize();
         self.two_factor_state.token.zeroize();
@@ -763,6 +855,14 @@ impl App {
 
     fn show_quick_access(&mut self, ctx: &Context) {
         debug_log("show quick access");
+        if matches!(self.screen, Screen::BrowserApproval | Screen::SshApproval) {
+            self.window_visible = true;
+            self.unfocused_since = None;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            return;
+        }
         self.window_visible = true;
         self.auth_auto_hide = false;
         self.auth_inhibit_focus_hide = false;
@@ -804,8 +904,94 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
+    fn enter_browser_approval(&mut self, ctx: &Context, auto_hide: bool) {
+        let request = self.backend.browser_approval();
+        if self.edit_state.is_some() || self.screen == Screen::SshApproval {
+            if let Some(request) = request {
+                let _ = self.backend.decide_browser_approval(
+                    crate::browser_approval::BrowserApprovalDecision {
+                        request_id: request.id,
+                        approved: false,
+                        password: String::new(),
+                        selected_id: None,
+                        use_other_device: false,
+                    },
+                );
+            }
+            return;
+        }
+        if self.screen != Screen::BrowserApproval {
+            self.browser_approval_return = Some((self.screen.clone(), self.summary_open));
+        }
+        self.browser_approval_state = BrowserApprovalUiState::default();
+        self.browser_approval_state.request = request;
+        self.browser_approval_state.auto_hide = auto_hide;
+        self.browser_approval_state.shown_at = Some(Instant::now());
+        self.browser_approval_state.last_poll = Some(Instant::now());
+        self.screen = Screen::BrowserApproval;
+        self.summary_open = false;
+        self.window_visible = true;
+        self.unfocused_since = None;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    fn leave_browser_approval(&mut self, ctx: &Context) {
+        let auto_hide = self.browser_approval_state.auto_hide;
+        self.browser_approval_state = BrowserApprovalUiState::default();
+        if let Some((screen, summary_open)) = self.browser_approval_return.take() {
+            self.screen = screen;
+            self.summary_open = summary_open;
+        } else {
+            self.screen = if self.backend.has_session() {
+                Screen::Search
+            } else {
+                Screen::Auth
+            };
+            self.summary_open = false;
+        }
+        if auto_hide {
+            self.hide_quick_access(ctx);
+        }
+    }
+
+    fn update_browser_approval(&mut self, root: &mut egui::Ui) {
+        let ctx = root.ctx().clone();
+        if !self.browser_approval_state.in_flight
+            && self
+                .browser_approval_state
+                .last_poll
+                .is_none_or(|at| at.elapsed() >= Duration::from_millis(500))
+        {
+            self.browser_approval_state.last_poll = Some(Instant::now());
+            let active = self.backend.browser_approval();
+            if self.browser_approval_state.request.as_ref().map(|r| &r.id)
+                != active.as_ref().map(|r| &r.id)
+            {
+                self.browser_approval_state.request = None;
+                self.browser_approval_state.password.zeroize();
+            }
+        }
+        match draw_browser_approval(root, &mut self.browser_approval_state) {
+            Some(BrowserApprovalAction::Back) => self.leave_browser_approval(&ctx),
+            Some(BrowserApprovalAction::Decide(decision)) => {
+                self.browser_approval_state.in_flight = true;
+                self.browser_approval_state.error = None;
+                let backend = self.backend.clone();
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    let id = decision.request_id.clone();
+                    let result = backend.decide_browser_approval(decision);
+                    let _ = tx.send(BwResponse::BrowserApprovalDecision { id, result });
+                });
+            }
+            None => {}
+        }
+    }
+
     fn enter_unlock_prompt(&mut self, ctx: &Context, auto_hide: bool, inhibit_focus_hide: bool) {
-        debug_log("show SSH unlock prompt");
+        debug_log("show integration unlock prompt");
         self.window_visible = true;
         self.auth_auto_hide = auto_hide;
         self.auth_inhibit_focus_hide = inhibit_focus_hide;
@@ -815,7 +1001,7 @@ impl App {
         self.summary_open = false;
         self.auth_state = AuthState::default();
         self.auth_state.notice =
-            Some("Vault is locked. Unlock to let the SSH agent list or use your keys.".into());
+            Some("Vault is locked. Unlock to continue using Boltwarden integrations.".into());
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -1105,7 +1291,7 @@ impl eframe::App for App {
 
         // Screens with their own Escape handling must not hide the whole window.
         let escape_handled_by_screen = match self.screen {
-            Screen::TwoFactor | Screen::SshApproval => true,
+            Screen::TwoFactor | Screen::SshApproval | Screen::BrowserApproval => true,
             Screen::Auth => self.auth_state.confirm_forget,
             Screen::Search => self.summary_open || self.search_state.view != SearchView::Results,
         };
@@ -1121,12 +1307,25 @@ impl eframe::App for App {
         }
 
         if self.screen == Screen::Search
+            && !matches!(
+                self.search_state.view,
+                SearchView::PairedBrowsers | SearchView::BrowserSetup
+            )
             && self.edit_state.is_none()
             && !self.summary_state.action_in_flight
         {
             let requested =
                 ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R));
-            if requested || self.last_sync_attempt.elapsed() >= Duration::from_secs(60) {
+            if self.search_state.offline()
+                && self.last_sync_attempt.elapsed() >= Duration::from_secs(60)
+            {
+                self.last_sync_attempt = Instant::now();
+                self.search_state.force_refresh();
+            }
+            if requested
+                || (!self.search_state.offline()
+                    && self.last_sync_attempt.elapsed() >= Duration::from_secs(60))
+            {
                 self.spawn_sync();
             }
         }
@@ -1162,6 +1361,7 @@ impl eframe::App for App {
             Screen::Auth => self.update_auth(root),
             Screen::TwoFactor => self.update_two_factor(root),
             Screen::SshApproval => self.update_ssh_approval(root),
+            Screen::BrowserApproval => self.update_browser_approval(root),
             Screen::Search if self.summary_open && self.reprompt_id.is_some() => {
                 self.update_summary(root)
             }
@@ -1290,6 +1490,7 @@ impl App {
             .detail
             .as_ref()
             .map(|detail| detail.copy_version());
+        self.summary_state.offline = self.search_state.offline();
         match draw_summary(
             root,
             &mut self.summary_state,
@@ -1352,7 +1553,25 @@ impl App {
         }
     }
 
+    fn spawn_paired_browsers_refresh(&self) {
+        let backend = self.backend.clone();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(BwResponse::PairedBrowsers(backend.paired_browsers()));
+        });
+    }
+
     fn update_search(&mut self, root: &mut egui::Ui) {
+        if self.search_state.view == SearchView::PairedBrowsers
+            && ((!self.search_state.paired_browsers.loaded
+                && self.search_state.paired_browsers.error.is_none())
+                || self
+                    .paired_browsers_fetched
+                    .is_none_or(|at| at.elapsed() >= Duration::from_secs(2)))
+            && self.search_state.paired_browsers.begin_refresh()
+        {
+            self.spawn_paired_browsers_refresh();
+        }
         let ctx = &root.ctx().clone();
         self.search_state.reset_results_for_empty_query();
         if self.search_state.needs_search() {
@@ -1399,12 +1618,19 @@ impl App {
                 Err(e) => self.search_state.warning = Some(e),
             },
             SearchAction::NewItem => {
+                if self.search_state.offline() {
+                    return;
+                }
                 self.summary_state = SummaryState::default();
                 self.summary_open = true;
                 let mut edit = EditState::create();
                 edit.folders = self.backend.folders().unwrap_or_default();
                 self.edit_state = Some(edit);
                 self.unfocused_since = None;
+            }
+            SearchAction::SetKeepOfflineCopy(keep) => {
+                self.settings.keep_offline_copy = keep;
+                self.save_and_apply_settings();
             }
             SearchAction::SetKeyboardShortcuts(show) => {
                 self.settings.show_keyboard_shortcuts = show;
@@ -1451,6 +1677,36 @@ impl App {
                 self.settings.ssh_agent_enabled = enabled;
                 self.save_and_apply_settings();
             }
+            SearchAction::SetBrowserIntegrationEnabled(enabled) => {
+                self.settings.browser_integration_enabled = enabled;
+                self.save_and_apply_settings();
+                self.paired_browsers_fetched = None;
+            }
+            SearchAction::SetDefaultUriMatch(kind) => {
+                self.settings.default_uri_match = kind;
+                self.save_and_apply_settings();
+            }
+            SearchAction::SetPasskeyVerification(verification) => {
+                self.settings.passkey_verification = verification;
+                self.save_and_apply_settings();
+            }
+            SearchAction::OpenBrowserSetup => {
+                self.search_state.view = SearchView::BrowserSetup;
+                self.search_state.focus_search = false;
+                self.search_state.browser_setup.refresh();
+            }
+            SearchAction::OpenPairedBrowsers => self.search_state.open_paired_browsers(),
+            SearchAction::PairedBrowsers(PairedBrowsersAction::Refresh) => {
+                self.spawn_paired_browsers_refresh();
+            }
+            SearchAction::PairedBrowsers(PairedBrowsersAction::Revoke(id)) => {
+                let backend = self.backend.clone();
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    let result = backend.revoke_browser(id.clone());
+                    let _ = tx.send(BwResponse::BrowserRevoked { id, result });
+                });
+            }
             SearchAction::SetSshAgentSocketPath(path) => {
                 self.settings.ssh_agent_socket_path = path;
                 self.save_and_apply_settings();
@@ -1476,12 +1732,13 @@ impl App {
         {
             ctx.request_repaint_after(after);
         }
-        if self.screen == Screen::SshApproval {
+        if matches!(self.screen, Screen::SshApproval | Screen::BrowserApproval) {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
         // Background work reports back over a channel, which does not wake egui.
         if self.sync_in_flight
             || self.search_state.in_flight
+            || self.search_state.paired_browsers.is_busy()
             || self.summary_state.in_flight
             || self.summary_state.totp_in_flight
             || self.auth_state.in_flight
@@ -1539,6 +1796,60 @@ mod security_tests {
         assert!(app.summary_state.detail.is_none());
         assert!(stale_worker.send(BwResponse::Login(Ok(()))).is_err());
     }
+    #[test]
+    fn browser_management_keeps_its_view_when_old_vault_search_finishes() {
+        let (_, receiver) = mpsc::channel();
+        let mut app = App::with_settings(
+            AppBackend::demo(),
+            receiver,
+            AppSettings {
+                show_website_icons: false,
+                restore_recent_item: false,
+                ..Default::default()
+            },
+        );
+        app.search_state.query = "browsers".into();
+        app.search_state.mark_queried();
+        app.search_state.open_paired_browsers();
+        app.tx
+            .send(BwResponse::Search {
+                query: "browsers".into(),
+                state: ItemState::Active,
+                result: Err(BackendError::Message("stale vault search".into())),
+                warning: None,
+                status: SyncStatus::default(),
+                icons_url: None,
+            })
+            .unwrap();
+        app.search_state.paired_browsers.begin_refresh();
+        app.tx
+            .send(BwResponse::PairedBrowsers(Err("Daemon unavailable".into())))
+            .unwrap();
+        app.poll_responses(&Context::default());
+        assert_eq!(app.search_state.view, SearchView::PairedBrowsers);
+        assert!(app.search_state.error.is_none());
+        assert_eq!(
+            app.search_state.paired_browsers.error.as_deref(),
+            Some("Daemon unavailable")
+        );
+        assert!(!app.search_state.paired_browsers.is_busy());
+        Context::default()
+            .run_ui(egui::RawInput::default(), |root| {
+                app.update_search(root);
+            })
+            .textures_delta
+            .clear();
+        assert!(
+            !app.search_state.paired_browsers.is_busy(),
+            "a failed initial lookup must wait before retrying"
+        );
+        app.search_state.close_paired_browsers();
+        assert!(
+            app.search_state.needs_search(),
+            "returning must reload the discarded query"
+        );
+    }
+
     #[test]
     fn hiding_dirty_editor_requests_confirmation() {
         let (_, receiver) = mpsc::channel();

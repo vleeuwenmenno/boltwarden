@@ -5,6 +5,7 @@ use crate::model::{
     HealthReport, ItemAction, ItemDates, ItemDraft, ItemState, LoginDraft, Passkey, SshKey,
     SyncStatus, TotpCode,
 };
+use crate::uri_match::{self, LoginUri, UriMatchType};
 use aes::Aes256;
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
@@ -38,8 +39,15 @@ type HmacSha1 = Hmac<Sha1>;
 
 #[derive(Clone)]
 pub struct BwClient {
+    email: Option<String>,
+    raw_profile: Option<Value>,
+    raw_folders: Vec<Value>,
+    undecodable_ciphers: Vec<Value>,
+    retry_seconds: u64,
     client: Client,
     reauth: Option<(String, SavedKdf, String)>,
+    /// Established only by a completed password unlock of this in-memory session.
+    verified_unlock: bool,
     item_grants: HashMap<String, Instant>,
     base_url: String,
     device_identifier: String,
@@ -65,6 +73,80 @@ struct StoredCipher {
     raw: Value,
     item_key: Vec<u8>,
     revision_date: Option<String>,
+    /// Matching rules stay in the daemon, rather than the desktop item RPC model.
+    browser_uris: Vec<LoginUri>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BrowserMatchSummary {
+    pub id: String,
+    pub name: String,
+    pub username: Option<String>,
+    pub revision: String,
+    pub reprompt: bool,
+    pub insecure_downgrade: bool,
+}
+
+/// Selection metadata only; private key material never enters an RPC item model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasskeySummary {
+    pub requires_password: bool,
+    pub id: String,
+    pub credential_id: String,
+    pub revision: String,
+    pub name: String,
+    pub user_name: Option<String>,
+    pub user_display_name: Option<String>,
+}
+
+/// Daemon-owned evidence after explicit consent for this passkey operation.
+/// Reusing a verified vault unlock never satisfies an item's fresh-password rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasskeyVerificationEvidence {
+    None,
+    FreshPassword,
+    VaultUnlock,
+}
+
+impl PasskeyVerificationEvidence {
+    fn verified(self) -> bool {
+        self != Self::None
+    }
+}
+
+struct PasskeyMaterial {
+    credential_id: Vec<u8>,
+    user_handle: Option<Vec<u8>>,
+    user_name: Option<String>,
+    user_display_name: Option<String>,
+    discoverable: bool,
+    pkcs8_der: Zeroizing<Vec<u8>>,
+}
+
+/// The only plaintext fields the fill protocol may return. Never include an item
+/// detail, TOTP seed, custom fields, notes, or passkey key material.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct BrowserCredentials {
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub insecure_downgrade: bool,
+}
+
+impl std::fmt::Debug for BrowserCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrowserCredentials")
+            .field("username", &"<redacted>")
+            .field("password", &"<redacted>")
+            .field("insecure_downgrade", &self.insecure_downgrade)
+            .finish()
+    }
+}
+
+impl Drop for BrowserCredentials {
+    fn drop(&mut self) {
+        self.username.zeroize();
+        self.password.zeroize();
+    }
 }
 
 #[derive(Debug)]
@@ -72,6 +154,7 @@ pub enum BwError {
     NotUnlocked,
     RepromptRequired,
     TwoFactorRequired(TwoFactorChallenge),
+    Network(String),
     Cli(String),
     Parse(String),
     NotFound,
@@ -83,7 +166,7 @@ impl std::fmt::Display for BwError {
             BwError::RepromptRequired => write!(f, "Master password required for this item"),
             BwError::NotUnlocked => write!(f, "vault is not unlocked"),
             BwError::TwoFactorRequired(_) => write!(f, "two factor required"),
-            BwError::Cli(s) => write!(f, "{s}"),
+            BwError::Network(s) | BwError::Cli(s) => write!(f, "{s}"),
             BwError::Parse(s) => write!(f, "parse error: {s}"),
             BwError::NotFound => write!(f, "not found"),
         }
@@ -190,6 +273,9 @@ impl Drop for BwClient {
 impl Drop for StoredCipher {
     fn drop(&mut self) {
         self.item_key.zeroize();
+        for uri in &mut self.browser_uris {
+            uri.uri.zeroize();
+        }
     }
 }
 impl Drop for TwoFactorChallenge {
@@ -207,13 +293,99 @@ impl Default for BwClient {
 }
 
 impl BwClient {
+    #[cfg(test)]
+    pub(crate) fn browser_test_fixture() -> Self {
+        let mut client = tests::protected_fixture();
+        // Browser integration tests must never contact the fixture's example server.
+        client.last_sync_attempt = Some(Instant::now());
+        client
+    }
+
+    #[cfg(test)]
+    pub(crate) fn browser_passkey_test_fixture() -> Self {
+        passkey_vault_tests::fixture()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn browser_passkey_test_add_second(&mut self) {
+        let stored = &self.ciphers["cipher-edit"];
+        let mut raw = stored.raw.clone();
+        raw["id"] = json!("cipher-second");
+        raw["name"] = encrypt_value("Second account", &stored.item_key).unwrap();
+        let credential = &mut raw["login"]["fido2Credentials"][0];
+        credential["credentialId"] =
+            encrypt_value("18d70b74-e9f5-4522-a425-e5dcd40107e7", &stored.item_key).unwrap();
+        credential["userName"] = encrypt_value("bob@example.com", &stored.item_key).unwrap();
+        credential["userDisplayName"] = encrypt_value("Bob", &stored.item_key).unwrap();
+        let (detail, stored) = decode_cipher(
+            raw,
+            self.user_key.as_ref().unwrap(),
+            &self.organization_keys,
+            &self.folders,
+        )
+        .unwrap();
+        self.items.push(detail);
+        self.ciphers.insert("cipher-second".into(), stored);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn browser_passkey_test_set_reprompt(&mut self, id: &str, enabled: bool) {
+        let mut raw = self.ciphers[id].raw.clone();
+        raw_set(&mut raw, "reprompt", json!(u8::from(enabled)));
+        self.replace_cipher(raw).unwrap();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn browser_test_clear_unlock_verification(&mut self) {
+        self.verified_unlock = false;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn browser_test_change_password(&mut self) {
+        let stored = self.ciphers.get("cipher-edit").unwrap();
+        let mut raw = stored.raw.clone();
+        raw["login"]["password"] = encrypt_value("changed-password", &stored.item_key).unwrap();
+        self.replace_cipher(raw).unwrap();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn browser_test_use_offline_session(&mut self) {
+        self.access_token = None;
+        self.sync_status.offline = true;
+        self.last_sync_attempt = Some(Instant::now());
+        self.sync_warning = Some("Offline: showing encrypted local copy".into());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn browser_test_revoke_on_next_sync(&mut self) -> std::thread::JoinHandle<()> {
+        let (url, server) =
+            tests::serve_responses(vec![(400, json!({"error": "invalid_grant"}).to_string())]);
+        self.browser_test_use_offline_session();
+        self.base_url = url;
+        self.refresh_token = Some("revoked-refresh-token".into());
+        self.last_sync_attempt = None;
+        self.client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        server
+    }
+
     pub fn new() -> Self {
         Self {
+            email: None,
+            raw_profile: None,
+            raw_folders: Vec::new(),
+            undecodable_ciphers: Vec::new(),
+            retry_seconds: 60,
             reauth: None,
+            verified_unlock: false,
             item_grants: HashMap::new(),
             client: Client::builder()
                 .https_only(true)
                 .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(4))
                 .timeout(HTTP_TIMEOUT)
                 .user_agent("boltwarden/0.1")
                 .build()
@@ -238,7 +410,11 @@ impl BwClient {
     }
 
     pub fn has_session(&self) -> bool {
-        self.access_token.is_some() && self.user_key.is_some()
+        self.user_key.is_some() && (self.access_token.is_some() || self.sync_status.offline)
+    }
+
+    pub fn has_verified_unlock(&self) -> bool {
+        self.verified_unlock && self.has_session() && self.reauth.is_some()
     }
 
     pub fn unlock_saved_session(
@@ -246,7 +422,9 @@ impl BwClient {
         saved: &SavedSession,
         password: &str,
     ) -> Result<(), BwError> {
+        self.verified_unlock = false;
         self.base_url = normalize_server_url(&saved.server_url)?;
+        self.email = Some(saved.email.clone());
         let master_key = Zeroizing::new(master_key_from_saved(password, saved)?);
         let user_key = unwrap_user_key(&saved.master_key_encrypted_user_key, &master_key)?;
         self.reauth = Some((
@@ -256,9 +434,19 @@ impl BwClient {
         ));
         self.refresh_token = Some(saved_session_token(saved, &user_key)?);
         self.user_key = Some(user_key);
-        self.refresh_session()?;
-        self.sync()?;
-        Ok(())
+        let result = match self.refresh_session().and_then(|_| self.sync()) {
+            Err(error @ BwError::Network(_)) => {
+                self.last_sync_attempt = Some(Instant::now());
+                if self.load_offline_cache().is_ok() {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            }
+            result => result,
+        };
+        self.verified_unlock = result.is_ok();
+        result
     }
 
     pub fn login(
@@ -268,7 +456,9 @@ impl BwClient {
         password: &str,
         remember: bool,
     ) -> Result<(), BwError> {
+        self.verified_unlock = false;
         self.base_url = normalize_server_url(server_url)?;
+        self.email = Some(email.trim().to_string());
         let prelogin = self.prelogin(email)?;
         let master_key = Zeroizing::new(master_key(email, password, &prelogin)?);
         let password_hash = password_hash(password, &master_key);
@@ -315,6 +505,7 @@ impl BwClient {
         self.access_token = Some(token.access_token);
         self.user_key = Some(user_key);
         self.sync()?;
+        self.verified_unlock = true;
         Ok(())
     }
 
@@ -325,12 +516,14 @@ impl BwClient {
         token_code: &str,
         remember: bool,
     ) -> Result<(), BwError> {
+        self.verified_unlock = false;
         if !provider.supports_code_entry() {
             return Err(BwError::Cli(
                 "This two-step method is not supported; use the official Bitwarden app".into(),
             ));
         }
         self.base_url = challenge.base_url.clone();
+        self.email = Some(challenge.email.trim().to_string());
         self.device_identifier = challenge.device_identifier.clone();
         let submission = TwoFactorSubmission {
             provider,
@@ -368,7 +561,9 @@ impl BwClient {
         self.refresh_token = token.refresh_token;
         self.access_token = Some(token.access_token);
         self.user_key = Some(user_key);
-        self.sync()
+        self.sync()?;
+        self.verified_unlock = true;
+        Ok(())
     }
 
     pub fn list_items_in(&self, state: ItemState, search: &str) -> Result<Vec<BwItem>, BwError> {
@@ -397,18 +592,31 @@ impl BwClient {
 
     pub fn sync_now(&mut self) -> Result<SyncStatus, BwError> {
         self.require_unlocked()?;
-        self.sync()?;
-        Ok(self.sync_status())
+        match self.sync() {
+            Ok(()) => Ok(self.sync_status()),
+            Err(error) => {
+                if matches!(error, BwError::Network(_)) {
+                    self.retry_seconds = if self.sync_status.offline {
+                        (self.retry_seconds * 2).min(300)
+                    } else {
+                        60
+                    };
+                    self.sync_status.offline = true;
+                    self.sync_warning = Some(format!("Offline: showing local copy: {error}"));
+                } else {
+                    self.sync_warning = Some(format!("Sync failed; showing cached items: {error}"));
+                }
+                Err(error)
+            }
+        }
     }
 
     pub fn sync_if_stale(&mut self) {
         if self
             .last_sync_attempt
-            .is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(self.retry_seconds))
         {
-            if let Err(error) = self.sync_now() {
-                self.sync_warning = Some(format!("Sync failed; showing cached items: {error}"));
-            }
+            let _ = self.sync_now();
         }
     }
 
@@ -432,16 +640,29 @@ impl BwClient {
             .post(url)
             .form(&params)
             .send()
-            .map_err(|e| BwError::Cli(format!("refresh request failed: {e}")))?;
+            .map_err(|e| transport_error(e, "refresh request"))?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().unwrap_or_default();
+            if status.as_u16() == 401
+                || serde_json::from_str::<Value>(&body)
+                    .ok()
+                    .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_owned))
+                    .as_deref()
+                    == Some("invalid_grant")
+            {
+                self.invalidate_session();
+            }
             return Err(BwError::Cli(format!(
                 "refresh failed with HTTP {status}: {body}"
             )));
         }
-        let token: RefreshTokenResponse = response
-            .json()
+        let body = Zeroizing::new(
+            response
+                .text()
+                .map_err(|e| transport_error(e, "refresh response body"))?,
+        );
+        let token: RefreshTokenResponse = serde_json::from_str(&body)
             .map_err(|e| BwError::Parse(format!("refresh response: {e}")))?;
         let old_refresh = zeroize::Zeroizing::new(self.refresh_token.clone().unwrap_or_default());
         self.access_token.zeroize();
@@ -494,6 +715,15 @@ impl BwClient {
         if !self.ciphers.contains_key(id) {
             return Err(BwError::NotFound);
         }
+        self.verify_master_password(password)?;
+        self.item_grants.insert(id.to_owned(), Instant::now());
+        self.get_item(id)
+    }
+
+    /// Verify identity without granting access to any desktop or browser item.
+    /// Browser approval ownership and one-use authorization are enforced by its hub.
+    pub fn verify_master_password(&self, password: &str) -> Result<(), BwError> {
+        self.require_unlocked()?;
         let (salt, kdf, encrypted_key) = self
             .reauth
             .as_ref()
@@ -518,8 +748,301 @@ impl BwClient {
         ) {
             return Err(BwError::Cli("Incorrect master password".into()));
         }
-        self.item_grants.insert(id.to_owned(), Instant::now());
-        self.get_item(id)
+        Ok(())
+    }
+
+    pub fn browser_matches(
+        &self,
+        frame_url: &str,
+        default_match: UriMatchType,
+    ) -> Result<Vec<BrowserMatchSummary>, BwError> {
+        self.require_unlocked()?;
+        let mut matches = Vec::new();
+        for item in &self.items {
+            if item.state != ItemState::Active || item.item_type != "login" {
+                continue;
+            }
+            let Some(stored) = self.ciphers.get(&item.id) else {
+                continue;
+            };
+            let Some(insecure_downgrade) = browser_uri_match(stored, frame_url, default_match)
+            else {
+                continue;
+            };
+            matches.push(BrowserMatchSummary {
+                id: item.id.clone(),
+                name: item.name.clone(),
+                username: item.username.clone(),
+                revision: browser_revision(stored)?,
+                reprompt: self.item_requires_reprompt(&item.id),
+                insecure_downgrade,
+            });
+        }
+        matches.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        Ok(matches)
+    }
+
+    pub fn browser_credentials(
+        &self,
+        id: &str,
+        revision: &str,
+        frame_url: &str,
+        default_match: UriMatchType,
+        protected_authorized: bool,
+    ) -> Result<BrowserCredentials, BwError> {
+        self.require_unlocked()?;
+        let item = self
+            .items
+            .iter()
+            .find(|item| {
+                item.id == id && item.state == ItemState::Active && item.item_type == "login"
+            })
+            .ok_or(BwError::NotFound)?;
+        let stored = self.ciphers.get(id).ok_or(BwError::NotFound)?;
+        if browser_revision(stored)? != revision {
+            return Err(BwError::NotFound);
+        }
+        let insecure_downgrade =
+            browser_uri_match(stored, frame_url, default_match).ok_or(BwError::NotFound)?;
+        // Desktop grants deliberately cannot authorize browser requests.
+        if self.item_requires_reprompt(id) && !protected_authorized {
+            return Err(BwError::RepromptRequired);
+        }
+        Ok(BrowserCredentials {
+            username: item.username.clone(),
+            password: item.password.clone(),
+            insecure_downgrade,
+        })
+    }
+
+    /// Only the independently verified ES256, zero-counter profile is offered.
+    /// Positive counters need a separately verified atomic persistence protocol;
+    /// they fall back to another authenticator before any approval is requested.
+    pub fn browser_passkey_candidates(
+        &self,
+        rp_id: &str,
+        allow_ids: &[Vec<u8>],
+    ) -> Result<Vec<PasskeySummary>, BwError> {
+        self.require_unlocked()?;
+        let mut candidates = Vec::new();
+        for item in &self.items {
+            if item.state != ItemState::Active || item.item_type != "login" {
+                continue;
+            }
+            let Some(stored) = self.ciphers.get(&item.id) else {
+                continue;
+            };
+            for raw in stored_passkeys(stored) {
+                let Ok(credential) = decode_browser_passkey(raw, &stored.item_key, rp_id) else {
+                    continue;
+                };
+                if !passkey_requested(&credential, allow_ids) {
+                    continue;
+                }
+                let summary = PasskeySummary {
+                    requires_password: self.item_requires_reprompt(&item.id),
+                    id: item.id.clone(),
+                    credential_id: crate::passkeys::encode(&credential.credential_id),
+                    revision: browser_revision(stored)?,
+                    name: item.name.clone(),
+                    user_name: credential.user_name.clone(),
+                    user_display_name: credential.user_display_name.clone(),
+                };
+                // An item may contain several credentials; never confuse their
+                // array position with an index in the filtered result.
+                if !candidates.iter().any(|candidate: &PasskeySummary| {
+                    candidate.id == summary.id && candidate.credential_id == summary.credential_id
+                }) {
+                    candidates.push(summary);
+                }
+            }
+        }
+        candidates.sort_by(|a, b| {
+            a.name
+                .cmp(&b.name)
+                .then_with(|| a.id.cmp(&b.id))
+                .then_with(|| a.credential_id.cmp(&b.credential_id))
+        });
+        Ok(candidates)
+    }
+
+    /// Exclusion is independent of whether this implementation can sign a
+    /// credential. Unsupported counters and algorithms still exclude creation.
+    pub fn browser_passkey_excluded(
+        &self,
+        rp_id: &str,
+        exclude_ids: &[Vec<u8>],
+    ) -> Result<bool, BwError> {
+        self.require_unlocked()?;
+        if exclude_ids.is_empty() {
+            return Ok(false);
+        }
+        for item in &self.items {
+            if item.state != ItemState::Active || item.item_type != "login" {
+                continue;
+            }
+            let Some(stored) = self.ciphers.get(&item.id) else {
+                continue;
+            };
+            for raw in stored_passkeys(stored) {
+                let Ok(stored_rp) = passkey_field(raw, "rpId", &stored.item_key) else {
+                    continue;
+                };
+                if stored_rp != rp_id {
+                    continue;
+                }
+                let Ok(stored_id) = passkey_field(raw, "credentialId", &stored.item_key)
+                    .and_then(|id| crate::passkeys::credential_id(&id).map_err(passkey_error))
+                else {
+                    continue;
+                };
+                if exclude_ids.contains(&stored_id) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    pub fn browser_passkey_can_create(&self) -> Result<(), BwError> {
+        self.require_unlocked()?;
+        self.require_online()
+    }
+
+    /// Called after request-bound desktop consent and required verification.
+    /// Desktop item grants are deliberately irrelevant here.
+    pub fn browser_passkey_assert(
+        &mut self,
+        selected: &PasskeySummary,
+        context: &crate::passkeys::ValidatedRequest,
+        options: &crate::passkeys::GetOptions,
+        verification: PasskeyVerificationEvidence,
+    ) -> Result<crate::passkeys::PasskeyResult, BwError> {
+        self.require_unlocked()?;
+        self.items
+            .iter()
+            .find(|item| {
+                item.id == selected.id
+                    && item.state == ItemState::Active
+                    && item.item_type == "login"
+            })
+            .ok_or(BwError::NotFound)?;
+        let stored = self.ciphers.get(&selected.id).ok_or(BwError::NotFound)?;
+        if browser_revision(stored)? != selected.revision {
+            return Err(BwError::NotFound);
+        }
+        if (verification == PasskeyVerificationEvidence::VaultUnlock && !self.has_verified_unlock())
+            || (self.item_requires_reprompt(&selected.id)
+                && verification != PasskeyVerificationEvidence::FreshPassword)
+            || (!verification.verified()
+                && (options.user_verification == "required" || context.requires_user_verification))
+        {
+            return Err(BwError::RepromptRequired);
+        }
+        let allow_ids = options
+            .allow_credentials
+            .iter()
+            .map(|descriptor| crate::passkeys::decode(&descriptor.id, 1024).map_err(passkey_error))
+            .collect::<Result<Vec<_>, _>>()?;
+        let selected_id =
+            crate::passkeys::decode(&selected.credential_id, 1024).map_err(passkey_error)?;
+        let mut matching = stored_passkeys(stored)
+            .filter_map(|raw| decode_browser_passkey(raw, &stored.item_key, &context.rp_id).ok())
+            .filter(|credential| {
+                credential.credential_id == selected_id && passkey_requested(credential, &allow_ids)
+            });
+        let credential = matching.next().ok_or(BwError::NotFound)?;
+        if matching.next().is_some() {
+            // Ambiguous duplicate credential IDs must never select an arbitrary key.
+            return Err(BwError::Parse("duplicate passkey credential ID".into()));
+        }
+        crate::passkeys::sign_assertion(
+            context,
+            &credential.credential_id,
+            credential.user_handle.as_deref(),
+            &credential.pkcs8_der,
+            0,
+            verification.verified(),
+        )
+        .map_err(passkey_error)
+    }
+
+    /// Registers a new personal login only. The encrypted key must be accepted by
+    /// the server and decoded locally before a successful response can escape.
+    pub fn browser_passkey_create(
+        &mut self,
+        context: &crate::passkeys::ValidatedRequest,
+        options: &crate::passkeys::CreateOptions,
+        verification: PasskeyVerificationEvidence,
+    ) -> Result<crate::passkeys::PasskeyResult, BwError> {
+        self.browser_passkey_can_create()?;
+        if (verification == PasskeyVerificationEvidence::VaultUnlock && !self.has_verified_unlock())
+            || (!verification.verified()
+                && (options.user_verification == "required" || context.requires_user_verification))
+        {
+            return Err(BwError::RepromptRequired);
+        }
+        let exclude_ids = options
+            .exclude_credentials
+            .iter()
+            .map(|descriptor| crate::passkeys::decode(&descriptor.id, 1024).map_err(passkey_error))
+            .collect::<Result<Vec<_>, _>>()?;
+        if self.browser_passkey_excluded(&context.rp_id, &exclude_ids)? {
+            return Err(BwError::Cli(
+                "A passkey excluded by this site already exists".into(),
+            ));
+        }
+        let generated =
+            crate::passkeys::generate_credential(context, options, verification.verified())
+                .map_err(passkey_error)?;
+        let key = self.user_key.as_deref().ok_or(BwError::NotUnlocked)?;
+        let body = build_passkey_create_request(context, options, &generated, key)?;
+        let response = self.send_authed(Method::POST, "/api/ciphers", Some(&body))?;
+        let raw: Value = expect_success(response, "create passkey")?
+            .json()
+            .map_err(|_| BwError::Parse("invalid create passkey response".into()))?;
+        let id = raw_get(&raw, "id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| BwError::Parse("create response has no item id".into()))?
+            .to_owned();
+        if self.ciphers.contains_key(&id) || raw_get(&raw, "organizationId").is_some() {
+            return Err(BwError::Parse(
+                "server did not create a new personal item".into(),
+            ));
+        }
+        let (detail, stored) = decode_cipher(
+            raw.clone(),
+            self.user_key.as_deref().ok_or(BwError::NotUnlocked)?,
+            &self.organization_keys,
+            &self.folders,
+        )?;
+        if detail.state != ItemState::Active || detail.item_type != "login" {
+            return Err(BwError::Parse(
+                "server did not create an active login".into(),
+            ));
+        }
+        let persisted = stored_passkeys(&stored)
+            .find_map(|raw| {
+                decode_browser_passkey(raw, &stored.item_key, &context.rp_id)
+                    .ok()
+                    .filter(|credential| credential.credential_id == generated.credential_id)
+            })
+            .ok_or_else(|| BwError::Parse("server did not retain the created passkey".into()))?;
+        use subtle::ConstantTimeEq;
+        let user_handle = crate::passkeys::decode(&options.user.id, 64).map_err(passkey_error)?;
+        if !bool::from(
+            persisted
+                .pkcs8_der
+                .as_slice()
+                .ct_eq(generated.pkcs8_der.as_slice()),
+        ) || persisted.user_handle.as_deref() != Some(user_handle.as_slice())
+            || !persisted.discoverable
+        {
+            return Err(BwError::Parse("server returned a different passkey".into()));
+        }
+        self.replace_cipher(raw)?;
+        Ok(generated.response)
     }
 
     pub fn revoke_item_grants(&mut self) {
@@ -560,6 +1083,7 @@ impl BwClient {
 
     pub fn apply_action(&mut self, id: &str, action: ItemAction) -> Result<(), BwError> {
         self.require_unlocked()?;
+        self.require_online()?;
         let state = self.get_item(id)?.state;
         if !action_allowed(action, state) {
             return Err(BwError::Cli(format!(
@@ -583,6 +1107,7 @@ impl BwClient {
         if action == ItemAction::DeleteForever {
             self.items.retain(|item| item.id != id);
             self.ciphers.remove(id);
+            self.persist_offline_cache();
             return Ok(());
         }
 
@@ -604,6 +1129,18 @@ impl BwClient {
                     item.dates.state_changed_at =
                         (item.state != ItemState::Active).then(iso8601_now);
                 }
+                if let Some(stored) = self.ciphers.get_mut(id) {
+                    let field = match action {
+                        ItemAction::Archive | ItemAction::Unarchive => "archivedDate",
+                        _ => "deletedDate",
+                    };
+                    let value = match action {
+                        ItemAction::Archive | ItemAction::Trash => json!(iso8601_now()),
+                        _ => Value::Null,
+                    };
+                    raw_set(&mut stored.raw, field, value);
+                }
+                self.persist_offline_cache();
                 Ok(())
             }
         }
@@ -622,6 +1159,7 @@ impl BwClient {
     /// Moves an item into a folder, or out of all folders with `None`.
     pub fn move_item(&mut self, id: &str, folder_id: Option<&str>) -> Result<(), BwError> {
         self.require_unlocked()?;
+        self.require_online()?;
         if let Some(folder_id) = folder_id
             && !self.folders.contains_key(folder_id)
         {
@@ -661,14 +1199,11 @@ impl BwClient {
                     item.folder_id = folder_id.clone();
                     item.folder = folder_name;
                 }
-                if let Some(raw) = self
-                    .ciphers
-                    .get_mut(id)
-                    .and_then(|stored| stored.raw.as_object_mut())
-                {
-                    raw.insert("folderId".into(), json!(folder_id));
-                    raw.insert("favorite".into(), Value::Bool(favorite));
+                if let Some(stored) = self.ciphers.get_mut(id) {
+                    raw_set(&mut stored.raw, "folderId", json!(folder_id));
+                    raw_set(&mut stored.raw, "favorite", Value::Bool(favorite));
                 }
+                self.persist_offline_cache();
                 Ok(())
             }
         }
@@ -685,14 +1220,19 @@ impl BwClient {
 
     pub fn create_folder(&mut self, name: &str) -> Result<Folder, BwError> {
         self.require_unlocked()?;
+        self.require_online()?;
         let name = validate_folder_name(name)?;
         let user_key = self.user_key.as_deref().ok_or(BwError::NotUnlocked)?;
         let body = json!({ "name": encrypt_string(&name, user_key)? });
         let response = self.send_authed(Method::POST, "/api/folders", Some(&body))?;
-        let created: FolderResponse = expect_success(response, "create folder")?
+        let raw: Value = expect_success(response, "create folder")?
             .json()
             .map_err(|e| BwError::Parse(format!("create folder response: {e}")))?;
+        let created: FolderResponse =
+            serde_json::from_value(raw.clone()).map_err(|e| BwError::Parse(e.to_string()))?;
+        self.raw_folders.push(raw);
         self.folders.insert(created.id.clone(), name.clone());
+        self.persist_offline_cache();
         Ok(Folder {
             id: created.id,
             name,
@@ -703,6 +1243,7 @@ impl BwClient {
     /// parent means renaming each subfolder too: nesting is only a name prefix.
     pub fn rename_folders(&mut self, renames: &[(String, String)]) -> Result<(), BwError> {
         self.require_unlocked()?;
+        self.require_online()?;
         let user_key = self.user_key.clone().ok_or(BwError::NotUnlocked)?;
         let user_key = Zeroizing::new(user_key);
         let mut result = Ok(());
@@ -712,6 +1253,20 @@ impl BwClient {
                 let body = json!({ "name": encrypt_string(&name, &user_key)? });
                 let response = self.send_authed(Method::PUT, &folder_path(id)?, Some(&body))?;
                 expect_success(response, "rename folder")?;
+                if let Some(raw) = self
+                    .raw_folders
+                    .iter_mut()
+                    .find(|v| raw_get(v, "id").and_then(Value::as_str) == Some(id))
+                {
+                    raw_set(raw, "name", body["name"].clone());
+                }
+                self.folders.insert(id.clone(), name.clone());
+                for item in &mut self.items {
+                    if item.folder_id.as_ref() == Some(id) {
+                        item.folder = Some(name.clone());
+                    }
+                }
+                self.persist_offline_cache();
                 Ok(())
             })();
             if let Err(error) = step {
@@ -727,11 +1282,33 @@ impl BwClient {
     /// Deletes folders. Their items stay in the vault without a folder.
     pub fn delete_folders(&mut self, ids: &[String]) -> Result<(), BwError> {
         self.require_unlocked()?;
+        self.require_online()?;
         let mut result = Ok(());
         for id in ids {
             let step = folder_path(id).and_then(|path| {
                 let response = self.send_authed(Method::DELETE, &path, None)?;
-                expect_success(response, "delete folder").map(|_| ())
+                expect_success(response, "delete folder")?;
+                self.raw_folders
+                    .retain(|v| raw_get(v, "id").and_then(Value::as_str) != Some(id));
+                self.folders.remove(id);
+                for item in &mut self.items {
+                    if item.folder_id.as_ref() == Some(id) {
+                        item.folder_id = None;
+                        item.folder = None;
+                    }
+                }
+                for raw in self
+                    .ciphers
+                    .values_mut()
+                    .map(|s| &mut s.raw)
+                    .chain(self.undecodable_ciphers.iter_mut())
+                {
+                    if raw_get(raw, "folderId").and_then(Value::as_str) == Some(id) {
+                        raw_set(raw, "folderId", Value::Null);
+                    }
+                }
+                self.persist_offline_cache();
+                Ok(())
             });
             if let Err(error) = step {
                 result = Err(error);
@@ -783,6 +1360,7 @@ impl BwClient {
 
     pub fn edit_draft(&self, id: &str) -> Result<ItemDraft, BwError> {
         self.require_unlocked()?;
+        self.require_online()?;
         self.require_item_access(id)?;
         let stored = self.ciphers.get(id).ok_or(BwError::NotFound)?;
         ensure_editable(&stored.raw)?;
@@ -791,6 +1369,7 @@ impl BwClient {
 
     pub fn save_item(&mut self, id: &str, draft: &ItemDraft) -> Result<BwItemDetail, BwError> {
         self.require_unlocked()?;
+        self.require_online()?;
         if self.get_item(id)?.state == ItemState::Deleted {
             return Err(BwError::Cli("restore the item before editing it".into()));
         }
@@ -806,6 +1385,7 @@ impl BwClient {
 
     pub fn create_item(&mut self, draft: &ItemDraft) -> Result<BwItemDetail, BwError> {
         self.require_unlocked()?;
+        self.require_online()?;
         let user_key = self.user_key.as_deref().ok_or(BwError::NotUnlocked)?;
         let body = build_create_request(draft, user_key)?;
         let response = self.send_authed(Method::POST, "/api/ciphers", Some(&body))?;
@@ -840,6 +1420,7 @@ impl BwClient {
             None => self.items.push(detail),
         }
         self.ciphers.insert(id, stored);
+        self.persist_offline_cache();
         Ok(())
     }
 
@@ -850,10 +1431,20 @@ impl BwClient {
         path: &str,
         body: Option<&Value>,
     ) -> Result<Response, BwError> {
+        if method != Method::GET {
+            self.require_online()?;
+        }
+        if self.access_token.is_none() && self.refresh_token.is_some() {
+            self.refresh_session()?;
+        }
         let response = self.send_authed_once(method.clone(), path, body)?;
         if response.status().as_u16() == 401 && self.refresh_token.is_some() {
             self.refresh_session()?;
-            return self.send_authed_once(method, path, body);
+            let response = self.send_authed_once(method, path, body)?;
+            if response.status().as_u16() == 401 {
+                self.invalidate_session();
+            }
+            return Ok(response);
         }
         Ok(response)
     }
@@ -879,7 +1470,105 @@ impl BwClient {
         }
         request
             .send()
-            .map_err(|e| BwError::Cli(format!("request to {path} failed: {e}")))
+            .map_err(|e| transport_error(e, &format!("request to {path}")))
+    }
+
+    fn require_online(&self) -> Result<(), BwError> {
+        if self.sync_status.offline {
+            Err(BwError::Cli(
+                "Offline: editing needs a connection to the server".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn invalidate_session(&mut self) {
+        self.verified_unlock = false;
+        // A confirmed revocation must also prevent subsequent offline unlocks.
+        let _ = config::clear_saved_session();
+        self.access_token.zeroize();
+        self.refresh_token.zeroize();
+        self.user_key.zeroize();
+        for item in &mut self.items {
+            item.zeroize();
+        }
+        self.items.clear();
+        self.ciphers.clear();
+        for key in self.organization_keys.values_mut() {
+            key.zeroize();
+        }
+        self.organization_keys.clear();
+        self.sync_status.offline = false;
+    }
+
+    pub fn apply_offline_setting(&mut self) -> std::io::Result<()> {
+        if !config::load_settings().keep_offline_copy {
+            config::clear_vault_cache()?;
+        } else {
+            self.persist_offline_cache();
+        }
+        Ok(())
+    }
+
+    fn persist_offline_cache(&mut self) {
+        if !config::load_settings().keep_offline_copy || self.sync_status.last_synced_unix.is_none()
+        {
+            return;
+        }
+        let Some(saved) = config::load_saved_session()
+            .filter(|s| s.server_url == self.base_url && Some(&s.email) == self.email.as_ref())
+        else {
+            return;
+        };
+        let Some(key) = self.user_key.as_deref() else {
+            return;
+        };
+        let snapshot = crate::offline_cache::Snapshot {
+            synced_at_unix: self.sync_status.cache_synced_unix.unwrap_or_default(),
+            profile: self.raw_profile.clone(),
+            folders: self.raw_folders.clone(),
+            ciphers: self
+                .ciphers
+                .values()
+                .map(|c| c.raw.clone())
+                .chain(self.undecodable_ciphers.iter().cloned())
+                .collect(),
+        };
+        let result = crate::offline_cache::encode(&snapshot, key, &saved.server_url, &saved.email)
+            .and_then(|bytes| {
+                config::save_vault_cache(&bytes).map_err(|e| BwError::Cli(e.to_string()))
+            });
+        if let Err(error) = result {
+            let previous = self.sync_warning.take().unwrap_or_default();
+            self.sync_warning = Some(
+                format!("{previous} Offline copy could not be saved: {error}")
+                    .trim()
+                    .to_string(),
+            );
+        }
+    }
+
+    fn load_offline_cache(&mut self) -> Result<(), BwError> {
+        if !config::load_settings().keep_offline_copy {
+            return Err(BwError::NotFound);
+        }
+        let data = config::load_vault_cache().ok_or(BwError::NotFound)?;
+        let snapshot = crate::offline_cache::decode(
+            &data,
+            self.user_key.as_deref().ok_or(BwError::NotUnlocked)?,
+            &self.base_url,
+            self.email.as_deref().ok_or(BwError::NotUnlocked)?,
+        )?;
+        let body = Zeroizing::new(
+            serde_json::to_string(&snapshot).map_err(|e| BwError::Parse(e.to_string()))?,
+        );
+        self.apply_sync_body(&body)?;
+        self.sync_status.offline = true;
+        self.sync_status.last_synced_unix = Some(snapshot.synced_at_unix);
+        self.sync_status.cache_synced_unix = Some(snapshot.synced_at_unix);
+        self.sync_warning = Some("Offline: showing encrypted local copy; sync to reconnect".into());
+        Ok(())
     }
 
     fn require_unlocked(&self) -> Result<(), BwError> {
@@ -897,7 +1586,7 @@ impl BwClient {
             .post(url)
             .json(&serde_json::json!({ "email": email }))
             .send()
-            .map_err(|e| BwError::Cli(format!("prelogin request failed: {e}")))?;
+            .map_err(|e| transport_error(e, "prelogin request"))?;
 
         if !response.status().is_success() {
             return Err(BwError::Cli(format!(
@@ -943,7 +1632,7 @@ impl BwClient {
             .post(url)
             .form(&params)
             .send()
-            .map_err(|e| BwError::Cli(format!("login request failed: {e}")))?;
+            .map_err(|e| transport_error(e, "login request"))?;
 
         let status = response.status();
         if !status.is_success() {
@@ -981,11 +1670,20 @@ impl BwClient {
             )));
         }
 
-        let user_key = self.user_key.as_deref().ok_or(BwError::NotUnlocked)?;
         let body = response
             .text()
-            .map_err(|e| BwError::Parse(format!("sync response body: {e}")))?;
-        let sync: SyncResponse = serde_json::from_str(&body).map_err(|e| {
+            .map_err(|e| transport_error(e, "sync response body"))?;
+        self.apply_sync_body(&body)?;
+        self.retry_seconds = 60;
+        self.persist_offline_cache();
+        Ok(())
+    }
+
+    fn apply_sync_body(&mut self, body: &str) -> Result<(), BwError> {
+        let user_key = self.user_key.as_deref().ok_or(BwError::NotUnlocked)?;
+        let raw_body: Value =
+            serde_json::from_str(body).map_err(|e| BwError::Parse(e.to_string()))?;
+        let sync: SyncResponse = serde_json::from_str(body).map_err(|e| {
             BwError::Parse(format!(
                 "sync response: {e}; body starts with: {}",
                 body.chars().take(300).collect::<String>()
@@ -994,17 +1692,19 @@ impl BwClient {
         let server_ciphers = sync.ciphers.len();
         let folders = decrypt_folders(sync.folders, user_key)?;
         let organization_keys = decrypt_organization_keys(sync.profile, user_key)?;
+        let mut undecodable = Vec::new();
         let mut skipped = 0usize;
         let mut first_error = None;
         let mut items = Vec::with_capacity(server_ciphers);
         let mut ciphers = HashMap::with_capacity(server_ciphers);
         for raw in sync.ciphers {
-            match decode_cipher(raw, user_key, &organization_keys, &folders) {
+            match decode_cipher(raw.clone(), user_key, &organization_keys, &folders) {
                 Ok((item, stored)) => {
                     ciphers.insert(item.id.clone(), stored);
                     items.push(item);
                 }
                 Err(e) => {
+                    undecodable.push(raw);
                     skipped += 1;
                     first_error.get_or_insert_with(|| e.to_string());
                 }
@@ -1016,6 +1716,12 @@ impl BwClient {
         for key in self.organization_keys.values_mut() {
             key.zeroize();
         }
+        self.raw_profile = raw_get(&raw_body, "profile").cloned();
+        self.raw_folders = raw_get(&raw_body, "folders")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        self.undecodable_ciphers = undecodable;
         self.items = items;
         self.ciphers = ciphers;
         self.folders = folders;
@@ -1029,9 +1735,26 @@ impl BwClient {
             decrypted_items: self.items.len(),
             skipped_items: skipped,
             first_error: first_error.clone(),
+            offline: false,
+            cache_synced_unix: None,
         };
+        self.sync_status.cache_synced_unix = self.sync_status.last_synced_unix;
         self.sync_warning = decrypt_skip_warning(skipped, first_error);
         Ok(())
+    }
+}
+
+fn transport_error(error: reqwest::Error, context: &str) -> BwError {
+    let message = format!("{context} failed: {error}");
+    if error.is_connect()
+        || error.is_timeout()
+        || error.is_body()
+        || error.is_decode()
+        || (error.is_request() && error.status().is_none() && !error.is_builder())
+    {
+        BwError::Network(message)
+    } else {
+        BwError::Cli(message)
     }
 }
 
@@ -1462,6 +2185,29 @@ struct Fido2CredentialResponse {
 struct LoginUriResponse {
     #[serde(default, alias = "Uri")]
     uri: Option<String>,
+    #[serde(
+        default,
+        rename = "match",
+        alias = "Match",
+        deserialize_with = "deserialize_uri_match"
+    )]
+    match_type: Option<UriMatchType>,
+}
+
+fn deserialize_uri_match<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<UriMatchType>, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    Ok(if value.is_null() {
+        None
+    } else {
+        Some(
+            value
+                .as_u64()
+                .map(UriMatchType::from_bitwarden)
+                .unwrap_or(UriMatchType::Unsupported),
+        )
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -1620,12 +2366,23 @@ fn decrypt_organization_keys(
         .collect()
 }
 
+#[cfg(test)]
 fn decrypt_cipher(
     cipher: CipherResponse,
     user_key: &[u8],
     organization_keys: &HashMap<String, Vec<u8>>,
     folders: &HashMap<String, String>,
 ) -> Result<BwItemDetail, BwError> {
+    decrypt_cipher_with_uri_rules(cipher, user_key, organization_keys, folders)
+        .map(|(detail, _)| detail)
+}
+
+fn decrypt_cipher_with_uri_rules(
+    cipher: CipherResponse,
+    user_key: &[u8],
+    organization_keys: &HashMap<String, Vec<u8>>,
+    folders: &HashMap<String, String>,
+) -> Result<(BwItemDetail, Vec<LoginUri>), BwError> {
     let item_key = cipher_item_key(&cipher, user_key, organization_keys)?;
     let state = cipher_state(&cipher);
     let state_changed_at = match state {
@@ -1779,30 +2536,34 @@ fn decrypt_cipher(
         push_identity_fields(&mut custom_fields, identity, &item_key)?;
     }
 
-    Ok(BwItemDetail {
-        id: cipher.id,
-        name,
-        username,
-        password,
-        uris,
-        totp,
-        notes,
-        custom_fields,
-        folder: cipher
-            .folder_id
-            .as_ref()
-            .and_then(|id| folders.get(id).cloned().or(Some(id.clone()))),
-        folder_id: cipher.folder_id,
-        favorite: cipher.favorite,
-        passkeys,
-        item_type: item_type_name(cipher.item_type).to_string(),
-        ssh_key,
-        state,
-        dates: ItemDates {
-            state_changed_at,
-            ..ItemDates::default()
+    let browser_uris = uris;
+    Ok((
+        BwItemDetail {
+            id: cipher.id,
+            name,
+            username,
+            password,
+            uris: browser_uris.iter().map(|uri| uri.uri.clone()).collect(),
+            totp,
+            notes,
+            custom_fields,
+            folder: cipher
+                .folder_id
+                .as_ref()
+                .and_then(|id| folders.get(id).cloned().or(Some(id.clone()))),
+            folder_id: cipher.folder_id,
+            favorite: cipher.favorite,
+            passkeys,
+            item_type: item_type_name(cipher.item_type).to_string(),
+            ssh_key,
+            state,
+            dates: ItemDates {
+                state_changed_at,
+                ..ItemDates::default()
+            },
         },
-    })
+        browser_uris,
+    ))
 }
 
 /// The key the cipher's fields are encrypted with: its own key when it has one, otherwise
@@ -1845,7 +2606,8 @@ fn decode_cipher(
     let cipher: CipherResponse =
         serde_json::from_value(raw.clone()).map_err(|e| BwError::Parse(format!("cipher: {e}")))?;
     let item_key = cipher_item_key(&cipher, user_key, organization_keys)?;
-    let mut detail = decrypt_cipher(cipher, user_key, organization_keys, folders)?;
+    let (mut detail, browser_uris) =
+        decrypt_cipher_with_uri_rules(cipher, user_key, organization_keys, folders)?;
     let revision_date = raw_get(&raw, "revisionDate")
         .and_then(Value::as_str)
         .map(str::to_string);
@@ -1859,8 +2621,35 @@ fn decode_cipher(
             raw,
             item_key,
             revision_date,
+            browser_uris,
         },
     ))
+}
+
+/// Hash the encrypted source, not plaintext passwords or server timestamps alone.
+/// This also detects changes from servers that omit revisionDate.
+fn browser_revision(stored: &StoredCipher) -> Result<String, BwError> {
+    let source = serde_json::to_vec(&stored.raw)
+        .map_err(|error| BwError::Parse(format!("cipher revision: {error}")))?;
+    let hash = <Sha256 as sha2::Digest>::digest(source);
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash))
+}
+
+fn browser_uri_match(
+    stored: &StoredCipher,
+    frame_url: &str,
+    default_match: UriMatchType,
+) -> Option<bool> {
+    let mut insecure_downgrade = None;
+    for uri in &stored.browser_uris {
+        let result =
+            uri_match::matches(&uri.uri, uri.match_type.unwrap_or(default_match), frame_url);
+        if result.matched {
+            insecure_downgrade =
+                Some(insecure_downgrade.unwrap_or(false) || result.insecure_downgrade);
+        }
+    }
+    insecure_downgrade
 }
 
 pub(crate) fn action_allowed(action: ItemAction, state: ItemState) -> bool {
@@ -1938,6 +2727,14 @@ fn server_error_message(body: &str) -> String {
         .unwrap_or_else(|| body.chars().take(200).collect())
 }
 
+fn raw_set(value: &mut Value, key: &str, data: Value) {
+    if let Some(object) = value.as_object_mut() {
+        let pascal = key[..1].to_ascii_uppercase() + &key[1..];
+        object.remove(&pascal);
+        object.insert(key.into(), data);
+    }
+}
+
 /// Reads a key from server JSON, which uses camelCase but older servers use PascalCase.
 fn raw_get<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
     let object = value.as_object()?;
@@ -1951,6 +2748,136 @@ fn raw_get<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
             object.get(&pascal)
         })
         .filter(|value| !value.is_null())
+}
+
+fn passkey_error(error: crate::passkeys::PasskeyError) -> BwError {
+    BwError::Cli(error.message.into())
+}
+
+fn stored_passkeys(stored: &StoredCipher) -> impl Iterator<Item = &Value> {
+    raw_get(&stored.raw, "login")
+        .and_then(|login| raw_get(login, "fido2Credentials"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+}
+
+fn passkey_field(raw: &Value, field: &str, key: &[u8]) -> Result<String, BwError> {
+    passkey_optional_field(raw, field, key)?
+        .ok_or_else(|| BwError::Parse("missing passkey field".into()))
+}
+
+fn passkey_optional_field(raw: &Value, field: &str, key: &[u8]) -> Result<Option<String>, BwError> {
+    let Some(value) = raw_get(raw, field) else {
+        return Ok(None);
+    };
+    let value = value
+        .as_str()
+        .filter(|value| value.len() <= 32_768)
+        .ok_or_else(|| BwError::Parse("invalid passkey field".into()))?;
+    decrypt_string(value, key)
+}
+
+fn decode_browser_passkey(
+    raw: &Value,
+    key: &[u8],
+    rp_id: &str,
+) -> Result<PasskeyMaterial, BwError> {
+    use p256::pkcs8::DecodePrivateKey;
+    let unsupported = || BwError::Cli("This passkey format is not supported by Boltwarden".into());
+    if passkey_field(raw, "rpId", key)? != rp_id {
+        return Err(BwError::NotFound);
+    }
+    if passkey_field(raw, "keyType", key)? != "public-key"
+        || passkey_field(raw, "keyAlgorithm", key)? != "ECDSA"
+        || passkey_field(raw, "keyCurve", key)? != "P-256"
+        || passkey_field(raw, "counter", key)? != "0"
+    {
+        return Err(unsupported());
+    }
+    let discoverable = match passkey_field(raw, "discoverable", key)?.as_str() {
+        "true" => true,
+        "false" => false,
+        _ => return Err(unsupported()),
+    };
+    let credential_id = crate::passkeys::credential_id(&passkey_field(raw, "credentialId", key)?)
+        .map_err(passkey_error)?;
+    let user_handle = passkey_optional_field(raw, "userHandle", key)?
+        .map(|value| crate::passkeys::decode(&value, 64).map_err(passkey_error))
+        .transpose()?;
+    if user_handle.as_ref().is_some_and(Vec::is_empty) || (discoverable && user_handle.is_none()) {
+        return Err(unsupported());
+    }
+    // The decrypted key and its DER representation exist only for this operation.
+    // They never become part of BwItemDetail, diagnostics, or a wire response.
+    let encoded = Zeroizing::new(passkey_field(raw, "keyValue", key)?);
+    let pkcs8_der = Zeroizing::new(crate::passkeys::decode(&encoded, 4096).map_err(passkey_error)?);
+    p256::SecretKey::from_pkcs8_der(&pkcs8_der).map_err(|_| unsupported())?;
+    Ok(PasskeyMaterial {
+        credential_id,
+        user_handle,
+        user_name: passkey_optional_field(raw, "userName", key)?,
+        user_display_name: passkey_optional_field(raw, "userDisplayName", key)?,
+        discoverable,
+        pkcs8_der,
+    })
+}
+
+fn passkey_requested(credential: &PasskeyMaterial, allow_ids: &[Vec<u8>]) -> bool {
+    if allow_ids.is_empty() {
+        credential.discoverable
+    } else {
+        allow_ids.contains(&credential.credential_id)
+    }
+}
+
+fn build_passkey_create_request(
+    context: &crate::passkeys::ValidatedRequest,
+    options: &crate::passkeys::CreateOptions,
+    generated: &crate::passkeys::GeneratedCredential,
+    key: &[u8],
+) -> Result<Value, BwError> {
+    let credential_id = uuid::Uuid::from_slice(&generated.credential_id)
+        .map_err(|_| BwError::Parse("invalid generated passkey ID".into()))?
+        .hyphenated()
+        .to_string();
+    let private_key = Zeroizing::new(crate::passkeys::encode(&generated.pkcs8_der));
+    Ok(json!({
+        "type": 1,
+        "organizationId": null,
+        "folderId": null,
+        "name": encrypt_value(if options.rp.name.is_empty() { &context.rp_id } else { &options.rp.name }, key)?,
+        "notes": null,
+        "favorite": false,
+        "reprompt": 0,
+        "fields": null,
+        "login": {
+            "username": encrypt_value(&options.user.name, key)?,
+            "password": null,
+            "totp": null,
+            "uris": [{
+                "uri": encrypt_value(&context.origin, key)?,
+                "uriChecksum": uri_checksum(&context.origin, key)?,
+                "match": null,
+            }],
+            "fido2Credentials": [{
+                "credentialId": encrypt_value(&credential_id, key)?,
+                "keyType": encrypt_value("public-key", key)?,
+                "keyAlgorithm": encrypt_value("ECDSA", key)?,
+                "keyCurve": encrypt_value("P-256", key)?,
+                "keyValue": encrypt_value(&private_key, key)?,
+                "rpId": encrypt_value(&context.rp_id, key)?,
+                "userHandle": encrypt_value(&options.user.id, key)?,
+                "userName": encrypt_value(&options.user.name, key)?,
+                "userDisplayName": encrypt_value(&options.user.display_name, key)?,
+                "counter": encrypt_value("0", key)?,
+                "rpName": encrypt_value(&options.rp.name, key)?,
+                "discoverable": encrypt_value("true", key)?,
+                "creationDate": iso8601_now(),
+            }],
+        },
+        "secureNote": null,
+    }))
 }
 
 fn raw_decrypt(value: &Value, key: &str, item_key: &[u8]) -> Result<String, BwError> {
@@ -2441,10 +3368,19 @@ fn decrypt_passkeys(
         .collect()
 }
 
-fn decrypt_uris(uris: Option<&[LoginUriResponse]>, key: &[u8]) -> Result<Vec<String>, BwError> {
+fn decrypt_uris(uris: Option<&[LoginUriResponse]>, key: &[u8]) -> Result<Vec<LoginUri>, BwError> {
     uris.unwrap_or(&[])
         .iter()
-        .filter_map(|uri| decrypt_opt_string(uri.uri.as_deref(), key).transpose())
+        .filter_map(|uri| {
+            decrypt_opt_string(uri.uri.as_deref(), key)
+                .map(|value| {
+                    value.map(|value| LoginUri {
+                        uri: value,
+                        match_type: uri.match_type,
+                    })
+                })
+                .transpose()
+        })
         .collect::<Result<Vec<_>, _>>()
 }
 
@@ -2810,9 +3746,13 @@ fn decrypt_symmetric_key(encrypted_key: &str, wrapping_key: &[u8]) -> Result<Vec
 
 /// Encrypts as type 2 (AES-256-CBC with HMAC-SHA256) under a fresh random IV.
 fn encrypt_string(plaintext: &str, key: &[u8]) -> Result<String, BwError> {
+    encrypt_bytes(plaintext.as_bytes(), key)
+}
+
+pub(crate) fn encrypt_bytes(plaintext: &[u8], key: &[u8]) -> Result<String, BwError> {
     let iv = crate::random::random_bytes::<16>()
         .map_err(|e| BwError::Cli(format!("could not read random bytes: {e}")))?;
-    encrypt_bytes_with_iv(plaintext.as_bytes(), key, iv)
+    encrypt_bytes_with_iv(plaintext, key, iv)
 }
 
 fn encrypt_bytes_with_iv(plaintext: &[u8], key: &[u8], iv: [u8; 16]) -> Result<String, BwError> {
@@ -2861,7 +3801,7 @@ fn decrypt_string(value: &str, key: &[u8]) -> Result<Option<String>, BwError> {
         .map_err(|e| BwError::Parse(format!("decrypted value is not UTF-8: {e}")))
 }
 
-fn decrypt_bytes(value: &str, key: &[u8]) -> Result<Vec<u8>, BwError> {
+pub(crate) fn decrypt_bytes(value: &str, key: &[u8]) -> Result<Vec<u8>, BwError> {
     let enc = EncString::parse(value)?;
     match enc.enc_type {
         0 => {
@@ -3047,6 +3987,10 @@ fn parse_totp_seed(seed: &str) -> Result<(Vec<u8>, u32, u64), BwError> {
     }
     Ok((decoded, digits, period))
 }
+
+#[cfg(test)]
+#[path = "passkey_vault_tests.rs"]
+mod passkey_vault_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3285,6 +4229,7 @@ mod tests {
                 password: Some(encrypt_string("telegram-password", &user_key)),
                 uris: Some(vec![LoginUriResponse {
                     uri: Some(encrypt_string("https://web.telegram.org", &user_key)),
+                    match_type: None,
                 }]),
                 totp: None,
                 cardholder_name: None,
@@ -3830,6 +4775,7 @@ mod tests {
             raw,
             item_key: key.to_vec(),
             revision_date: Some("2026-03-04T05:06:07.000Z".into()),
+            browser_uris: Vec::new(),
         }
     }
 
@@ -4123,7 +5069,393 @@ mod tests {
             "name is required"
         );
     }
-    fn protected_fixture() -> BwClient {
+    fn offline_fixture() -> (BwClient, SavedSession) {
+        let mut client = protected_fixture();
+        client.base_url = "https://127.0.0.1:1".into();
+        client.email = Some("audit@example.test".into());
+        client.client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let (salt, kdf, wrapped) = client.reauth.clone().unwrap();
+        let mut saved = SavedSession {
+            server_url: client.base_url.clone(),
+            email: client.email.clone().unwrap(),
+            refresh_token: String::new(),
+            encrypted_refresh_token: None,
+            master_key_encrypted_user_key: wrapped,
+            salt,
+            kdf,
+        };
+        encrypt_session_token(&mut saved, "refresh", client.user_key.as_ref().unwrap()).unwrap();
+        config::save_session(&saved).unwrap();
+        let mut raw = client.ciphers["cipher-edit"].raw.clone();
+        raw_set(&mut raw, "reprompt", json!(0));
+        raw["login"]["totp"] = json!(
+            super::encrypt_string("JBSWY3DPEHPK3PXP", client.user_key.as_ref().unwrap()).unwrap()
+        );
+        let body = json!({"profile": {"organizations": []}, "folders": [], "ciphers": [raw, {"id": "unknown", "type": 99}]}).to_string();
+        client.apply_sync_body(&body).unwrap();
+        client.sync_status.cache_synced_unix = Some(123);
+        client.persist_offline_cache();
+        (client, saved)
+    }
+
+    #[test]
+    fn cold_offline_unlock_preserves_items_totp_and_unknown_ciphers() {
+        config::with_test_config(|_| {
+            let (mut client, saved) = offline_fixture();
+            let original = config::load_vault_cache().unwrap();
+            client.access_token = None;
+            client.user_key = None;
+            client.reauth = None;
+            client.items.clear();
+            client.ciphers.clear();
+            client.verified_unlock = false;
+            assert!(!client.has_verified_unlock());
+            client.unlock_saved_session(&saved, "correct").unwrap();
+            assert!(client.has_session());
+            assert!(client.has_verified_unlock());
+            assert!(client.sync_status.offline);
+            assert_eq!(client.sync_status.cache_synced_unix, Some(123));
+            assert_eq!(
+                client
+                    .list_items_in(ItemState::Active, "Example")
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                client.get_item("cipher-edit").unwrap().password.as_deref(),
+                Some("current-password")
+            );
+            assert!(client.get_totp("cipher-edit").is_ok());
+            assert_eq!(client.undecodable_ciphers.len(), 1);
+            assert_eq!(client.sync_status.skipped_items, 1);
+            // Wrong passwords fail locally without overwriting the snapshot.
+            assert!(client.unlock_saved_session(&saved, "wrong").is_err());
+            assert!(!client.has_verified_unlock());
+            assert_eq!(config::load_vault_cache().unwrap(), original);
+            // A cache read is not a new server sync.
+            client.persist_offline_cache();
+            let snapshot = crate::offline_cache::decode(
+                &config::load_vault_cache().unwrap(),
+                client.user_key.as_ref().unwrap(),
+                &saved.server_url,
+                &saved.email,
+            )
+            .unwrap();
+            assert_eq!(snapshot.synced_at_unix, 123);
+            assert_eq!(snapshot.ciphers.len(), 2);
+        });
+    }
+
+    #[test]
+    fn offline_write_guards_and_retry_backoff() {
+        let mut client = protected_fixture();
+        client.access_token = None;
+        client.sync_status.offline = true;
+        assert!(client.has_session());
+        let draft = ItemDraft::default();
+        let errors = [
+            client
+                .apply_action("cipher-edit", ItemAction::Trash)
+                .unwrap_err(),
+            client.move_item("cipher-edit", None).unwrap_err(),
+            client.create_folder("folder").unwrap_err(),
+            client.rename_folders(&[]).unwrap_err(),
+            client.delete_folders(&[]).unwrap_err(),
+            client.edit_draft("cipher-edit").unwrap_err(),
+            client.save_item("cipher-edit", &draft).unwrap_err(),
+            client.create_item(&draft).unwrap_err(),
+        ];
+        for error in errors {
+            assert!(error.to_string().starts_with("Offline: editing"));
+        }
+        client.last_sync_attempt = Some(Instant::now());
+        client.sync_if_stale();
+        assert!(client.sync_warning.is_none());
+    }
+
+    #[test]
+    fn disabled_missing_and_corrupt_cache_do_not_unlock() {
+        config::with_test_config(|_| {
+            let (client, saved) = offline_fixture();
+            config::save_settings(&config::AppSettings {
+                keep_offline_copy: false,
+                ..Default::default()
+            })
+            .unwrap();
+            let mut candidate = client.clone();
+            candidate.access_token = None;
+            assert!(matches!(
+                candidate.unlock_saved_session(&saved, "correct"),
+                Err(BwError::Network(_))
+            ));
+            assert!(!candidate.has_verified_unlock());
+            candidate.apply_offline_setting().unwrap();
+            assert!(config::load_vault_cache().is_none());
+            config::save_settings(&config::AppSettings::default()).unwrap();
+            assert!(matches!(
+                candidate.unlock_saved_session(&saved, "correct"),
+                Err(BwError::Network(_))
+            ));
+            assert!(!candidate.has_verified_unlock());
+            config::save_vault_cache(b"corrupt").unwrap();
+            assert!(matches!(
+                candidate.unlock_saved_session(&saved, "correct"),
+                Err(BwError::Network(_))
+            ));
+            assert!(!candidate.has_verified_unlock());
+            client.clone().apply_offline_setting().unwrap();
+            assert!(config::load_vault_cache().unwrap().contains("version"));
+        });
+    }
+
+    // A local HTTP server exercises transport/status handling without external services.
+    pub(super) fn serve_responses(
+        responses: Vec<(u16, String)>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let thread = std::thread::spawn(move || {
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                let headers = String::from_utf8_lossy(&request);
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|s| s.trim().parse().unwrap())
+                    })
+                    .unwrap_or(0);
+                let mut body_buffer = vec![0; length];
+                stream.read_exact(&mut body_buffer).unwrap();
+                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        (url, thread)
+    }
+
+    #[test]
+    fn reconnect_refreshes_token_syncs_and_replaces_snapshot() {
+        config::with_test_config(|_| {
+            let (mut client, mut saved) = offline_fixture();
+            let body =
+                json!({"profile": {"organizations": []}, "folders": [], "ciphers": []}).to_string();
+            let (url, thread) = serve_responses(vec![
+                (
+                    200,
+                    json!({"access_token": "new-access", "refresh_token": "rotated"}).to_string(),
+                ),
+                (200, body),
+            ]);
+            saved.server_url = url.clone();
+            encrypt_session_token(&mut saved, "refresh", client.user_key.as_ref().unwrap())
+                .unwrap();
+            config::save_session(&saved).unwrap();
+            client.base_url = url;
+            client.refresh_token = Some("refresh".into());
+            client.access_token = None;
+            client.sync_status.offline = true;
+            client.retry_seconds = 300;
+            let status = client.sync_now().unwrap();
+            thread.join().unwrap();
+            assert!(!status.offline);
+            assert_eq!(client.retry_seconds, 60);
+            assert!(client.items.is_empty());
+            assert!(client.sync_warning.is_none());
+            let loaded = config::load_saved_session().unwrap();
+            assert_eq!(
+                saved_session_token(&loaded, client.user_key.as_ref().unwrap()).unwrap(),
+                "rotated"
+            );
+            let cache = crate::offline_cache::decode(
+                &config::load_vault_cache().unwrap(),
+                client.user_key.as_ref().unwrap(),
+                &saved.server_url,
+                &saved.email,
+            )
+            .unwrap();
+            assert!(cache.ciphers.is_empty());
+        });
+    }
+
+    #[test]
+    fn confirmed_revocation_clears_cache_session_and_unlocked_keys() {
+        config::with_test_config(|_| {
+            for responses in [
+                vec![(400, json!({"error": "invalid_grant"}).to_string())],
+                vec![
+                    (200, json!({"access_token": "revoked"}).to_string()),
+                    (401, "{}".into()),
+                    (200, json!({"access_token": "still-revoked"}).to_string()),
+                    (401, "{}".into()),
+                ],
+            ] {
+                let (mut client, _) = offline_fixture();
+                let (url, thread) = serve_responses(responses);
+                client.base_url = url;
+                client.refresh_token = Some("refresh".into());
+                client.access_token = None;
+                client.sync_status.offline = true;
+                assert!(client.sync_now().is_err());
+                thread.join().unwrap();
+                assert!(!client.has_session());
+                assert!(!client.has_verified_unlock());
+                assert!(client.ssh_keys().is_err());
+                assert!(config::load_vault_cache().is_none());
+                assert!(config::load_saved_session().is_none());
+            }
+        });
+    }
+
+    #[test]
+    fn successful_writes_update_cache_even_when_followup_fetch_fails() {
+        config::with_test_config(|_| {
+            let (mut client, mut saved) = offline_fixture();
+            let folder = json!({"id": "folder", "name": super::encrypt_string("Work", client.user_key.as_ref().unwrap()).unwrap()});
+            let (url, thread) = serve_responses(vec![
+                (200, folder.to_string()), // create folder
+                (204, String::new()),
+                (500, "{}".into()), // move item, fetch
+                (204, String::new()),
+                (500, "{}".into()), // archive, fetch
+                (204, String::new()),
+                (500, "{}".into()), // unfavorite, fetch
+                (200, "{}".into()),
+                (500, "{}".into()), // rename folder, sync
+                (200, "{}".into()),
+                (500, "{}".into()), // delete folder, sync
+                (204, String::new()),
+                (500, "{}".into()), // trash, fetch
+                (200, "{}".into()), // delete forever
+            ]);
+            saved.server_url = url.clone();
+            encrypt_session_token(&mut saved, "refresh", client.user_key.as_ref().unwrap())
+                .unwrap();
+            config::save_session(&saved).unwrap();
+            client.base_url = url;
+            let snapshot = |client: &BwClient| {
+                crate::offline_cache::decode(
+                    &config::load_vault_cache().unwrap(),
+                    client.user_key.as_ref().unwrap(),
+                    &saved.server_url,
+                    &saved.email,
+                )
+                .unwrap()
+            };
+            client.create_folder("Work").unwrap();
+            assert_eq!(snapshot(&client).folders.len(), 1);
+            client.move_item("cipher-edit", Some("folder")).unwrap();
+            client
+                .apply_action("cipher-edit", ItemAction::Archive)
+                .unwrap();
+            client
+                .apply_action("cipher-edit", ItemAction::Unfavorite)
+                .unwrap();
+            let copy = snapshot(&client);
+            let raw = copy
+                .ciphers
+                .iter()
+                .find(|v| v["id"] == "cipher-edit")
+                .unwrap();
+            assert_eq!(raw["folderId"], "folder");
+            assert_eq!(raw["favorite"], false);
+            assert!(raw["archivedDate"].is_string());
+            assert!(
+                client
+                    .rename_folders(&[("folder".into(), "Renamed".into())])
+                    .is_err()
+            );
+            let copy = snapshot(&client);
+            assert_eq!(
+                decrypt_string(
+                    copy.folders[0]["name"].as_str().unwrap(),
+                    client.user_key.as_ref().unwrap()
+                )
+                .unwrap(),
+                Some("Renamed".into())
+            );
+            assert!(client.delete_folders(&["folder".into()]).is_err());
+            let copy = snapshot(&client);
+            assert!(copy.folders.is_empty());
+            assert!(
+                copy.ciphers
+                    .iter()
+                    .find(|v| v["id"] == "cipher-edit")
+                    .unwrap()["folderId"]
+                    .is_null()
+            );
+            client
+                .apply_action("cipher-edit", ItemAction::Trash)
+                .unwrap();
+            assert!(
+                snapshot(&client)
+                    .ciphers
+                    .iter()
+                    .find(|v| v["id"] == "cipher-edit")
+                    .unwrap()["deletedDate"]
+                    .is_string()
+            );
+            client
+                .apply_action("cipher-edit", ItemAction::DeleteForever)
+                .unwrap();
+            assert_eq!(snapshot(&client).ciphers.len(), 1); // unknown cipher remains
+            thread.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn response_body_disconnect_is_network_but_server_errors_are_not() {
+        use std::io::{Read, Write};
+        let mut client = protected_fixture();
+        client.client = Client::builder().no_proxy().build().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        client.base_url = format!("http://{}", listener.local_addr().unwrap());
+        let thread = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                socket.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 10000\r\nConnection: close\r\n\r\n{}",
+                )
+                .unwrap();
+        });
+        assert!(matches!(client.sync_now(), Err(BwError::Network(_))));
+        assert!(client.sync_status.offline);
+        thread.join().unwrap();
+        for (status, body) in [(503, "{}"), (200, "invalid JSON")] {
+            let (url, thread) = serve_responses(vec![(status, body.into())]);
+            client.base_url = url;
+            client.sync_status.offline = false;
+            assert!(!matches!(
+                client.sync_now().unwrap_err(),
+                BwError::Network(_)
+            ));
+            assert!(!client.sync_status.offline);
+            thread.join().unwrap();
+        }
+    }
+
+    pub(super) fn protected_fixture() -> BwClient {
         let user_key = vec![24u8; 64];
         let salt = "audit@example.test".to_string();
         let kdf = SavedKdf {
@@ -4142,9 +5474,15 @@ mod tests {
             &HashMap::new(),
         )
         .unwrap();
-        BwClient {
+        let mut client = BwClient {
+            email: None,
+            raw_profile: None,
+            raw_folders: Vec::new(),
+            undecodable_ciphers: Vec::new(),
+            retry_seconds: 60,
             client: Client::new(),
             reauth: Some((salt, kdf, wrapped)),
+            verified_unlock: false,
             item_grants: HashMap::new(),
             base_url: "https://example.test".into(),
             device_identifier: "test".into(),
@@ -4159,7 +5497,217 @@ mod tests {
             sync_status: SyncStatus::default(),
             last_sync_attempt: None,
             health_cache: None,
+        };
+        client.verify_master_password("correct").unwrap();
+        client.verified_unlock = true;
+        client
+    }
+
+    #[test]
+    fn browser_uri_rules_keep_alignment_and_accept_server_aliases() {
+        let key = [55u8; 64];
+        let uris: Vec<LoginUriResponse> = serde_json::from_value(json!([
+            { "uri": null, "match": 5 },
+            { "Uri": encrypt_string("example.com", &key), "Match": 1 },
+            { "uri": encrypt_string("^https://example", &key), "match": 4 },
+            { "uri": encrypt_string("unknown.example", &key), "match": 200 },
+            { "uri": encrypt_string("invalid.example", &key), "match": "host" },
+            { "uri": encrypt_string("default.example", &key), "match": null }
+        ]))
+        .unwrap();
+        let decoded = decrypt_uris(Some(&uris), &key).unwrap();
+        assert_eq!(decoded.len(), 5);
+        assert_eq!(decoded[0].uri, "example.com");
+        assert_eq!(decoded[0].match_type, Some(UriMatchType::Host));
+        assert_eq!(decoded[1].match_type, Some(UriMatchType::RegularExpression));
+        assert_eq!(decoded[2].match_type, Some(UriMatchType::Unsupported));
+        assert_eq!(decoded[3].match_type, Some(UriMatchType::Unsupported));
+        assert_eq!(decoded[4].match_type, None);
+    }
+
+    #[test]
+    fn browser_matching_uses_active_logins_and_the_frame_uri() {
+        let mut client = protected_fixture();
+        let matches = client
+            .browser_matches("https://one.example/login", UriMatchType::Host)
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].reprompt);
+        assert!(!matches[0].insecure_downgrade);
+        assert!(
+            client
+                .browser_matches("https://unrelated.example/", UriMatchType::Host)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            client
+                .browser_matches("javascript:one.example", UriMatchType::Host)
+                .unwrap()
+                .is_empty()
+        );
+        for state in [ItemState::Archived, ItemState::Deleted] {
+            client.items[0].state = state;
+            assert!(
+                client
+                    .browser_matches("https://one.example/", UriMatchType::Host)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(matches!(
+                client.browser_credentials(
+                    "cipher-edit",
+                    &matches[0].revision,
+                    "https://one.example/",
+                    UriMatchType::Host,
+                    true
+                ),
+                Err(BwError::NotFound)
+            ));
         }
+        client.items[0].state = ItemState::Active;
+        client.items[0].item_type = "secureNote".into();
+        assert!(
+            client
+                .browser_matches("https://one.example/", UriMatchType::Host)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn browser_credentials_recheck_rules_revision_and_browser_authorization() {
+        let mut client = protected_fixture();
+        let summary = client
+            .browser_matches("https://one.example/", UriMatchType::Host)
+            .unwrap()
+            .remove(0);
+        client.authorize_item("cipher-edit", "correct").unwrap();
+        assert!(matches!(
+            client.browser_credentials(
+                "cipher-edit",
+                &summary.revision,
+                "https://one.example/",
+                UriMatchType::Host,
+                false
+            ),
+            Err(BwError::RepromptRequired)
+        ));
+        assert!(matches!(
+            client.browser_credentials(
+                "cipher-edit",
+                &summary.revision,
+                "https://unrelated.example/",
+                UriMatchType::Host,
+                true
+            ),
+            Err(BwError::NotFound)
+        ));
+        let credentials = client
+            .browser_credentials(
+                "cipher-edit",
+                &summary.revision,
+                "https://one.example/",
+                UriMatchType::Host,
+                true,
+            )
+            .unwrap();
+        assert_eq!(credentials.username.as_deref(), Some("alice"));
+        assert_eq!(credentials.password.as_deref(), Some("current-password"));
+        let serialized = serde_json::to_value(&credentials).unwrap();
+        assert_eq!(serialized.as_object().unwrap().len(), 3);
+        assert!(!format!("{credentials:?}").contains("current-password"));
+        client.ciphers.get_mut("cipher-edit").unwrap().raw["favorite"] = json!(false);
+        assert!(matches!(
+            client.browser_credentials(
+                "cipher-edit",
+                &summary.revision,
+                "https://one.example/",
+                UriMatchType::Host,
+                true
+            ),
+            Err(BwError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn browser_rules_are_daemon_only_and_default_is_used_only_for_null_rules() {
+        let mut client = protected_fixture();
+        let key = client.user_key.clone().unwrap();
+        let mut raw = client.ciphers["cipher-edit"].raw.clone();
+        raw["login"]["uris"] = json!([
+            { "uri": null, "match": 0 },
+            { "uri": encrypt_string("https://example.com", &key), "match": null }
+        ]);
+        client.replace_cipher(raw.clone()).unwrap();
+        assert!(
+            client
+                .browser_matches("https://sub.example.com", UriMatchType::Host)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            client
+                .browser_matches("https://sub.example.com", UriMatchType::Domain)
+                .unwrap()
+                .len(),
+            1
+        );
+        let detail_json = serde_json::to_value(&client.items[0]).unwrap();
+        assert_eq!(detail_json["uris"], json!(["https://example.com"]));
+        assert!(detail_json.get("browser_uris").is_none());
+        assert!(detail_json.get("uri_matches").is_none());
+        raw["login"]["uris"][1]["match"] = json!(5);
+        client.replace_cipher(raw).unwrap();
+        assert!(
+            client
+                .browser_matches("https://example.com", UriMatchType::Domain)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn browser_downgrade_is_reported_by_listing_and_secret_request() {
+        let client = protected_fixture();
+        let summary = client
+            .browser_matches("http://one.example/", UriMatchType::Host)
+            .unwrap()
+            .remove(0);
+        assert!(summary.insecure_downgrade);
+        assert!(
+            client
+                .browser_credentials(
+                    "cipher-edit",
+                    &summary.revision,
+                    "http://one.example/",
+                    UriMatchType::Host,
+                    true
+                )
+                .unwrap()
+                .insecure_downgrade
+        );
+    }
+
+    #[test]
+    fn master_password_verification_never_creates_an_item_grant() {
+        let mut client = protected_fixture();
+        assert!(client.verify_master_password("wrong").is_err());
+        client.verify_master_password("correct").unwrap();
+        assert!(client.item_grants.is_empty());
+        assert!(matches!(
+            client.get_item("cipher-edit"),
+            Err(BwError::RepromptRequired)
+        ));
+        client.user_key = None;
+        assert!(matches!(
+            client.verify_master_password("correct"),
+            Err(BwError::NotUnlocked)
+        ));
+        assert!(matches!(
+            client.browser_matches("https://one.example/", UriMatchType::Host),
+            Err(BwError::NotUnlocked)
+        ));
     }
 
     #[test]

@@ -11,6 +11,7 @@ const COPIED_NOTICE: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 pub struct SummaryState {
+    pub offline: bool,
     pub detail: Option<BwItemDetail>,
     pub detail_id: Option<String>,
     pub error: Option<String>,
@@ -181,6 +182,7 @@ pub fn draw_summary(
         if let Some(item_state) = item_state
             && input.modifiers.is_none()
             && letters_enabled
+            && !state.offline
         {
             if input.key_pressed(egui::Key::E) && item_state != ItemState::Deleted {
                 action = Some(SummaryAction::Edit);
@@ -340,9 +342,12 @@ pub fn draw_summary(
                         .truncate(),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(header_action) =
-                            draw_header_actions(ui, detail.state, detail.favorite, keys_enabled)
-                        {
+                        if let Some(header_action) = draw_header_actions(
+                            ui,
+                            detail.state,
+                            detail.favorite,
+                            keys_enabled && !state.offline,
+                        ) {
                             match header_action {
                                 SummaryAction::Item(
                                     confirm @ (ItemAction::Trash | ItemAction::DeleteForever),
@@ -440,7 +445,8 @@ pub fn draw_summary(
             error: None,
         };
         match widgets::confirm_dialog(ctx, &dialog) {
-            Some(true) => action = Some(SummaryAction::Item(confirm)),
+            Some(true) if !state.offline => action = Some(SummaryAction::Item(confirm)),
+            Some(true) => state.confirm = None,
             Some(false) => state.confirm = None,
             None => {}
         }

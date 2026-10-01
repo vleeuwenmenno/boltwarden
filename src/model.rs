@@ -325,11 +325,38 @@ pub struct SshAgentStatus {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SyncStatus {
     #[serde(default)]
+    pub offline: bool,
+    #[serde(default)]
+    pub cache_synced_unix: Option<u64>,
+    #[serde(default)]
     pub last_synced_unix: Option<u64>,
     pub server_ciphers: usize,
     pub decrypted_items: usize,
     pub skipped_items: usize,
     pub first_error: Option<String>,
+}
+
+impl SyncStatus {
+    pub fn offline_tooltip(&self) -> String {
+        let age = self
+            .cache_synced_unix
+            .map(|at| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let minutes = now.saturating_sub(at) / 60;
+                if minutes >= 1440 {
+                    format!("{} d ago", minutes / 1440)
+                } else if minutes >= 60 {
+                    format!("{} h ago", minutes / 60)
+                } else {
+                    format!("{minutes} min ago")
+                }
+            })
+            .unwrap_or_else(|| "unknown time".into());
+        format!("Offline · copy from {age} · Ctrl+R to retry")
+    }
 }
 
 /// One kind of problem the action center looks for.

@@ -1,0 +1,31 @@
+{
+  "name": "boltwarden-browser",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wxt -b chrome",
+    "dev:firefox": "wxt -b firefox --mv3",
+    "build": "wxt build -b chrome && wxt build -b firefox --mv3",
+    "zip": "wxt zip -b chrome && wxt zip -b firefox --mv3",
+    "typecheck": "wxt prepare && tsc --noEmit",
+    "test": "vitest run",
+    "test:e2e": "npm run build && node tests/browser-e2e.mjs",
+    "postinstall": "wxt prepare",
+    "test:passkeys": "npm run build && node tests/passkey-e2e.mjs && node tests/passkey-firefox-e2e.mjs",
+    "test:inline": "npm run build && node tests/inline-e2e.mjs && node tests/inline-firefox-e2e.mjs"
+  },
+  "dependencies": {
+    "preact": "11.0.0"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "6.2.5",
+    "happy-dom": "20.14.5",
+    "typescript": "5.9.3",
+    "vitest": "5.0.3",
+    "wxt": "0.21.4"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

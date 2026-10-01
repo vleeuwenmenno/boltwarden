@@ -13,11 +13,13 @@ use crate::model::{
 };
 use crate::ui::auth::{AuthAction, AuthState, draw_auth};
 use crate::ui::edit::{EditAction, EditState, draw_edit};
+use crate::ui::paired_browsers::{PairedBrowsersAction, PairedBrowsersState, draw_paired_browsers};
 use crate::ui::summary::{SummaryAction, SummaryState, draw_summary};
 use crate::ui::theme::theme;
 use crate::ui::two_factor::{TwoFactorAction, TwoFactorState, draw_two_factor};
 use crate::ui::vault::{
-    self, DropTarget, FolderNode, ListOrder, Section, SidebarAction, SidebarCounts,
+    self, DropTarget, FolderNode, ItemMenuAction, ItemSelection, ListAction, ListOrder, Section,
+    SidebarAction, SidebarCounts,
 };
 use crate::ui::widgets;
 use eframe::egui;
@@ -32,6 +34,7 @@ const MIN_WINDOW_SIZE: egui::Vec2 = egui::vec2(860.0, 540.0);
 /// Verified protected items are hidden again slightly before the daemon's grant expires.
 const REPROMPT_TTL: Duration = Duration::from_secs(55);
 const SYNC_INTERVAL: Duration = Duration::from_secs(60);
+const PAIRED_BROWSERS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
 const SEARCH_INPUT_ID: &str = "vault-window-search";
@@ -99,6 +102,15 @@ enum Reply {
     },
     Folders(Result<Vec<Folder>, BackendError>),
     Health(Result<HealthReport, BackendError>),
+    PairedBrowsers {
+        generation: u64,
+        result: Result<Vec<crate::browser::pairing::PairingRecord>, String>,
+    },
+    BrowserRevoked {
+        generation: u64,
+        id: String,
+        result: Result<(), String>,
+    },
     Detail {
         id: String,
         result: Result<BwItemDetail, BackendError>,
@@ -126,9 +138,9 @@ enum Reply {
         next: Option<Section>,
         result: Result<(), BackendError>,
     },
-    /// An item was dropped on a folder or on Favorites.
+    /// A group was dropped on a folder or on Favorites.
     Moved {
-        id: String,
+        ids: Vec<String>,
         notice: String,
         result: Result<(), BackendError>,
     },
@@ -163,8 +175,16 @@ pub struct WindowApp {
     health_stale: bool,
     health_in_flight: bool,
     health_error: Option<String>,
+    paired_browsers: PairedBrowsersState,
+    browser_setup: crate::ui::browser_setup::BrowserSetupState,
+    browser_setup_open: bool,
+    paired_browsers_generation: u64,
+    paired_browsers_refreshed_at: Option<Instant>,
 
     selected: Option<String>,
+    selection: ItemSelection,
+    pending_menu: Option<ItemMenuAction>,
+    move_in_flight: bool,
     scroll_to_selected: bool,
     summary_state: SummaryState,
     edit_state: Option<EditState>,
@@ -222,7 +242,7 @@ impl WindowApp {
             auth_state: AuthState::default(),
             two_factor_state: TwoFactorState::default(),
             section: Section::All,
-            order: ListOrder::Name,
+            order: config::load_window_order(),
             query: String::new(),
             query_changed_at: Instant::now(),
             searched: None,
@@ -237,7 +257,15 @@ impl WindowApp {
             health_stale: true,
             health_in_flight: false,
             health_error: None,
+            paired_browsers: PairedBrowsersState::default(),
+            browser_setup: Default::default(),
+            browser_setup_open: false,
+            paired_browsers_generation: 0,
+            paired_browsers_refreshed_at: None,
             selected: None,
+            selection: ItemSelection::default(),
+            pending_menu: None,
+            move_in_flight: false,
             scroll_to_selected: false,
             summary_state: SummaryState::default(),
             edit_state: None,
@@ -293,6 +321,42 @@ impl WindowApp {
         self.health_in_flight = true;
         self.health_stale = false;
         self.spawn(|backend| Reply::Health(backend.health_report()));
+    }
+
+    fn refresh_paired_browsers(&mut self) {
+        if self.paired_browsers.begin_refresh() {
+            self.request_paired_browsers();
+        }
+    }
+
+    fn request_paired_browsers(&mut self) {
+        self.paired_browsers_refreshed_at = Some(Instant::now());
+        let generation = self.paired_browsers_generation;
+        self.spawn(move |backend| Reply::PairedBrowsers {
+            generation,
+            result: backend.paired_browsers(),
+        });
+    }
+
+    fn paired_browsers_action(&mut self, action: PairedBrowsersAction) {
+        match action {
+            // The shared panel marks the request busy before returning its action.
+            PairedBrowsersAction::Refresh => self.request_paired_browsers(),
+            PairedBrowsersAction::Revoke(id) => {
+                let generation = self.paired_browsers_generation;
+                self.spawn(move |backend| Reply::BrowserRevoked {
+                    generation,
+                    result: backend.revoke_browser(id.clone()),
+                    id,
+                });
+            }
+        }
+    }
+
+    fn reset_paired_browsers(&mut self) {
+        self.paired_browsers_generation = self.paired_browsers_generation.wrapping_add(1);
+        self.paired_browsers.reset();
+        self.paired_browsers_refreshed_at = None;
     }
 
     fn spawn_search(&mut self) {
@@ -382,14 +446,18 @@ impl WindowApp {
         self.folder_paths.clear();
         self.health = None;
         self.health_in_flight = false;
+        self.reset_paired_browsers();
         self.search_in_flight = false;
         self.sync_in_flight = false;
+        self.move_in_flight = false;
         self.searched = None;
         self.query.clear();
         self.confirm_close = false;
     }
 
     fn clear_selection(&mut self) {
+        self.selection = ItemSelection::default();
+        self.pending_menu = None;
         self.selected = None;
         self.summary_state = SummaryState::default();
         self.summary_state.detail_id = None;
@@ -405,7 +473,9 @@ impl WindowApp {
         }
         // Verifying one protected item must not keep the next one open.
         self.backend.revoke_item_grants();
+        let selection = std::mem::take(&mut self.selection);
         self.clear_selection();
+        self.selection = selection;
         self.selected = Some(id.to_string());
         self.scroll_to_selected = true;
         self.summary_state.detail_id = Some(id.to_string());
@@ -437,6 +507,7 @@ impl WindowApp {
             None if delta < 0 => ids.len() - 1,
             None => 0,
         };
+        self.selection.only(&ids[next]);
         self.select(&ids[next]);
     }
 
@@ -445,7 +516,17 @@ impl WindowApp {
             return;
         }
         let state_changed = section.item_state() != self.section.item_state();
+        if self.section == Section::PairedBrowsers {
+            self.browser_setup_open = false;
+            self.paired_browsers.cancel_confirmation();
+        }
+        self.selection = ItemSelection::default();
+        self.pending_menu = None;
         self.section = section;
+        if self.section == Section::PairedBrowsers {
+            self.focus_search = false;
+            self.refresh_paired_browsers();
+        }
         if state_changed {
             self.results.clear();
             self.searched = None;
@@ -458,13 +539,26 @@ impl WindowApp {
             .selected
             .as_ref()
             .is_some_and(|id| self.visible_items().iter().any(|item| &item.id == id));
+        if still_listed {
+            self.selection.only(self.selected.as_deref().unwrap());
+        }
         if !still_listed {
             self.backend.revoke_item_grants();
             self.clear_selection();
         }
     }
 
+    fn offline(&self) -> bool {
+        self.sync_status.as_ref().is_some_and(|s| s.offline)
+    }
+
     fn start_new_item(&mut self) {
+        if self.offline() {
+            return;
+        }
+        if self.section == Section::PairedBrowsers {
+            self.set_section(Section::All);
+        }
         self.backend.revoke_item_grants();
         self.clear_selection();
         let mut edit = EditState::create();
@@ -490,6 +584,9 @@ impl WindowApp {
     }
 
     fn start_edit(&mut self) {
+        if self.offline() {
+            return;
+        }
         let Some(id) = self.selected.clone() else {
             return;
         };
@@ -549,8 +646,10 @@ impl WindowApp {
                 }
                 PopupCommand::Hide | PopupCommand::Toggle => self.close_window(ctx),
                 PopupCommand::Quit => self.exit_now(),
-                // SSH prompts belong to the popup.
-                PopupCommand::SshApproval { .. } | PopupCommand::Unlock { .. } => {}
+                // Integration prompts belong to the popup.
+                PopupCommand::SshApproval { .. }
+                | PopupCommand::BrowserApproval { .. }
+                | PopupCommand::Unlock { .. } => {}
             }
         }
         self.poll_replies(ctx);
@@ -569,15 +668,29 @@ impl WindowApp {
                 Some("Verify again to continue. Your unsaved edits are preserved.".into());
         }
         if self.screen == Screen::Vault {
+            if self.section == Section::PairedBrowsers
+                && !ctx.input(|input| input.viewport().minimized.unwrap_or(false))
+                && self
+                    .paired_browsers_refreshed_at
+                    .is_none_or(|at| at.elapsed() >= PAIRED_BROWSERS_REFRESH_INTERVAL)
+            {
+                self.refresh_paired_browsers();
+            }
             let wanted = (self.query.trim().to_string(), self.section.item_state());
-            if self.searched.as_ref() != Some(&wanted)
+            if self.section != Section::PairedBrowsers
+                && self.searched.as_ref() != Some(&wanted)
                 && !self.search_in_flight
                 && self.query_changed_at.elapsed() >= SEARCH_DEBOUNCE
             {
                 self.spawn_search();
             }
             if self.last_sync_attempt.elapsed() >= SYNC_INTERVAL && self.edit_state.is_none() {
-                self.spawn_sync();
+                if self.offline() {
+                    self.last_sync_attempt = Instant::now();
+                    self.spawn_search();
+                } else {
+                    self.spawn_sync();
+                }
             }
             if self.summary_state.needs_totp_refresh()
                 && let Some(id) = self.summary_state.detail_id.clone()
@@ -637,8 +750,16 @@ impl WindowApp {
                             }
                         }
                         Err(error) => {
-                            self.warning =
-                                Some(format!("Sync failed; showing cached items: {error}"))
+                            if matches!(error, BackendError::Network(_)) {
+                                if let Some(status) = self.sync_status.as_mut() {
+                                    status.offline = true;
+                                }
+                                self.warning = Some(format!("Offline: {error}"));
+                            } else {
+                                self.warning =
+                                    Some(format!("Sync failed; showing cached items: {error}"));
+                            }
+                            self.reload();
                         }
                     }
                 }
@@ -663,9 +784,7 @@ impl WindowApp {
                         Ok(items) => {
                             self.results = items;
                             self.sync_status = Some(status);
-                            if warning.is_some() {
-                                self.warning = warning;
-                            }
+                            self.warning = warning;
                         }
                         Err(error) => self.error = Some(error.to_string()),
                     }
@@ -691,6 +810,28 @@ impl WindowApp {
                         Err(error) => self.health_error = Some(error.to_string()),
                     }
                 }
+                Reply::PairedBrowsers { generation, result } => {
+                    if generation != self.paired_browsers_generation || self.screen != Screen::Vault
+                    {
+                        continue;
+                    }
+                    self.paired_browsers.finish_refresh(result);
+                }
+                Reply::BrowserRevoked {
+                    generation,
+                    id,
+                    result,
+                } => {
+                    if generation != self.paired_browsers_generation || self.screen != Screen::Vault
+                    {
+                        continue;
+                    }
+                    let succeeded = result.is_ok();
+                    self.paired_browsers.finish_revoke(&id, result);
+                    if succeeded && self.section == Section::PairedBrowsers {
+                        self.refresh_paired_browsers();
+                    }
+                }
                 Reply::Detail { id, result } => {
                     if self.summary_state.detail_id.as_deref() != Some(id.as_str()) {
                         continue;
@@ -713,6 +854,8 @@ impl WindowApp {
                             self.summary_state.detail = None;
                             if matches!(error, BackendError::RepromptRequired) {
                                 self.reprompt_id = Some(id);
+                            } else {
+                                self.pending_menu = None;
                             }
                             self.summary_state.error = Some(error.to_string());
                         }
@@ -798,18 +941,24 @@ impl WindowApp {
                         }
                     }
                 },
-                Reply::Moved { id, notice, result } => match result {
-                    Ok(()) => {
-                        self.show_notice(&notice);
-                        self.reload();
-                        if self.selected.as_deref() == Some(id.as_str())
-                            && self.reprompt_id.is_none()
-                        {
-                            self.spawn_detail(id);
-                        }
+                Reply::Moved {
+                    ids,
+                    notice,
+                    result,
+                } => {
+                    self.move_in_flight = false;
+                    // Even a partial failure changes the list and sidebar counts.
+                    self.reload();
+                    if let Some(id) = self.selected.clone().filter(|id| ids.contains(id))
+                        && self.reprompt_id.is_none()
+                    {
+                        self.spawn_detail(id);
                     }
-                    Err(error) => self.error = Some(format!("could not move item: {error}")),
-                },
+                    match result {
+                        Ok(()) => self.show_notice(&notice),
+                        Err(error) => self.error = Some(error.to_string()),
+                    }
+                }
                 Reply::Created(result) => {
                     let Some(edit) = self.edit_state.as_mut().filter(|edit| edit.creating) else {
                         continue;
@@ -817,6 +966,7 @@ impl WindowApp {
                     match result {
                         Ok(detail) => {
                             self.edit_state = None;
+                            self.selection.only(&detail.id);
                             self.selected = Some(detail.id.clone());
                             self.scroll_to_selected = true;
                             self.summary_state = SummaryState::default();
@@ -850,6 +1000,7 @@ impl WindowApp {
             ctx.request_repaint_after(after);
         }
         let busy = self.sync_in_flight
+            || self.paired_browsers.is_busy()
             || self.search_in_flight
             || self.health_in_flight
             || self.summary_state.in_flight
@@ -1006,7 +1157,10 @@ impl WindowApp {
 
     fn update_vault(&mut self, root: &mut egui::Ui) {
         let ctx = &root.ctx().clone();
-        let editing = self.edit_state.is_some();
+        let editing = self.edit_state.is_some()
+            || self.move_in_flight
+            || self.summary_state.action_in_flight
+            || self.paired_browsers.has_confirmation();
         if self.folder_edit.is_some() {
             self.draw_folder_dialog(ctx);
         }
@@ -1052,11 +1206,61 @@ impl WindowApp {
                         &self.folder_tree,
                         &mut self.collapsed,
                         &counts,
+                        !self.sync_status.as_ref().is_some_and(|s| s.offline),
                     ) {
                         self.sidebar_action(action);
                     }
                 });
             });
+
+        if self.section == Section::PairedBrowsers {
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::new()
+                        .fill(t.bg)
+                        .inner_margin(egui::Margin::symmetric(20, 12)),
+                )
+                .show(root, |ui| {
+                    if self.browser_setup_open {
+                        ui.horizontal(|ui| {
+                            if widgets::button(ui, "Back", false, true).clicked() {
+                                self.browser_setup_open = false;
+                            }
+                            ui.label(
+                                RichText::new("Browser setup")
+                                    .size(t.title())
+                                    .color(t.text_strong),
+                            );
+                        });
+                        ui.add_space(8.0);
+                        crate::ui::browser_setup::draw_browser_setup(ui, &mut self.browser_setup);
+                        return;
+                    }
+                    ui.label(
+                        RichText::new("Paired browsers")
+                            .size(t.title())
+                            .color(t.text_strong),
+                    );
+                    ui.add_space(8.0);
+                    if widgets::choice_row(
+                        ui,
+                        false,
+                        "Browser setup",
+                        "Choose installed or custom browsers for the extension",
+                        "Manage",
+                    )
+                    .clicked()
+                    {
+                        self.browser_setup_open = true;
+                        self.browser_setup.refresh();
+                    }
+                    ui.add_space(8.0);
+                    if let Some(action) = draw_paired_browsers(ui, &mut self.paired_browsers) {
+                        self.paired_browsers_action(action);
+                    }
+                });
+            return;
+        }
 
         if self.section == Section::ActionCenter {
             egui::CentralPanel::default()
@@ -1106,9 +1310,12 @@ impl WindowApp {
     }
 
     fn sidebar_action(&mut self, action: SidebarAction) {
+        if self.offline() && !matches!(action, SidebarAction::Open(_)) {
+            return;
+        }
         let kind = match action {
             SidebarAction::Open(section) => return self.set_section(section),
-            SidebarAction::Drop { item_id, target } => return self.move_dropped(item_id, target),
+            SidebarAction::Drop { item_ids, target } => return self.move_dropped(item_ids, target),
             SidebarAction::NewFolder { parent } => FolderEditKind::Create {
                 parent,
                 name: String::new(),
@@ -1126,58 +1333,63 @@ impl WindowApp {
         });
     }
 
-    /// Moves a dropped item into a folder, out of all folders, or into Favorites.
-    fn move_dropped(&mut self, id: String, target: DropTarget) {
-        let Some(item) = self.all_items.iter().find(|item| item.id == id) else {
+    /// Moves a selection in one worker, creating an implied parent folder only once.
+    fn move_dropped(&mut self, ids: Vec<String>, target: DropTarget) {
+        if self.move_in_flight || self.offline() {
             return;
-        };
-        let current = item
-            .folder_id
-            .as_ref()
-            .and_then(|folder| self.folder_paths.get(folder));
-        match target {
-            DropTarget::Favorites => {
-                if item.favorite {
-                    return;
-                }
-                self.spawn(move |backend| Reply::Moved {
-                    result: backend.apply_action(&id, ItemAction::Favorite),
-                    notice: ItemAction::Favorite.done_message().into(),
-                    id,
-                });
-            }
-            DropTarget::NoFolder => {
-                if current.is_none() {
-                    return;
-                }
-                self.spawn(move |backend| Reply::Moved {
-                    result: backend.move_item(&id, None),
-                    notice: "Moved out of its folder".into(),
-                    id,
-                });
-            }
-            DropTarget::Folder(path) => {
-                if current == Some(&path) {
-                    return;
-                }
-                let folder_id = self
-                    .folder_paths
-                    .iter()
-                    .find(|(_, folder)| **folder == path)
-                    .map(|(id, _)| id.clone());
-                let notice = format!("Moved to {}", path.rsplit('/').next().unwrap_or(&path));
-                self.spawn(move |backend| {
-                    // A parent shown only because of its subfolders is created first.
-                    let result = match folder_id {
-                        Some(folder_id) => backend.move_item(&id, Some(&folder_id)),
-                        None => backend
-                            .create_folder(&path)
-                            .and_then(|folder| backend.move_item(&id, Some(&folder.id))),
-                    };
-                    Reply::Moved { id, notice, result }
-                });
-            }
         }
+        let mut seen = HashSet::new();
+        let ids: Vec<String> = ids
+            .into_iter()
+            .filter(|id| {
+                seen.insert(id.clone())
+                    && self
+                        .all_items
+                        .iter()
+                        .find(|item| &item.id == id)
+                        .is_some_and(|item| {
+                            if item.state != ItemState::Active {
+                                return false;
+                            }
+                            match &target {
+                                DropTarget::Favorites => !item.favorite,
+                                DropTarget::NoFolder => item.folder_id.is_some(),
+                                DropTarget::Folder(path) => {
+                                    item.folder_id
+                                        .as_ref()
+                                        .and_then(|id| self.folder_paths.get(id))
+                                        != Some(path)
+                                }
+                            }
+                        })
+            })
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let folder_id = match &target {
+            DropTarget::Folder(path) => self
+                .folder_paths
+                .iter()
+                .find(|(_, folder)| *folder == path)
+                .map(|(id, _)| id.clone()),
+            _ => None,
+        };
+        self.move_in_flight = true;
+        self.error = None;
+        self.spawn(move |backend| {
+            let result = move_group(&backend, &ids, &target, folder_id);
+            let notice = format!(
+                "Updated {} item{}",
+                ids.len(),
+                if ids.len() == 1 { "" } else { "s" }
+            );
+            Reply::Moved {
+                ids,
+                notice,
+                result,
+            }
+        });
     }
 
     fn draw_folder_dialog(&mut self, ctx: &Context) {
@@ -1341,12 +1553,16 @@ impl WindowApp {
         let navigable = focused.is_none() || focused == Some(search_id);
         let mut moves = 0isize;
         let (mut new_item, mut sync, mut lock, mut find) = (false, false, false, false);
+        let mut select_all = false;
         ctx.input_mut(|input| {
             find = input.consume_key(egui::Modifiers::COMMAND, egui::Key::F);
             new_item = input.consume_key(egui::Modifiers::COMMAND, egui::Key::N);
             sync = input.consume_key(egui::Modifiers::COMMAND, egui::Key::R);
             lock = input.consume_key(egui::Modifiers::COMMAND, egui::Key::L);
-            if navigable {
+            if focused.is_none() {
+                select_all = input.consume_key(egui::Modifiers::COMMAND, egui::Key::A);
+            }
+            if navigable && self.section != Section::PairedBrowsers {
                 if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
                     moves += 1;
                 }
@@ -1362,6 +1578,13 @@ impl WindowApp {
                 self.query_changed_at = Instant::now();
             }
         });
+        if select_all {
+            self.selection.ids = self
+                .visible_items()
+                .iter()
+                .map(|item| item.id.clone())
+                .collect();
+        }
         if find {
             self.focus_search = true;
         }
@@ -1369,13 +1592,26 @@ impl WindowApp {
             self.start_new_item();
         }
         if sync {
-            self.spawn_sync();
+            if self.section == Section::PairedBrowsers {
+                if self.browser_setup_open {
+                    self.browser_setup.refresh();
+                } else {
+                    self.refresh_paired_browsers();
+                }
+            } else {
+                self.spawn_sync();
+            }
         }
         if lock {
             self.lock();
             return;
         }
-        if moves != 0 && self.section != Section::ActionCenter {
+        if moves != 0
+            && !matches!(
+                self.section,
+                Section::ActionCenter | Section::PairedBrowsers
+            )
+        {
             self.move_selection(moves);
             // Leave the search box so the item's own keys (E, F, Enter…) work.
             ctx.memory_mut(|m| m.surrender_focus(search_id));
@@ -1403,7 +1639,7 @@ impl WindowApp {
                 lock = true;
             }
             let label = format!("{}  New item", t.icon("\u{f067}", "+"));
-            new_item = widgets::button(ui, &label, true, !editing)
+            new_item = widgets::button(ui, &label, true, !editing && !self.offline())
                 .on_hover_text("Ctrl+N")
                 .clicked();
             ui.add_space(8.0);
@@ -1434,9 +1670,14 @@ impl WindowApp {
                     })
                     .inner;
                 if response.changed() {
+                    self.selection = ItemSelection::default();
+                    self.pending_menu = None;
                     self.query_changed_at = Instant::now();
-                    // Searching lists items, so leave the action center.
-                    if self.section == Section::ActionCenter {
+                    // Searching lists items, so leave a management section.
+                    if matches!(
+                        self.section,
+                        Section::ActionCenter | Section::PairedBrowsers
+                    ) {
                         self.set_section(Section::All);
                     }
                 }
@@ -1456,6 +1697,34 @@ impl WindowApp {
 
     fn draw_statusbar(&mut self, ui: &mut egui::Ui) {
         let t = theme();
+        if self.section == Section::PairedBrowsers && self.browser_setup_open {
+            let hints: &[(&str, &str)] = if self.settings.show_keyboard_shortcuts {
+                &[("↑↓", "Select"), ("Space", "Toggle")]
+            } else {
+                &[]
+            };
+            widgets::footer(ui, hints, None);
+            return;
+        }
+        if self.section == Section::PairedBrowsers {
+            let hints: &[(&str, &str)] = if self.settings.show_keyboard_shortcuts {
+                &[
+                    ("↑↓", "Navigate"),
+                    ("⏎", "Revoke"),
+                    ("Ctrl+R", "Refresh"),
+                    ("Ctrl+F", "Search vault"),
+                ]
+            } else {
+                &[]
+            };
+            let status = if self.paired_browsers.is_busy() {
+                "Updating paired browsers…"
+            } else {
+                "Paired browser access is managed on this device"
+            };
+            widgets::footer(ui, hints, Some((status, t.text_faint)));
+            return;
+        }
         let notice = self
             .notice
             .as_ref()
@@ -1466,7 +1735,12 @@ impl WindowApp {
             .clone()
             .map(|error| (error, t.danger))
             .or(notice)
-            .or_else(|| self.warning.clone().map(|warning| (warning, t.warning)));
+            .or_else(|| {
+                self.warning
+                    .clone()
+                    .filter(|_| !self.offline())
+                    .map(|warning| (warning, t.warning))
+            });
         let hints: &[(&str, &str)] = if self.settings.show_keyboard_shortcuts {
             &[
                 ("↑↓", "Items"),
@@ -1480,6 +1754,8 @@ impl WindowApp {
         };
         let sync_label = if self.sync_in_flight {
             "Syncing…".to_string()
+        } else if self.offline() {
+            "Offline".into()
         } else {
             match self.sync_status.as_ref().and_then(|s| s.last_synced_unix) {
                 Some(at) => {
@@ -1503,7 +1779,13 @@ impl WindowApp {
         {
             let response = ui.interact(rect, egui::Id::new("vault-sync"), egui::Sense::click());
             if response
-                .on_hover_text("Sync vault · Ctrl+R")
+                .on_hover_text(
+                    self.sync_status
+                        .as_ref()
+                        .filter(|s| s.offline)
+                        .map(|s| s.offline_tooltip())
+                        .unwrap_or_else(|| "Sync vault · Ctrl+R".into()),
+                )
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
             {
@@ -1537,6 +1819,17 @@ impl WindowApp {
                 .as_ref()
                 .and_then(|id| items.iter().position(|item| &item.id == id));
             vault::draw_list_header(ui, &title, items.len(), &mut order);
+            self.selection.retain_visible(&items);
+            if self.selection.ids.len() > 1 {
+                ui.label(
+                    RichText::new(format!(
+                        "{} selected · Drag to a folder",
+                        self.selection.ids.len()
+                    ))
+                    .small()
+                    .color(theme().text_muted),
+                );
+            }
             ui.add_space(6.0);
             if self.search_in_flight && items.is_empty() {
                 widgets::empty_state(ui, "", "Loading…", true);
@@ -1546,20 +1839,95 @@ impl WindowApp {
                     ui,
                     &items,
                     selected,
+                    &mut self.selection,
                     self.scroll_to_selected,
                     &mut self.icons,
+                    !self.sync_status.as_ref().is_some_and(|s| s.offline),
                 )
-                .map(|idx| items[idx].id.clone())
             }
         };
-        self.order = order;
+        if self.order != order {
+            self.order = order;
+            if !crate::demo::enabled()
+                && let Err(error) = config::save_window_order(order)
+            {
+                self.error = Some(format!("Could not save sort order: {error}"));
+            }
+        }
         self.scroll_to_selected = false;
-        if let Some(id) = clicked {
-            self.select(&id);
+        match clicked {
+            Some(ListAction::Select(id)) => {
+                self.pending_menu = None;
+                if self.selection.ids.contains(&id) {
+                    self.select(&id);
+                } else if let Some(id) = self.selection.ids.iter().next().cloned() {
+                    self.select(&id);
+                } else {
+                    self.backend.revoke_item_grants();
+                    self.clear_selection();
+                }
+            }
+            Some(ListAction::Menu(id, action)) => {
+                self.selection.only(&id);
+                self.select(&id);
+                self.pending_menu = Some(action);
+            }
+            None => {}
+        }
+    }
+
+    fn run_pending_menu(&mut self) {
+        if self.summary_state.in_flight || self.reprompt_id.is_some() {
+            return;
+        }
+        let Some(detail) = self.summary_state.detail.as_ref() else {
+            return;
+        };
+        let Some(action) = self.pending_menu.take() else {
+            return;
+        };
+        match action {
+            ItemMenuAction::CopyUsername | ItemMenuAction::CopyPassword => {
+                let index = match action {
+                    ItemMenuAction::CopyUsername => detail.username.as_ref().map(|_| 0),
+                    _ => detail
+                        .password
+                        .as_ref()
+                        .map(|_| usize::from(detail.username.is_some())),
+                };
+                let result = index
+                    .ok_or_else(|| "This item has no such field".to_string())
+                    .and_then(|index| {
+                        self.backend
+                            .copy_field(&detail.id, index, detail.copy_version())
+                    });
+                match result {
+                    Ok(()) => self.show_notice(if action == ItemMenuAction::CopyUsername {
+                        "Username copied"
+                    } else {
+                        "Password copied"
+                    }),
+                    Err(error) => self.summary_state.error = Some(error),
+                }
+            }
+            ItemMenuAction::Edit => self.start_edit(),
+            ItemMenuAction::Item(ItemAction::Trash) => {
+                self.summary_state.confirm = Some(ItemAction::Trash)
+            }
+            ItemMenuAction::Item(action) => {
+                let id = detail.id.clone();
+                self.summary_state.action_in_flight = true;
+                self.spawn(move |backend| Reply::ItemAction {
+                    result: backend.apply_action(&id, action),
+                    id,
+                    action,
+                });
+            }
         }
     }
 
     fn draw_detail(&mut self, ui: &mut egui::Ui) {
+        self.run_pending_menu();
         let t = theme();
         let shortcuts = self.settings.show_keyboard_shortcuts;
 
@@ -1610,6 +1978,7 @@ impl WindowApp {
             .as_ref()
             .map(|detail| detail.copy_version());
         let backend = self.backend.clone();
+        self.summary_state.offline = self.offline();
         let action = draw_summary(
             ui,
             &mut self.summary_state,
@@ -1690,6 +2059,42 @@ impl WindowApp {
     }
 }
 
+fn move_group(
+    backend: &AppBackend,
+    ids: &[String],
+    target: &DropTarget,
+    folder_id: Option<String>,
+) -> Result<(), BackendError> {
+    let folder_id = match target {
+        DropTarget::Folder(path) => Some(match folder_id {
+            Some(id) => id,
+            None => backend.create_folder(path)?.id,
+        }),
+        _ => None,
+    };
+    let mut failures = Vec::new();
+    for id in ids {
+        let result = match target {
+            DropTarget::Favorites => backend.apply_action(id, ItemAction::Favorite),
+            _ => backend.move_item(id, folder_id.as_deref()),
+        };
+        if let Err(error) = result {
+            failures.push(error.to_string());
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(BackendError::Message(format!(
+            "Moved {} of {} items; {} failed: {}",
+            ids.len() - failures.len(),
+            ids.len(),
+            failures.len(),
+            failures[0]
+        )))
+    }
+}
+
 fn visible_items<'a>(
     results: &'a [BwItem],
     section: &Section,
@@ -1714,4 +2119,172 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_setup_keeps_navigation_keys_and_refresh_separate_from_paired_browsers() {
+        let backend = AppBackend::demo();
+        backend.lock_vault().unwrap();
+        let (_, commands) = mpsc::channel();
+        let mut app = WindowApp::with_settings(backend, commands, AppSettings::default());
+        app.screen = Screen::Vault;
+        app.section = Section::PairedBrowsers;
+        app.browser_setup_open = true;
+        let ctx = Context::default();
+        let mut input = egui::RawInput::default();
+        for (key, modifiers) in [
+            (egui::Key::ArrowDown, egui::Modifiers::NONE),
+            (egui::Key::R, egui::Modifiers::COMMAND),
+        ] {
+            input.events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            });
+        }
+        ctx.run_ui(input, |ui| {
+            app.handle_keys(ui.ctx(), false);
+            assert!(ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)), "The visible setup panel must receive row navigation");
+        }).textures_delta.clear();
+        assert!(
+            !app.paired_browsers.is_busy(),
+            "Refreshing browser setup must not refresh the hidden pairing list"
+        );
+        assert!(app.browser_setup_open);
+        app.set_section(Section::All);
+        assert!(
+            !app.browser_setup_open,
+            "Leaving browser management must close nested setup"
+        );
+    }
+
+    #[test]
+    fn paired_browser_replies_survive_navigation_but_not_lock() {
+        let backend = AppBackend::demo();
+        backend.lock_vault().unwrap();
+        let (_, commands) = mpsc::channel();
+        let mut app = WindowApp::with_settings(backend, commands, AppSettings::default());
+        app.screen = Screen::Vault;
+        app.section = Section::PairedBrowsers;
+        assert!(app.paired_browsers.begin_refresh());
+        let previous = app.paired_browsers_generation;
+        app.set_section(Section::All);
+        assert!(app.paired_browsers.is_busy());
+        assert_eq!(app.paired_browsers_generation, previous);
+        app.tx
+            .send(Reply::PairedBrowsers {
+                generation: previous.wrapping_sub(1),
+                result: Err("obsolete failure".into()),
+            })
+            .unwrap();
+        let ctx = egui::Context::default();
+        app.poll_replies(&ctx);
+        assert!(app.paired_browsers.loading);
+        assert!(app.paired_browsers.error.is_none());
+
+        app.tx
+            .send(Reply::PairedBrowsers {
+                generation: app.paired_browsers_generation,
+                result: Err("Pairing RPC is unavailable".into()),
+            })
+            .unwrap();
+        app.poll_replies(&ctx);
+        assert!(!app.paired_browsers.loading);
+        assert!(
+            app.paired_browsers
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("Pairing RPC is unavailable"))
+        );
+
+        let previous_tx = app.tx.clone();
+        app.reset_locked();
+        assert!(app.paired_browsers.error.is_none());
+        assert!(!app.paired_browsers.loaded);
+        assert!(
+            previous_tx
+                .send(Reply::PairedBrowsers {
+                    generation: app.paired_browsers_generation,
+                    result: Ok(Vec::new()),
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn group_move_creates_one_folder_and_reports_partial_failure() {
+        let backend = AppBackend::demo();
+        let items = backend.list_items(ItemState::Active, "").unwrap().items;
+        let ids: Vec<_> = items.iter().take(2).map(|item| item.id.clone()).collect();
+        assert_eq!(ids.len(), 2);
+        let target = DropTarget::Folder("New parent".into());
+        move_group(&backend, &ids, &target, None).unwrap();
+        let folders = backend.folders().unwrap();
+        let created: Vec<_> = folders
+            .iter()
+            .filter(|folder| folder.name == "New parent")
+            .collect();
+        assert_eq!(created.len(), 1);
+        for id in &ids {
+            assert_eq!(
+                backend.get_item(id).unwrap().folder_id.as_deref(),
+                Some(created[0].id.as_str())
+            );
+        }
+        let error = move_group(
+            &backend,
+            &[ids[0].clone(), "missing".into(), ids[1].clone()],
+            &DropTarget::NoFolder,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Moved 2 of 3 items; 1 failed"));
+        for id in &ids {
+            assert!(backend.get_item(id).unwrap().folder_id.is_none());
+        }
+        move_group(&backend, &ids, &DropTarget::Favorites, None).unwrap();
+        for id in &ids {
+            assert!(backend.get_item(id).unwrap().favorite);
+        }
+    }
+
+    #[test]
+    fn menu_waits_for_verification_and_trash_requires_confirmation() {
+        let backend = AppBackend::demo();
+        let item = backend
+            .list_items(ItemState::Active, "")
+            .unwrap()
+            .items
+            .remove(0);
+        let detail = backend.get_item(&item.id).unwrap();
+        // Construct without starting background refresh workers.
+        backend.lock_vault().unwrap();
+        let (_, commands) = mpsc::channel();
+        let mut app = WindowApp::with_settings(backend, commands, AppSettings::default());
+        app.selected = Some(item.id.clone());
+        app.summary_state.detail_id = Some(item.id.clone());
+        app.summary_state.detail = Some(detail);
+        app.pending_menu = Some(ItemMenuAction::Item(ItemAction::Trash));
+        app.reprompt_id = Some(item.id.clone());
+        app.run_pending_menu();
+        assert!(app.pending_menu.is_some());
+        assert!(app.summary_state.confirm.is_none());
+        app.reprompt_id = None;
+        app.summary_state.in_flight = true;
+        app.run_pending_menu();
+        assert!(app.pending_menu.is_some());
+        app.summary_state.in_flight = false;
+        app.run_pending_menu();
+        assert_eq!(app.summary_state.confirm, Some(ItemAction::Trash));
+        assert!(!app.summary_state.action_in_flight);
+        app.pending_menu = Some(ItemMenuAction::CopyPassword);
+        app.clear_selection();
+        assert!(app.pending_menu.is_none());
+    }
 }

@@ -30,6 +30,7 @@ shell out to the `bw` CLI.
 - Entry detail view with username, password, URI, notes, custom fields, and TOTP
 - Copy selected fields from the keyboard or mouse
 - Optional SSH agent socket for official Bitwarden/Vaultwarden SSH key items
+- Experimental Chrome/Chromium and Firefox extension for daemon-backed login filling
 - Auto-hide on Escape and focus loss, with confirmation before discarding edits
 - Random password generation, masked TOTP seeds, and timed secret reveal
 - Manual and periodic vault synchronization
@@ -98,7 +99,25 @@ This is useful on desktops where you prefer launching the daemon manually instea
 of installing the systemd user service.
 
 Published Gitea releases include an `x86_64-linux` tarball with a bundled
-executable and a `.sha256` checksum.
+executable and a `.sha256` checksum. Browser extension releases also include
+Chrome and Firefox ZIPs, a Firefox review source ZIP, and checksums. These archives
+are development artifacts; they are not signed Firefox add-ons or store listings.
+
+The Nix package includes a `boltwarden-native-host` launcher and native messaging
+manifests under `lib/mozilla/native-messaging-hosts` and
+`etc/chromium/native-messaging-hosts`. For Home Manager, with `boltwardenPackage`
+referring to this flake's default package:
+
+```nix
+programs.firefox.nativeMessagingHosts = [ boltwardenPackage ];
+xdg.configFile."chromium/NativeMessagingHosts/nl.mvl.boltwarden.json".source =
+  "${boltwardenPackage}/etc/chromium/native-messaging-hosts/nl.mvl.boltwarden.json";
+```
+
+For a NixOS Firefox configuration, use
+`programs.firefox.nativeMessagingHosts.packages = [ boltwardenPackage ];` instead.
+Google Chrome uses `google-chrome/NativeMessagingHosts` in the Home Manager path.
+The browser extension itself still needs to be loaded separately.
 
 ## Usage
 
@@ -130,6 +149,15 @@ boltwarden toggle-window
 If the daemon is already running, these commands send a message to the daemon
 instead of starting a second full instance. The tray menu has an **Open vault
 window** entry, and typing `window` in the popup offers the same command.
+
+The vault window remembers its sort order across restarts. Right-click an item to
+copy its username or password, edit it, archive it, or move it to trash. Protected
+items still require verification, and moving to trash asks for confirmation.
+
+Ctrl-click toggles individual selections; Shift-click selects a range. Drag any
+selected item onto a sidebar folder to move the whole selection. Drop onto **No
+folder** to remove folder assignments, or **Favorites** to favorite the selection.
+Ctrl+A selects all visible items when the search field is not focused.
 
 Wayland apps can't grab global shortcuts, so bind the commands in your compositor.
 For Hyprland:
@@ -231,6 +259,30 @@ After a successful login, the app stores the refresh session in:
 The daemon keeps the unlocked vault in memory while it is running. The popup can
 close and reopen without forcing another master-password prompt.
 
+## Offline use
+
+After a successful sync, Boltwarden keeps an encrypted offline copy by default.
+With a saved session, you can unlock it without a connection and use search,
+quick access, copying, TOTP, the SSH agent, and paired browser filling. Offline access is read-only;
+editing, creating, moving, and deleting require a successful sync first.
+Press Ctrl+R to reconnect, or let automatic retries run.
+
+The copy lives at `$XDG_CONFIG_HOME/boltwarden/vault-cache.json` (normally
+`~/.config/boltwarden/vault-cache.json`), with owner-only permissions. It is
+wrapped in authenticated encryption using a separate key derived from your
+account key and bound to your account and server. The file contains neither
+readable vault metadata nor your master password.
+
+The **Offline** status shows the copy's age on hover. Copies do not expire:
+server-side deletions, permission changes, and password changes cannot be known
+while disconnected. A confirmed session revocation prevents offline fallback;
+an unseen revocation cannot invalidate a disconnected copy. The age records the
+last full sync, even when later local edits have updated the copy.
+
+Disable **Keep offline copy** in Settings to delete it. **Use another account**
+also deletes it; locking the vault keeps it. A missing or corrupt copy requires
+an online sync before offline unlock will work again.
+
 ## SSH Agent
 
 The built-in SSH agent is disabled by default. Open the `Settings` quick command
@@ -260,6 +312,205 @@ enabled are excluded from the agent. Only Ed25519 and ECDSA keys are advertised.
 RSA agent signing is disabled because the upstream `rsa` crate has no patched
 release for [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html).
 RSA items remain readable and copyable in the vault UI.
+
+## Browser integration
+
+Browser integration supports inline username/email/password suggestions, the toolbar
+popup, `Ctrl+Shift+L`, and passkey sign-in and creation on supported HTTPS pages.
+Browser TOTP and password save/update prompts are still planned. The desktop
+remains the vault owner; the extension has no independently unlocked or persisted
+vault.
+
+Integration is **disabled by default**. Enable **Browser integration** in the
+desktop Settings, then open **Settings → Browser setup**. Installed browsers are
+found without launching them and are initially selected. Choose the browsers you
+use and click **Apply**. The same setup panel is available from **Paired browsers**
+in the full client. **Add browser** accepts a custom executable, browser family,
+and native-host folder. For Chromium browsers, choose the browser data folder's
+`NativeMessagingHosts` directory, not a `Default` or `Profile 1` directory.
+
+Registration lets a browser find Boltwarden; it does not grant vault access.
+Each extension profile still needs pairing approval. Turning a browser off prevents
+new native-host launches; revoke its pairing to end an existing authenticated session.
+
+Alternatively, register the native messaging host for the current user:
+
+```bash
+boltwarden install-browser --browser all
+```
+
+Supported installer choices are `firefox`, `chrome`, `chromium`, `vivaldi`,
+`vivaldi-snapshot`, `brave`, `edge`, and `all`.
+Run this as your desktop user, without `sudo`. `--path /absolute/path/to/boltwarden`
+selects a stable binary location. The installer writes a launcher to
+`~/.local/libexec/boltwarden-native-host` and browser-specific host manifests.
+Rerun it after moving the binary. `make install-browser BROWSER_TARGET=firefox` registers
+the binary installed through the Makefile. Nix users can use the declarative
+registration above instead.
+
+Build the extension with Node.js 22.12 or newer:
+
+```bash
+make extension-deps extension-build
+```
+
+In Chrome/Chromium or Vivaldi, open the browser's extensions page, enable developer mode, and load
+`extension/.output/chrome-mv3` as an unpacked extension. In Firefox, open
+`about:debugging#/runtime/this-firefox`, choose **Load Temporary Add-on**, and select
+`extension/.output/firefox-mv3/manifest.json`. Firefox's temporary installation
+ends when the browser restarts. A persistent installation requires a separately
+signed add-on; this repository does not supply signing credentials.
+
+Open the extension popup and request pairing. Compare its public-key fingerprint
+with the desktop approval, then approve in Boltwarden. Each browser profile pairs
+separately. Type `browsers` in quick access, open **Settings → Paired browsers**, or choose
+**Paired browsers** in the full client sidebar, to review and revoke pairings.
+The view uses the same compact rows as the vault list. Select a browser and press
+Enter, then confirm revocation with Ctrl+Enter or the button. The full fingerprint,
+pairing date, and last authenticated connection are available in the row tooltip
+and confirmation.
+Revoking a browser requires confirmation, disconnects its active sessions, and
+cancels pending requests. It must pair again before accessing the vault. This
+view remains available when browser integration is disabled.
+
+The daemon must be running; start it through your installed user service or `boltwarden --daemon`.
+Native Linux browser packages are supported initially. Snap/Flatpak browsers and
+native messaging portals are not supported in this phase.
+
+### Filling and matching
+
+Focus a username, email, or password field and click its Boltwarden mark (or press
+Arrow Down) to see matching logins. Arrow keys move the selection, Enter fills,
+and Escape closes suggestions. Tab keeps the page's normal focus order. Inline
+suggestions use the same site matching rules as the toolbar and never submit the
+form. Registration, new-password, hidden, and one-time-code fields are excluded.
+Open shadow roots and dynamically inserted fields are supported.
+
+You can also press `Ctrl+Shift+L` or choose a login in the toolbar popup. A locked
+vault opens the desktop unlock flow. Multiple matches require a selection;
+protected items still require a fresh desktop master-password check and are not
+filled by the shortcut. HTTP pages, cross-origin frames, and matches requiring
+confirmation use the toolbar's confirmation flow instead of direct inline fill. Verification in the desktop item viewer does not authorize browser
+filling.
+
+The toolbar uses the desktop's split-shield mark. The popup follows the quick
+access layout: filter this page's matching logins by name or username, move with
+the arrow keys, and press Enter to fill the selected login. Filtering covers
+loaded matches; use **Load more matching logins** when further matches are available. Locking,
+unlocking, disconnecting, and changing pages update the open popup automatically.
+
+The default match rule is **Host**, comparing normalized hostname and port.
+Explicit per-URI Bitwarden rules take precedence; missing rules use the desktop
+default. Domain matching includes private public-suffix entries, keeping
+`alice.github.io` separate from `bob.github.io`. Regex matching uses a bounded,
+case-insensitive Rust regex engine. JavaScript lookaround and backreferences are
+unsupported and do not match. Unknown rules fail closed. Archived and deleted
+items are excluded.
+
+The destination frame's URL determines matches. The shortcut fills only the top
+document or a same-origin frame. Cross-origin frames require an explicit popup
+selection and destination confirmation. HTTP destinations that match an HTTPS
+entry require confirmation; the shortcut cannot fill them. HTTP regex matches
+also require confirmation. A changed document or changed vault item invalidates
+the pending fill.
+
+Listing or filling logins follows the daemon's sync schedule: normally after 60
+seconds, with retries backing off to five minutes while offline. Connection
+failures leave the unlocked local copy available and show a warning in the
+extension. Confirmed session revocation locks the vault and cancels pending
+fills. There is no separate browser vault to synchronize.
+
+### Browser trust and privacy
+
+The extension stores its pairing key and identifier, not vault passwords or
+decrypted vault items. Matching summaries and selected credentials pass through
+extension memory while used; filling necessarily gives the page its credentials.
+Locking the vault clears extension matching state but cannot erase a password
+already filled into a website.
+
+Native messaging uses local stdio and an owner-only Unix socket with peer
+credential checks. Pairing authenticates an approved browser profile key, not the
+integrity of every script or extension in that profile. A compromised paired
+extension can request credentials while the vault is unlocked. Local software
+running as the same desktop user and privileged processes remain inside the
+trusted system boundary. Keep the browser profile and desktop account secure,
+and revoke unused pairings.
+
+Remove host registration with:
+
+```bash
+boltwarden install-browser --browser all --uninstall
+```
+
+This removes registrations for the known browser locations; custom registrations
+can be turned off in Browser setup. The shared launcher is retained for custom
+browser locations. Remove the extension separately and revoke its pairing from
+desktop Settings if that profile should no longer be trusted.
+
+### Remaining browser work
+
+Pairing, username/password filling, and an initial passkey profile are implemented.
+Remaining work includes explicit TOTP filling/copying, password save/update
+prompts, wider WebAuthn compatibility, signed Firefox/Chrome distribution, and
+sandboxed-browser packaging validation.
+
+### Passkeys
+
+On a supported page, the site's normal **Create a passkey** or **Sign in with a
+passkey** button opens desktop approval. Select an account when several match,
+then approve. **Settings → Passkey verification** controls the master-password
+prompt:
+
+- **Always ask** (the default) requires fresh password verification for every operation.
+- **Only when required** asks when the website requires user verification or the
+  selected item has master-password reprompt enabled. Optional requests use approval
+  alone and report that user verification was not performed.
+- **Use vault unlock** reuses the password verification that opened the current
+  vault session. Choose an account and approve without retyping the password, even
+  when the website requires user verification. Items with master-password reprompt
+  enabled still require fresh verification.
+
+**Use vault unlock** reports user verification based on that authenticated session,
+not a fresh password or biometric check for each passkey operation. Reuse ends when
+the vault locks, the account changes, or the daemon restarts; it is never persisted
+as a separate grant. This is an opt-in session policy, not a claim of FIDO-certified
+verification caching. A locked vault still needs unlocking, and changing the
+setting cancels pending browser requests. **Other device**
+returns control to the browser's usual authenticator chooser; **Deny** stops
+the request. Reload tabs that were open before installing or updating the extension.
+
+Sign-in supports Bitwarden-format ES256/P-256 credentials with a zero signature
+counter. Account selection is limited to the requesting relying party and any
+credential IDs requested by the site. New passkeys are saved as new personal login
+items; existing logins are not overwritten. Registration returns success only after
+the encrypted server save succeeds. Sign-in can use available offline vault data;
+creation requires a working server connection. If the site cancels after a save
+commits, the saved credential remains in the vault.
+
+The initial profile supports loaded top-level HTTPS pages, discoverable credentials,
+`none` attestation, and the `credProps` extension. Iframes, conditional/autofill
+mediation, other algorithms, nonzero counters, extra WebAuthn extensions (including
+PRF and large blobs), and unsupported attestation requests use the browser's
+native flow. New credentials use Bitwarden's syncable backup flags and zero-counter
+profile. Imported credentials with different backup semantics are not supported.
+Requests made before the document finishes loading can fall back to native
+WebAuthn after 1.5 seconds. The extension does not claim a platform authenticator through WebAuthn's static
+capability checks. Sites that require browser-internal credential slots or gate
+all passkey use on those checks may need the native flow.
+
+The daemon constructs the relying-party hash and signed client data from the
+validated requesting context. Private keys stay in the daemon. Cancellation,
+navigation, account changes, lock, pairing revocation, and request deadlines are
+checked before releasing responses. The browser bridge observes Permissions-Policy
+and delegates to native WebAuthn when it cannot establish permission.
+
+Format verification uses pinned
+[Bitwarden authenticator source and public fixtures](https://github.com/bitwarden/clients/blob/1402df876fa11c9be454ec18ef8484121024db38/libs/common/src/platform/services/fido2/fido2-authenticator.service.spec.ts),
+[the encrypted vault schema](https://github.com/bitwarden/sdk-internal/blob/933b41024148911736942486b862c1e7d0ef0aeb/crates/bitwarden-vault/src/cipher/login.rs),
+and [WebAuthn Level 3](https://www.w3.org/TR/webauthn-3/). Tests cover encrypted
+server round trips and independently verify signatures using Node/OpenSSL.
+A live round trip through an official Bitwarden client remains a separate
+compatibility check; these tests do not claim one.
 
 ## Security behavior and limits
 
@@ -321,7 +572,8 @@ against offline guessing.
 The editor generates 24-character random passwords from an unbiased 64-character
 alphabet (144 bits of entropy). Passphrase generation and card/identity editors
 are not implemented. Vault sync runs approximately every 60 seconds while the
-search screen is active; a failed sync keeps cached results and shows a warning.
+search screen is active, or on browser listing/fill requests once the same interval
+has elapsed; a failed sync keeps cached results and shows a warning.
 A muted footer label shows sync state. Hover for the last-sync time; click it or
 press `Ctrl+R` to sync manually.
 
@@ -388,6 +640,22 @@ use the real desktop session bus. Run checks:
 make check
 RUST_TEST_THREADS=1 make test
 ```
+
+Browser development uses an optional Nix shell with Node.js:
+
+```bash
+nix develop .#extension
+make extension-deps
+make extension-check extension-test extension-build
+make extension-zip
+```
+
+`extension-zip` creates Chrome, Firefox, and Firefox review source ZIPs in
+`extension/.output`. `npm --prefix extension run dev` and
+`npm --prefix extension run dev:firefox` start WXT's browser development modes.
+The fixed development identities are `lalifhibgahkeifiadipppebhbigoppp` for Chrome
+and `boltwarden@mvl.sh` for Firefox; production store identities must be coordinated
+with the native host allowlist before release.
 
 Try the popup or the vault window with made-up data and no vault:
 

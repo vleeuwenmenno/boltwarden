@@ -2,7 +2,7 @@
 //! and the action center.
 
 use crate::icons::IconCache;
-use crate::model::{BwItem, Folder, HealthCheck, HealthReport, ItemState};
+use crate::model::{BwItem, Folder, HealthCheck, HealthReport, ItemAction, ItemState};
 use crate::ui::theme::theme;
 use crate::ui::widgets;
 use egui::{Color32, RichText, Ui};
@@ -24,6 +24,7 @@ pub enum Section {
     Folder(String),
     NoFolder,
     ActionCenter,
+    PairedBrowsers,
     /// The items one action center check found.
     Health(HealthCheck),
     Archived,
@@ -46,6 +47,7 @@ impl Section {
             Self::Folder(path) => path.rsplit('/').next().unwrap_or(path).to_string(),
             Self::NoFolder => "No folder".into(),
             Self::ActionCenter => "Action center".into(),
+            Self::PairedBrowsers => "Paired browsers".into(),
             Self::Health(check) => check.title().into(),
             Self::Archived => "Archived".into(),
             Self::Trash => "Recently deleted".into(),
@@ -64,7 +66,7 @@ impl Section {
             Self::Favorites => item.favorite,
             Self::Folder(path) => item_path(item, paths).is_some_and(|p| in_folder(p, path)),
             Self::NoFolder => item_path(item, paths).is_none(),
-            Self::ActionCenter => false,
+            Self::ActionCenter | Self::PairedBrowsers => false,
             Self::Health(check) => {
                 report.is_some_and(|report| report.items(*check).contains(&item.id))
             }
@@ -193,7 +195,7 @@ impl SidebarCounts {
 /// What is carried while an item is dragged from the list onto the sidebar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraggedItem {
-    pub id: String,
+    pub ids: Vec<String>,
     pub name: String,
 }
 
@@ -210,7 +212,7 @@ pub enum DropTarget {
 pub enum SidebarAction {
     Open(Section),
     Drop {
-        item_id: String,
+        item_ids: Vec<String>,
         target: DropTarget,
     },
     /// Create a folder, inside `parent` when given.
@@ -227,6 +229,7 @@ pub fn draw_sidebar(
     tree: &[FolderNode],
     collapsed: &mut HashSet<String>,
     counts: &SidebarCounts,
+    writable: bool,
 ) -> Option<SidebarAction> {
     let t = theme();
     let mut action = None;
@@ -266,11 +269,15 @@ pub fn draw_sidebar(
                 action = Some(picked);
             }
 
-            if heading(ui, "FOLDERS", Some("New folder")) {
+            if ui
+                .add_enabled_ui(writable, |ui| heading(ui, "FOLDERS", Some("New folder")))
+                .inner
+            {
                 action = Some(SidebarAction::NewFolder { parent: None });
             }
             for node in tree {
-                if let Some(picked) = folder_rows(ui, node, 0, section, collapsed, counts) {
+                if let Some(picked) = folder_rows(ui, node, 0, section, collapsed, counts, writable)
+                {
                     action = Some(picked);
                 }
             }
@@ -287,6 +294,16 @@ pub fn draw_sidebar(
             }
 
             heading(ui, "MORE", None);
+            if let Some(picked) = section_entry(
+                ui,
+                section,
+                Section::PairedBrowsers,
+                t.icon("\u{f108}", "▣"),
+                None,
+                None,
+            ) {
+                action = Some(picked);
+            }
             if let Some(picked) = section_entry(
                 ui,
                 section,
@@ -325,7 +342,7 @@ fn section_entry(
         && let Some(item) = accept_drop(ui, &response)
     {
         return Some(SidebarAction::Drop {
-            item_id: item.id.clone(),
+            item_ids: item.ids.clone(),
             target: drop,
         });
     }
@@ -382,6 +399,7 @@ fn folder_rows(
     section: &Section,
     collapsed: &mut HashSet<String>,
     counts: &SidebarCounts,
+    writable: bool,
 ) -> Option<SidebarAction> {
     let t = theme();
     let is_collapsed = collapsed.contains(&node.path);
@@ -408,7 +426,7 @@ fn folder_rows(
     });
     if let Some(item) = accept_drop(ui, &response) {
         picked = Some(SidebarAction::Drop {
-            item_id: item.id.clone(),
+            item_ids: item.ids.clone(),
             target: DropTarget::Folder(node.path.clone()),
         });
     } else if response.clicked() {
@@ -422,7 +440,7 @@ fn folder_rows(
     }
     response.context_menu(|ui| {
         let mut item = |ui: &mut Ui, label: &str, action: SidebarAction| {
-            if ui.button(label).clicked() {
+            if ui.add_enabled(writable, egui::Button::new(label)).clicked() {
                 picked = Some(action);
                 ui.close();
             }
@@ -447,7 +465,9 @@ fn folder_rows(
     });
     if !is_collapsed {
         for child in &node.children {
-            if let Some(action) = folder_rows(ui, child, depth + 1, section, collapsed, counts) {
+            if let Some(action) =
+                folder_rows(ui, child, depth + 1, section, collapsed, counts, writable)
+            {
                 picked = Some(action);
             }
         }
@@ -545,12 +565,7 @@ fn sidebar_row(
 }
 
 /// How the item list is ordered while no search is typed. A search keeps relevance order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ListOrder {
-    Name,
-    Modified,
-    Created,
-}
+pub use crate::config::ListOrder;
 
 impl ListOrder {
     const ALL: [Self; 3] = [Self::Name, Self::Modified, Self::Created];
@@ -597,16 +612,87 @@ pub fn draw_list_header(ui: &mut Ui, title: &str, count: usize, order: &mut List
     });
 }
 
-/// Returns the index of a clicked row.
+#[derive(Debug, Clone, Default)]
+pub struct ItemSelection {
+    pub ids: HashSet<String>,
+    anchor: Option<String>,
+}
+
+impl ItemSelection {
+    pub fn only(&mut self, id: &str) {
+        self.ids.clear();
+        self.ids.insert(id.to_owned());
+        self.anchor = Some(id.to_owned());
+    }
+
+    pub fn click(&mut self, id: &str, visible: &[&BwItem], modifiers: egui::Modifiers) {
+        if modifiers.shift {
+            let anchor = self
+                .anchor
+                .as_ref()
+                .and_then(|id| visible.iter().position(|item| &item.id == id));
+            let end = visible.iter().position(|item| item.id == id);
+            if let (Some(start), Some(end)) = (anchor, end) {
+                if !modifiers.command && !modifiers.ctrl {
+                    self.ids.clear();
+                }
+                self.ids.extend(
+                    visible[start.min(end)..=start.max(end)]
+                        .iter()
+                        .map(|item| item.id.clone()),
+                );
+                return;
+            }
+        }
+        if modifiers.command || modifiers.ctrl {
+            if !self.ids.remove(id) {
+                self.ids.insert(id.to_owned());
+            }
+            self.anchor = Some(id.to_owned());
+        } else {
+            self.only(id);
+        }
+    }
+
+    pub fn retain_visible(&mut self, items: &[&BwItem]) {
+        self.ids
+            .retain(|id| items.iter().any(|item| &item.id == id));
+        if self
+            .anchor
+            .as_ref()
+            .is_some_and(|id| !items.iter().any(|item| &item.id == id))
+        {
+            self.anchor = None;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemMenuAction {
+    CopyUsername,
+    CopyPassword,
+    Edit,
+    Item(ItemAction),
+}
+
+pub enum ListAction {
+    Select(String),
+    Menu(String, ItemMenuAction),
+}
+
+/// Draws selected rows and returns a selection or context-menu action.
 pub fn draw_item_list(
     ui: &mut Ui,
     items: &[&BwItem],
     selected: Option<usize>,
+    selection: &mut ItemSelection,
     scroll_to_selected: bool,
     icons: &mut IconCache,
-) -> Option<usize> {
+    writable: bool,
+) -> Option<ListAction> {
     let t = theme();
     let mut clicked = None;
+    selection.retain_visible(items);
     if let Some(host) = selected
         .and_then(|idx| items.get(idx))
         .and_then(|item| item.icon_host.as_deref())
@@ -619,23 +705,103 @@ pub fn draw_item_list(
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             for (idx, item) in items.iter().enumerate() {
-                let is_selected = selected == Some(idx);
-                let (rect, response) = widgets::row(ui, is_selected, LIST_ROW_HEIGHT);
+                let is_selected = selection.ids.contains(&item.id);
+                let (rect, response) = ui
+                    .push_id(("vault-item", &item.id), |ui| {
+                        widgets::row(ui, is_selected, LIST_ROW_HEIGHT)
+                    })
+                    .inner;
                 // Rows drag onto sidebar folders; a click without moving still selects.
-                let response = response.interact(egui::Sense::drag());
-                response.dnd_set_drag_payload(DraggedItem {
-                    id: item.id.clone(),
-                    name: item.name.clone(),
+                let response = if writable {
+                    response.interact(egui::Sense::drag())
+                } else {
+                    response
+                };
+                if response.drag_started() && !selection.ids.contains(&item.id) {
+                    selection.only(&item.id);
+                    clicked = Some(ListAction::Select(item.id.clone()));
+                }
+                if writable && response.drag_started() && item.state == ItemState::Active {
+                    let ids: Vec<String> = items
+                        .iter()
+                        .filter(|row| {
+                            selection.ids.contains(&row.id) && row.state == ItemState::Active
+                        })
+                        .map(|row| row.id.clone())
+                        .collect();
+                    let name = if ids.len() > 1 {
+                        format!("{} items", ids.len())
+                    } else {
+                        item.name.clone()
+                    };
+                    response.dnd_set_drag_payload(DraggedItem { ids, name });
+                }
+                response.context_menu(|ui| {
+                    let mut entry = |ui: &mut Ui, label: &str, enabled: bool, action| {
+                        let enabled = enabled
+                            && (writable
+                                || matches!(
+                                    action,
+                                    ItemMenuAction::CopyUsername | ItemMenuAction::CopyPassword
+                                ));
+                        if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                            clicked = Some(ListAction::Menu(item.id.clone(), action));
+                            ui.close();
+                        }
+                    };
+                    entry(
+                        ui,
+                        "Copy username",
+                        item.username.is_some(),
+                        ItemMenuAction::CopyUsername,
+                    );
+                    entry(
+                        ui,
+                        "Copy password",
+                        item.item_type == "login",
+                        ItemMenuAction::CopyPassword,
+                    );
+                    ui.separator();
+                    if item.state != ItemState::Deleted {
+                        entry(ui, "Edit", true, ItemMenuAction::Edit);
+                        entry(
+                            ui,
+                            if item.state == ItemState::Archived {
+                                "Unarchive"
+                            } else {
+                                "Archive"
+                            },
+                            true,
+                            ItemMenuAction::Item(if item.state == ItemState::Archived {
+                                ItemAction::Unarchive
+                            } else {
+                                ItemAction::Archive
+                            }),
+                        );
+                        entry(
+                            ui,
+                            "Move to trash…",
+                            true,
+                            ItemMenuAction::Item(ItemAction::Trash),
+                        );
+                    } else {
+                        entry(
+                            ui,
+                            "Restore",
+                            true,
+                            ItemMenuAction::Item(ItemAction::Restore),
+                        );
+                    }
                 });
                 response.widget_info(|| {
                     egui::WidgetInfo::selected(
                         egui::WidgetType::SelectableLabel,
-                        true,
+                        ui.is_enabled(),
                         is_selected,
                         &item.name,
                     )
                 });
-                if is_selected && scroll_to_selected {
+                if selected == Some(idx) && scroll_to_selected {
                     ui.scroll_to_rect(rect, None);
                 }
                 if !ui.is_rect_visible(rect) {
@@ -644,7 +810,8 @@ pub fn draw_item_list(
                 let image = item.icon_host.as_deref().and_then(|host| icons.get(host));
                 paint_item_row(ui, rect, item, image.as_ref(), is_selected);
                 if response.clicked() {
-                    clicked = Some(idx);
+                    selection.click(&item.id, items, ui.input(|input| input.modifiers));
+                    clicked = Some(ListAction::Select(item.id.clone()));
                 }
             }
             if items.is_empty() {
@@ -1241,6 +1408,7 @@ mod tests {
         events: Vec<egui::Event>,
         items: &[BwItem],
         folders: &[Folder],
+        selection: &mut ItemSelection,
     ) -> (Option<SidebarAction>, Vec<(String, egui::Pos2)>) {
         let tree = folder_tree(folders);
         let paths = folder_paths(folders);
@@ -1261,10 +1429,10 @@ mod tests {
             ui.horizontal_top(|ui| {
                 let column = egui::Layout::top_down(egui::Align::Min);
                 ui.allocate_ui_with_layout(egui::vec2(230., 580.), column, |ui| {
-                    action = draw_sidebar(ui, &Section::All, &tree, &mut collapsed, &counts);
+                    action = draw_sidebar(ui, &Section::All, &tree, &mut collapsed, &counts, true);
                 });
                 ui.allocate_ui_with_layout(egui::vec2(330., 580.), column, |ui| {
-                    draw_item_list(ui, &refs, None, false, &mut icons);
+                    draw_item_list(ui, &refs, None, selection, false, &mut icons, true);
                 });
             });
         });
@@ -1285,8 +1453,9 @@ mod tests {
         let ctx = egui::Context::default();
         let folders = [folder("w", "Work"), folder("p", "Personal")];
         let items = [list_item("GitHub", Some("p"))];
-        frame(&ctx, Vec::new(), &items, &folders);
-        let (_, texts) = frame(&ctx, Vec::new(), &items, &folders);
+        let mut selection = ItemSelection::default();
+        frame(&ctx, Vec::new(), &items, &folders, &mut selection);
+        let (_, texts) = frame(&ctx, Vec::new(), &items, &folders, &mut selection);
         let find = |label: &str| {
             texts
                 .iter()
@@ -1311,16 +1480,246 @@ mod tests {
         ];
         let mut dropped = None;
         for events in steps {
-            if let (Some(action), _) = frame(&ctx, events, &items, &folders) {
+            if let (Some(action), _) = frame(&ctx, events, &items, &folders, &mut selection) {
                 dropped = Some(action);
             }
         }
         assert_eq!(
             dropped,
             Some(SidebarAction::Drop {
-                item_id: "GitHub".into(),
+                item_ids: vec!["GitHub".into()],
                 target: DropTarget::Folder("Work".into()),
             })
+        );
+    }
+
+    #[test]
+    fn paired_browsers_sidebar_entry_opens_management_section() {
+        let ctx = egui::Context::default();
+        let mut selection = ItemSelection::default();
+        frame(&ctx, Vec::new(), &[], &[], &mut selection);
+        let (_, texts) = frame(&ctx, Vec::new(), &[], &[], &mut selection);
+        let pos = texts
+            .iter()
+            .find(|(text, _)| text == "Paired browsers")
+            .expect("paired browsers entry must be visible")
+            .1
+            + egui::vec2(4.0, 6.0);
+        frame(
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            &[],
+            &[],
+            &mut selection,
+        );
+        let (action, _) = frame(
+            &ctx,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &[],
+            &[],
+            &mut selection,
+        );
+        assert_eq!(action, Some(SidebarAction::Open(Section::PairedBrowsers)));
+        assert!(!Section::PairedBrowsers.contains(
+            &list_item("login", None),
+            &HashMap::new(),
+            None,
+        ));
+    }
+
+    #[test]
+    fn ctrl_toggles_and_shift_selects_a_visible_range() {
+        let items = [
+            list_item("Zulu", None),
+            list_item("Beta", None),
+            list_item("Alpha", None),
+        ];
+        let refs = items.iter().collect::<Vec<_>>();
+        let mut selection = ItemSelection::default();
+        selection.click("Zulu", &refs, egui::Modifiers::NONE);
+        selection.click("Alpha", &refs, egui::Modifiers::CTRL);
+        assert_eq!(selection.ids.len(), 2);
+        selection.click("Alpha", &refs, egui::Modifiers::CTRL);
+        assert_eq!(selection.ids, HashSet::from(["Zulu".into()]));
+        selection.click("Zulu", &refs, egui::Modifiers::SHIFT);
+        assert_eq!(selection.ids.len(), 3);
+        selection.retain_visible(&refs[1..]);
+        assert_eq!(
+            selection.ids,
+            HashSet::from(["Alpha".into(), "Beta".into()])
+        );
+        selection.click("Beta", &refs, egui::Modifiers::NONE);
+        assert_eq!(selection.ids, HashSet::from(["Beta".into()]));
+    }
+
+    #[test]
+    fn dragging_selected_rows_moves_the_group_but_unselected_rows_move_alone() {
+        for drag_selected in [true, false] {
+            let ctx = egui::Context::default();
+            let folders = [folder("w", "Work")];
+            let items = [
+                list_item("Alpha", None),
+                list_item("Beta", None),
+                list_item("Gamma", None),
+            ];
+            let mut selection = ItemSelection::default();
+            frame(&ctx, vec![], &items, &folders, &mut selection);
+            let (_, texts) = frame(&ctx, vec![], &items, &folders, &mut selection);
+            let find = |label: &str| {
+                texts.iter().find(|(text, _)| text == label).unwrap().1 + egui::vec2(4., 6.)
+            };
+            for (name, modifiers) in [
+                ("Alpha", egui::Modifiers::NONE),
+                ("Beta", egui::Modifiers::CTRL),
+            ] {
+                let pos = find(name);
+                for pressed in [true, false] {
+                    frame(
+                        &ctx,
+                        vec![
+                            egui::Event::ModifiersChanged(modifiers),
+                            egui::Event::PointerMoved(pos),
+                            egui::Event::PointerButton {
+                                pos,
+                                pressed,
+                                button: egui::PointerButton::Primary,
+                                modifiers,
+                            },
+                        ],
+                        &items,
+                        &folders,
+                        &mut selection,
+                    );
+                }
+            }
+            assert_eq!(
+                selection.ids,
+                HashSet::from(["Alpha".into(), "Beta".into()])
+            );
+            let from = find(if drag_selected { "Alpha" } else { "Gamma" });
+            let to = find("Work");
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                pressed,
+                button: egui::PointerButton::Primary,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let mut dropped = None;
+            for events in [
+                vec![egui::Event::PointerMoved(from)],
+                vec![button(from, true)],
+                vec![egui::Event::PointerMoved(from + egui::vec2(20., 0.))],
+                vec![egui::Event::PointerMoved(to)],
+                vec![egui::Event::PointerMoved(to)],
+                vec![button(to, false)],
+            ] {
+                if let (Some(action), _) = frame(&ctx, events, &items, &folders, &mut selection) {
+                    dropped = Some(action);
+                }
+            }
+            assert_eq!(
+                dropped,
+                Some(SidebarAction::Drop {
+                    item_ids: if drag_selected {
+                        vec!["Alpha".into(), "Beta".into()]
+                    } else {
+                        vec!["Gamma".into()]
+                    },
+                    target: DropTarget::Folder("Work".into()),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn right_click_menu_targets_the_clicked_item() {
+        let ctx = egui::Context::default();
+        let items = [list_item("Alpha", None), list_item("Beta", None)];
+        let refs = items.iter().collect::<Vec<_>>();
+        let mut selection = ItemSelection::default();
+        selection.only("Alpha");
+        let mut icons = IconCache::new(false);
+        let mut render = |events| {
+            let mut action = None;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(600., 500.),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    action =
+                        draw_item_list(ui, &refs, Some(0), &mut selection, false, &mut icons, true);
+                },
+            );
+            output.textures_delta.clear();
+            let texts: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) => {
+                        Some((text.galley.job.text.clone(), text.pos + egui::vec2(4., 6.)))
+                    }
+                    _ => None,
+                })
+                .collect();
+            (action, texts)
+        };
+        render(vec![]);
+        let (_, texts) = render(vec![]);
+        let pos = texts.iter().find(|(text, _)| text == "Beta").unwrap().1;
+        let button = |pos, button, pressed| egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        render(vec![
+            egui::Event::PointerMoved(pos),
+            button(pos, egui::PointerButton::Secondary, true),
+        ]);
+        render(vec![button(pos, egui::PointerButton::Secondary, false)]);
+        let (_, texts) = render(vec![]);
+        for label in [
+            "Copy username",
+            "Copy password",
+            "Edit",
+            "Archive",
+            "Move to trash…",
+        ] {
+            assert!(
+                texts.iter().any(|(text, _)| text == label),
+                "Missing menu action {label}"
+            );
+        }
+        let pos = texts
+            .iter()
+            .find(|(text, _)| text == "Copy password")
+            .unwrap()
+            .1;
+        render(vec![
+            egui::Event::PointerMoved(pos),
+            button(pos, egui::PointerButton::Primary, true),
+        ]);
+        let (action, _) = render(vec![button(pos, egui::PointerButton::Primary, false)]);
+        assert!(
+            matches!(action, Some(ListAction::Menu(id, ItemMenuAction::CopyPassword)) if id == "Beta")
         );
     }
 

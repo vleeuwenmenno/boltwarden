@@ -1,13 +1,18 @@
-use crate::config::{self, AppSettings, StartList};
+use crate::config::{self, AppSettings, PasskeyVerification, StartList};
 use crate::icons::IconCache;
 use crate::model::{BwItem, ItemState, SshAgentStatus, SyncStatus};
+use crate::ui::paired_browsers::{PairedBrowsersAction, PairedBrowsersState, draw_paired_browsers};
 use crate::ui::theme::theme;
 use crate::ui::widgets;
 use egui::{Context, RichText, Ui};
 
 const SEARCH_INPUT_ID: &str = "vault-search-input";
 const SSH_PATH_INPUT_ID: &str = "settings-ssh-socket-path";
-const SETTINGS_ROWS: usize = 9;
+const SETTINGS_ROWS: usize = 15;
+const BROWSER_SETUP_ROW: usize = 14;
+const PASSKEY_VERIFICATION_ROW: usize = 13;
+const PAIRED_BROWSERS_ROW: usize = 12;
+const DEFAULT_URI_MATCH_ROW: usize = 11;
 const SCREEN_CAPTURE_ROW: usize = 5;
 const START_LIST_ROW: usize = 3;
 const IDLE_TIMEOUT_ROW: usize = 7;
@@ -19,6 +24,8 @@ const NOTICE_DURATION: std::time::Duration = std::time::Duration::from_secs(3);
 pub enum SearchView {
     Results,
     Settings,
+    PairedBrowsers,
+    BrowserSetup,
     Archived,
     Trash,
 }
@@ -30,7 +37,7 @@ impl SearchView {
             Self::Results => Some(ItemState::Active),
             Self::Archived => Some(ItemState::Archived),
             Self::Trash => Some(ItemState::Deleted),
-            Self::Settings => None,
+            Self::Settings | Self::PairedBrowsers | Self::BrowserSetup => None,
         }
     }
 
@@ -108,6 +115,7 @@ impl ListSort {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DisplayEntry {
     SettingsCommand,
+    PairedBrowsersCommand,
     LockCommand,
     ArchivedCommand,
     TrashCommand,
@@ -142,6 +150,9 @@ pub struct SearchState {
     pub ssh_agent_path_input: Option<String>,
     pub settings_selected: usize,
     pub capture_pending: bool,
+    pub paired_browsers: PairedBrowsersState,
+    pub browser_setup: crate::ui::browser_setup::BrowserSetupState,
+    paired_browsers_return: SearchView,
     settings_scrolled_to: Option<usize>,
     /// Short success message for the footer, such as "Moved to trash".
     pub notice: Option<(String, std::time::Instant)>,
@@ -171,6 +182,9 @@ impl Default for SearchState {
             ssh_agent_path_input: None,
             settings_selected: 0,
             capture_pending: false,
+            paired_browsers: PairedBrowsersState::default(),
+            browser_setup: Default::default(),
+            paired_browsers_return: SearchView::Results,
             settings_scrolled_to: None,
             notice: None,
             list_sort: ListSort::default(),
@@ -189,6 +203,12 @@ impl SearchState {
     }
 
     pub fn reset_results_for_empty_query(&mut self) {
+        if matches!(
+            self.view,
+            SearchView::PairedBrowsers | SearchView::BrowserSetup
+        ) {
+            return;
+        }
         // A start list loads through a normal search; only drop the results of the query
         // that was just cleared.
         if self.showing_start_list() {
@@ -204,7 +224,7 @@ impl SearchState {
             self.selected = 0;
             self.error = None;
             self.warning = None;
-            self.sync_status = None;
+
             self.view = SearchView::Results;
             if self.in_flight {
                 self.in_flight = false;
@@ -213,8 +233,15 @@ impl SearchState {
     }
 
     pub fn needs_search(&self) -> bool {
+        if self.view.item_state().is_none() {
+            return false;
+        }
         let query = self.query.trim();
-        if query.is_empty() && !self.view.is_item_list() && !self.showing_start_list() {
+        if query.is_empty()
+            && !self.view.is_item_list()
+            && !self.showing_start_list()
+            && self.last_query != "\u{0}"
+        {
             return false;
         }
         if self.in_flight {
@@ -253,6 +280,7 @@ impl SearchState {
         self.settings_selected = 0;
         self.settings_scrolled_to = None;
         self.notice = None;
+        self.paired_browsers.cancel_confirmation();
         self.scrolled_to = None;
         self.force_refresh();
         self.focus_search = true;
@@ -331,6 +359,10 @@ impl SearchState {
                 self.settings_scrolled_to = None;
                 OpenSelectedAction::None
             }
+            Some(DisplayEntry::PairedBrowsersCommand) => {
+                self.open_paired_browsers();
+                OpenSelectedAction::None
+            }
             Some(DisplayEntry::LockCommand) => OpenSelectedAction::LockVault,
             Some(DisplayEntry::ArchivedCommand) => {
                 self.open_item_list(SearchView::Archived);
@@ -340,11 +372,38 @@ impl SearchState {
                 self.open_item_list(SearchView::Trash);
                 OpenSelectedAction::None
             }
-            Some(DisplayEntry::NewItemCommand) => OpenSelectedAction::NewItem,
+            Some(DisplayEntry::NewItemCommand) => {
+                if self.offline() {
+                    OpenSelectedAction::None
+                } else {
+                    OpenSelectedAction::NewItem
+                }
+            }
             Some(DisplayEntry::WindowCommand) => OpenSelectedAction::OpenWindow,
             Some(DisplayEntry::VaultItem(idx)) => OpenSelectedAction::OpenResult(idx),
             None => OpenSelectedAction::None,
         }
+    }
+
+    pub fn offline(&self) -> bool {
+        self.sync_status.as_ref().is_some_and(|s| s.offline)
+    }
+
+    pub fn open_paired_browsers(&mut self) {
+        if self.view != SearchView::PairedBrowsers {
+            self.paired_browsers_return = self.view;
+        }
+        self.view = SearchView::PairedBrowsers;
+        self.paired_browsers.cancel_confirmation();
+        self.paired_browsers.loaded = false;
+        self.paired_browsers.error = None;
+        self.focus_search = false;
+    }
+
+    pub fn close_paired_browsers(&mut self) {
+        self.paired_browsers.cancel_confirmation();
+        self.view = self.paired_browsers_return;
+        self.focus_search = true;
     }
 
     pub fn close_settings_panel(&mut self) {
@@ -368,6 +427,10 @@ impl SearchState {
             (
                 settings_command_matches(&self.query),
                 DisplayEntry::SettingsCommand,
+            ),
+            (
+                paired_browsers_command_matches(&self.query),
+                DisplayEntry::PairedBrowsersCommand,
             ),
             (lock_command_matches(&self.query), DisplayEntry::LockCommand),
             (
@@ -441,6 +504,13 @@ pub fn settings_command_matches(query: &str) -> bool {
     query.chars().count() >= 2 && "settings".starts_with(&query.to_ascii_lowercase())
 }
 
+pub fn paired_browsers_command_matches(query: &str) -> bool {
+    command_matches(
+        query,
+        &["browsers", "paired browsers", "deauthorize browsers"],
+    )
+}
+
 pub fn lock_command_matches(query: &str) -> bool {
     command_matches(query, &["lock"])
 }
@@ -491,7 +561,11 @@ pub fn draw_search(
     } else if let Some(notice) = state.current_notice() {
         Some((notice, t.success))
     } else {
-        state.warning.as_deref().map(|warning| (warning, t.warning))
+        state
+            .warning
+            .as_deref()
+            .filter(|_| !state.offline())
+            .map(|warning| (warning, t.warning))
     };
     {
         let hints: &[(&str, &str)] = match (settings.show_keyboard_shortcuts, state.view) {
@@ -502,6 +576,15 @@ pub fn draw_search(
                 ("Shift+⏎", "Copy password"),
                 ("Esc", "Hide"),
             ],
+            (true, SearchView::PairedBrowsers) => &[
+                ("↑↓", "Navigate"),
+                ("⏎", "Revoke"),
+                ("Ctrl+R", "Refresh"),
+                ("Esc", "Back"),
+            ],
+            (true, SearchView::BrowserSetup) => {
+                &[("↑↓", "Select"), ("Space", "Toggle"), ("Esc", "Back")]
+            }
             (true, SearchView::Settings) => {
                 &[("↑↓", "Select"), ("Space", "Toggle"), ("Esc", "Back")]
             }
@@ -516,8 +599,17 @@ pub fn draw_search(
         egui::Panel::bottom("footer")
             .frame(widgets::footer_frame())
             .show(root, |ui| {
+                if matches!(
+                    state.view,
+                    SearchView::BrowserSetup | SearchView::PairedBrowsers
+                ) {
+                    widgets::footer(ui, hints, None);
+                    return;
+                }
                 let sync_label = if state.syncing {
                     "Syncing…"
+                } else if state.offline() {
+                    "Offline"
                 } else if state
                     .sync_status
                     .as_ref()
@@ -547,7 +639,12 @@ pub fn draw_search(
                                 "Sync vault",
                             )
                         });
-                        let mut tooltip = "Sync vault · Ctrl+R".to_string();
+                        let mut tooltip = state
+                            .sync_status
+                            .as_ref()
+                            .filter(|s| s.offline)
+                            .map(|s| s.offline_tooltip())
+                            .unwrap_or_else(|| "Sync vault · Ctrl+R".to_string());
                         if let Some(at) =
                             state.sync_status.as_ref().and_then(|s| s.last_synced_unix)
                         {
@@ -561,6 +658,11 @@ pub fn draw_search(
                             } else {
                                 format!("\nLast synced {minutes} min ago")
                             });
+                        }
+                        if state.offline()
+                            && let Some(warning) = &state.warning
+                        {
+                            tooltip.push_str(&format!("\n{warning}"));
                         }
                         if response.on_hover_text(tooltip).clicked() {
                             action = Some(SearchAction::Sync);
@@ -577,7 +679,13 @@ pub fn draw_search(
     egui::CentralPanel::default()
         .frame(widgets::body_frame())
         .show(root, |ui| {
-            if state.view == SearchView::Settings {
+            if state.view == SearchView::BrowserSetup {
+                crate::ui::browser_setup::draw_browser_setup(ui, &mut state.browser_setup);
+            } else if state.view == SearchView::PairedBrowsers {
+                if let Some(browser_action) = draw_paired_browsers(ui, &mut state.paired_browsers) {
+                    action = Some(SearchAction::PairedBrowsers(browser_action));
+                }
+            } else if state.view == SearchView::Settings {
                 if let Some(settings_action) = draw_settings(ui, state, settings, ssh_agent_status)
                 {
                     action = Some(settings_action);
@@ -598,7 +706,7 @@ pub fn draw_search(
                 let hint = if state.start_list == StartList::RecentlyUsed {
                     "Items you open show up here · type to search"
                 } else {
-                    "Type to search · commands: settings, lock, archived, deleted, new, window"
+                    "Type to search · commands: browsers, settings, lock, archived, deleted, new, window"
                 };
                 widgets::empty_state(ui, t.icon("\u{f002}", "🔎"), hint, false);
             } else if state.display_entry_count() == 0 {
@@ -630,6 +738,19 @@ fn handle_keys(
     let path_focused = ctx.memory(|m| m.has_focus(egui::Id::new(SSH_PATH_INPUT_ID)));
     let cursor_at_end = search_cursor_at_end(ctx, &state.query);
     ctx.input_mut(|input| match state.view {
+        SearchView::BrowserSetup => {
+            if input.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                state.view = SearchView::Settings;
+                state.focus_search = true;
+            }
+        }
+        SearchView::PairedBrowsers => {
+            if !state.paired_browsers.has_confirmation()
+                && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+            {
+                state.close_paired_browsers();
+            }
+        }
         SearchView::Settings => {
             if path_focused {
                 return;
@@ -731,6 +852,32 @@ fn draw_search_field(ui: &mut Ui, state: &mut SearchState) {
     ui.horizontal(|ui| {
         widgets::logo(ui, t.input() + 4.0);
         ui.add_space(6.0);
+        if state.view == SearchView::BrowserSetup {
+            ui.label(
+                RichText::new("Browser setup")
+                    .size(t.input())
+                    .color(t.text_strong),
+            );
+            return;
+        }
+        if state.view == SearchView::PairedBrowsers {
+            ui.label(
+                RichText::new("Paired browsers")
+                    .size(t.input())
+                    .color(t.text_strong),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if state.paired_browsers.is_busy() {
+                    ui.add(egui::Spinner::new().color(t.text_muted));
+                } else {
+                    ui.label(
+                        RichText::new(state.paired_browsers.records.len().to_string())
+                            .color(t.text_faint),
+                    );
+                }
+            });
+            return;
+        }
         let chip = match state.view {
             SearchView::Archived => Some((t.icon("\u{f187}", "🗄"), "Archived")),
             SearchView::Trash => Some((t.icon("\u{f1f8}", "🗑"), "Recently deleted")),
@@ -859,6 +1006,16 @@ fn draw_results(
                         Some("command"),
                         selected,
                     ),
+                    DisplayEntry::PairedBrowsersCommand => widgets::paint_row_content(
+                        ui,
+                        rect,
+                        t.icon("\u{f0ac}", "◎"),
+                        None,
+                        "Paired browsers",
+                        Some("View paired extensions and revoke access"),
+                        Some("command"),
+                        selected,
+                    ),
                     DisplayEntry::LockCommand => widgets::paint_row_content(
                         ui,
                         rect,
@@ -885,7 +1042,11 @@ fn draw_results(
                         t.icon("\u{f067}", "+"),
                         None,
                         "New item",
-                        Some("Add a login or secure note to the vault"),
+                        Some(if state.offline() {
+                            "Offline: editing needs a connection"
+                        } else {
+                            "Add a login or secure note to the vault"
+                        }),
                         Some("command"),
                         selected,
                     ),
@@ -927,12 +1088,17 @@ fn draw_results(
                         );
                     }
                 }
+                if matches!(entry, DisplayEntry::NewItemCommand) && state.offline() {
+                    ui.painter()
+                        .rect_filled(rect, 0.0, t.bg.gamma_multiply(0.65));
+                }
                 let label = match entry {
                     DisplayEntry::VaultItem(idx) => {
                         let item = &state.results[idx];
                         format!("{} {}", item.name, item.username.as_deref().unwrap_or(""))
                     }
                     DisplayEntry::SettingsCommand => "Settings".into(),
+                    DisplayEntry::PairedBrowsersCommand => "Paired browsers".into(),
                     DisplayEntry::LockCommand => "Lock vault".into(),
                     DisplayEntry::ArchivedCommand => "Archived items".into(),
                     DisplayEntry::TrashCommand => "Recently deleted".into(),
@@ -954,12 +1120,17 @@ fn draw_results(
                     state.selected = i;
                     match entry {
                         DisplayEntry::SettingsCommand
+                        | DisplayEntry::PairedBrowsersCommand
                         | DisplayEntry::ArchivedCommand
                         | DisplayEntry::TrashCommand => {
                             state.open_selected_entry();
                         }
                         DisplayEntry::LockCommand => action = Some(SearchAction::LockVault),
-                        DisplayEntry::NewItemCommand => action = Some(SearchAction::NewItem),
+                        DisplayEntry::NewItemCommand => {
+                            if !state.offline() {
+                                action = Some(SearchAction::NewItem);
+                            }
+                        }
                         DisplayEntry::WindowCommand => action = Some(SearchAction::OpenWindow),
                         DisplayEntry::VaultItem(idx) => {
                             action = Some(SearchAction::OpenResult(idx))
@@ -986,6 +1157,21 @@ fn toggle_setting(row: usize, settings: &AppSettings) -> Option<SearchAction> {
             SearchAction::SetLockAfterIdleTimeout(!settings.lock_after_idle_timeout)
         }
         8 => SearchAction::SetSshAgentEnabled(!settings.ssh_agent_enabled),
+        9 => SearchAction::SetKeepOfflineCopy(!settings.keep_offline_copy),
+        10 => SearchAction::SetBrowserIntegrationEnabled(!settings.browser_integration_enabled),
+        DEFAULT_URI_MATCH_ROW => {
+            SearchAction::SetDefaultUriMatch(match settings.default_uri_match {
+                crate::uri_match::UriMatchType::Host => crate::uri_match::UriMatchType::Domain,
+                crate::uri_match::UriMatchType::Domain => crate::uri_match::UriMatchType::Exact,
+                crate::uri_match::UriMatchType::Exact => crate::uri_match::UriMatchType::Never,
+                _ => crate::uri_match::UriMatchType::Host,
+            })
+        }
+        PAIRED_BROWSERS_ROW => SearchAction::OpenPairedBrowsers,
+        BROWSER_SETUP_ROW => SearchAction::OpenBrowserSetup,
+        PASSKEY_VERIFICATION_ROW => {
+            SearchAction::SetPasskeyVerification(settings.passkey_verification.next())
+        }
         _ => return None,
     })
 }
@@ -999,7 +1185,7 @@ fn draw_settings(
     let t = theme();
     let mut action = None;
     // The start list row (a choice, not a toggle) is drawn separately at START_LIST_ROW.
-    let rows: [(bool, &str, &str); SETTINGS_ROWS - 1] = [
+    let rows: [(bool, &str, &str); SETTINGS_ROWS - 5] = [
         (
             settings.show_keyboard_shortcuts,
             "Show keyboard shortcuts",
@@ -1045,6 +1231,16 @@ fn draw_settings(
             settings.ssh_agent_enabled,
             "Enable SSH agent",
             "Serve SSH keys from the vault over a local agent socket",
+        ),
+        (
+            settings.keep_offline_copy,
+            "Keep offline copy",
+            "Keep an encrypted copy for read-only access without a connection",
+        ),
+        (
+            settings.browser_integration_enabled,
+            "Enable browser integration",
+            "Allow paired browser extensions to fill logins from this vault",
         ),
     ];
 
@@ -1119,6 +1315,88 @@ fn draw_settings(
                 }
             }
 
+            let match_label = match settings.default_uri_match {
+                crate::uri_match::UriMatchType::Host => "Exact host and port",
+                crate::uri_match::UriMatchType::Domain => "Base domain",
+                crate::uri_match::UriMatchType::Exact => "Exact URL",
+                crate::uri_match::UriMatchType::Never => "Never",
+                _ => "Custom",
+            };
+            let response = widgets::choice_row(
+                ui,
+                state.settings_selected == DEFAULT_URI_MATCH_ROW,
+                "Default URI matching",
+                "Applies only when an item has no explicit match rule",
+                match_label,
+            );
+            if state.settings_selected == DEFAULT_URI_MATCH_ROW
+                && state.settings_scrolled_to != Some(DEFAULT_URI_MATCH_ROW)
+            {
+                response.scroll_to_me(None);
+                state.settings_scrolled_to = Some(DEFAULT_URI_MATCH_ROW);
+            }
+            if response.clicked() {
+                state.settings_selected = DEFAULT_URI_MATCH_ROW;
+                action = toggle_setting(DEFAULT_URI_MATCH_ROW, settings);
+            }
+            let response = widgets::choice_row(
+                ui,
+                state.settings_selected == PAIRED_BROWSERS_ROW,
+                "Paired browsers",
+                "View paired extensions and revoke access",
+                "Manage",
+            );
+            if state.settings_selected == PAIRED_BROWSERS_ROW
+                && state.settings_scrolled_to != Some(PAIRED_BROWSERS_ROW)
+            {
+                response.scroll_to_me(None);
+                state.settings_scrolled_to = Some(PAIRED_BROWSERS_ROW);
+            }
+            if response.clicked() {
+                state.settings_selected = PAIRED_BROWSERS_ROW;
+                action = Some(SearchAction::OpenPairedBrowsers);
+            }
+
+            let response = widgets::choice_row(
+                ui,
+                state.settings_selected == PASSKEY_VERIFICATION_ROW,
+                "Passkey verification",
+                if settings.passkey_verification == PasskeyVerification::VaultUnlock {
+                    "Reuse vault unlock; protected items still require a password"
+                } else {
+                    "Sites and protected items can still require verification"
+                },
+                settings.passkey_verification.label(),
+            );
+            if state.settings_selected == PASSKEY_VERIFICATION_ROW
+                && state.settings_scrolled_to != Some(PASSKEY_VERIFICATION_ROW)
+            {
+                response.scroll_to_me(None);
+                state.settings_scrolled_to = Some(PASSKEY_VERIFICATION_ROW);
+            }
+            if response.clicked() {
+                state.settings_selected = PASSKEY_VERIFICATION_ROW;
+                action = toggle_setting(PASSKEY_VERIFICATION_ROW, settings);
+            }
+
+            let response = widgets::choice_row(
+                ui,
+                state.settings_selected == BROWSER_SETUP_ROW,
+                "Browser setup",
+                "Choose installed or custom browsers for the extension",
+                "Manage",
+            );
+            if state.settings_selected == BROWSER_SETUP_ROW
+                && state.settings_scrolled_to != Some(BROWSER_SETUP_ROW)
+            {
+                response.scroll_to_me(None);
+                state.settings_scrolled_to = Some(BROWSER_SETUP_ROW);
+            }
+            if response.clicked() {
+                state.settings_selected = BROWSER_SETUP_ROW;
+                action = Some(SearchAction::OpenBrowserSetup);
+            }
+
             if settings.ssh_agent_enabled {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
@@ -1173,6 +1451,7 @@ pub enum SearchAction {
     QuickCopy(usize),
     OpenResult(usize),
     OpenWindow,
+    SetKeepOfflineCopy(bool),
     SetKeyboardShortcuts(bool),
     SetCloseAfterCopy(bool),
     SetRestoreRecentItem(bool),
@@ -1184,6 +1463,12 @@ pub enum SearchAction {
     SetSshAgentEnabled(bool),
     SetSshAgentSocketPath(String),
     SetStartList(StartList),
+    SetBrowserIntegrationEnabled(bool),
+    SetDefaultUriMatch(crate::uri_match::UriMatchType),
+    SetPasskeyVerification(PasskeyVerification),
+    OpenPairedBrowsers,
+    OpenBrowserSetup,
+    PairedBrowsers(PairedBrowsersAction),
     LockVault,
     NewItem,
 }
@@ -1205,6 +1490,29 @@ mod tests {
             state: Default::default(),
             dates: Default::default(),
         }
+    }
+
+    #[test]
+    fn empty_search_keeps_offline_status_and_refreshes_when_requested() {
+        let mut state = SearchState {
+            sync_status: Some(SyncStatus {
+                offline: true,
+                cache_synced_unix: Some(123),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        state.reset_results_for_empty_query();
+        assert!(state.offline());
+        state.force_refresh();
+        assert!(state.needs_search());
+        state.mark_queried();
+        assert!(!state.needs_search());
+        state.query = "new".into();
+        assert!(matches!(
+            state.open_selected_entry(),
+            OpenSelectedAction::None
+        ));
     }
 
     #[test]
@@ -1278,6 +1586,122 @@ mod tests {
             frame(Some(egui::Key::ArrowUp));
         }
         assert!(frame(None).1 < 1.);
+    }
+
+    #[test]
+    fn browser_command_opens_management_without_searching_the_vault() {
+        for query in ["br", "browsers", "paired", "deauth"] {
+            assert!(paired_browsers_command_matches(query));
+        }
+        assert!(!paired_browsers_command_matches("b"));
+        let mut state = SearchState {
+            query: "browsers".into(),
+            ..Default::default()
+        };
+        assert_eq!(state.open_selected_entry(), OpenSelectedAction::None);
+        assert_eq!(state.view, SearchView::PairedBrowsers);
+        assert!(!state.needs_search());
+        state.query.clear();
+        state.reset_results_for_empty_query();
+        assert_eq!(state.view, SearchView::PairedBrowsers);
+        state.close_paired_browsers();
+        assert_eq!(state.view, SearchView::Results);
+    }
+
+    #[test]
+    fn browser_management_returns_to_settings_and_remains_available_when_disabled() {
+        let settings = AppSettings::default();
+        assert!(!settings.browser_integration_enabled);
+        assert!(matches!(
+            toggle_setting(PAIRED_BROWSERS_ROW, &settings),
+            Some(SearchAction::OpenPairedBrowsers)
+        ));
+        let mut state = SearchState {
+            query: "settings".into(),
+            view: SearchView::Settings,
+            ..Default::default()
+        };
+        state.open_paired_browsers();
+        state.close_paired_browsers();
+        assert_eq!(state.view, SearchView::Settings);
+        assert_eq!(state.query, "settings");
+    }
+
+    #[test]
+    fn browser_setup_routes_panel_keys_and_returns_to_settings_without_searching() {
+        let ctx = Context::default();
+        let mut state = SearchState {
+            query: "settings".into(),
+            view: SearchView::BrowserSetup,
+            settings_selected: BROWSER_SETUP_ROW,
+            focus_search: false,
+            ..Default::default()
+        };
+        assert!(!state.needs_search());
+        let mut action = None;
+        for key in [egui::Key::ArrowDown, egui::Key::Enter, egui::Key::Escape] {
+            let input = egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| {
+                handle_keys(ui.ctx(), &mut state, &AppSettings::default(), &mut action);
+                if key == egui::Key::ArrowDown {
+                    assert!(
+                        ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key)),
+                        "Panel navigation must not change Settings selection"
+                    );
+                }
+            })
+            .textures_delta
+            .clear();
+            assert!(
+                action.is_none(),
+                "Browser setup keys must not trigger vault item actions"
+            );
+        }
+        assert_eq!(state.view, SearchView::Settings);
+        assert_eq!(state.settings_selected, BROWSER_SETUP_ROW);
+        assert_eq!(state.query, "settings");
+        assert!(state.focus_search);
+        assert!(!state.needs_search());
+    }
+
+    #[test]
+    fn passkey_verification_setting_cycles_after_existing_browser_rows() {
+        let mut settings = AppSettings::default();
+        assert_eq!(PASSKEY_VERIFICATION_ROW, PAIRED_BROWSERS_ROW + 1);
+        assert_eq!(BROWSER_SETUP_ROW, SETTINGS_ROWS - 1);
+        assert!(matches!(
+            toggle_setting(BROWSER_SETUP_ROW, &settings),
+            Some(SearchAction::OpenBrowserSetup)
+        ));
+        assert!(matches!(
+            toggle_setting(PASSKEY_VERIFICATION_ROW, &settings),
+            Some(SearchAction::SetPasskeyVerification(
+                PasskeyVerification::WhenRequired
+            ))
+        ));
+        settings.passkey_verification = PasskeyVerification::WhenRequired;
+        assert!(matches!(
+            toggle_setting(PASSKEY_VERIFICATION_ROW, &settings),
+            Some(SearchAction::SetPasskeyVerification(
+                PasskeyVerification::VaultUnlock
+            ))
+        ));
+        settings.passkey_verification = PasskeyVerification::VaultUnlock;
+        assert!(matches!(
+            toggle_setting(PASSKEY_VERIFICATION_ROW, &settings),
+            Some(SearchAction::SetPasskeyVerification(
+                PasskeyVerification::Always
+            ))
+        ));
     }
 
     #[test]

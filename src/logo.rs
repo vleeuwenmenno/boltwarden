@@ -4,18 +4,15 @@
 /// Shown in the window's title bar and toolbar.
 pub const APP_NAME: &str = "Boltwarden";
 
-const OUTER: &str = "M4 1.5H20Q21.5 1.5 21.5 3V11.6C21.5 17.1 17.2 20.9 12 23.1C6.8 20.9 2.5 17.1 2.5 11.6V3Q2.5 1.5 4 1.5Z";
-const INNER: &str = "M5.2 4.2H18.8V11.6C18.8 15.7 15.6 18.7 12 20.4C8.4 18.7 5.2 15.7 5.2 11.6Z";
-const BOLT: &str = "M8 9.6H17.6Q18.4 9.6 18.4 10.4V12.8Q18.4 13.6 17.6 13.6H8Z";
+// The browser source archive contains the same canonical geometry as the desktop.
+const MARK: &str = include_str!("../extension/public/bolt.svg");
 
 /// The mark as SVG in one color. The right half of the inner shield is cut out, and
 /// the bolt is cut out where it lies in the solid half and solid where it crosses the
 /// open one.
 pub fn svg(color: egui::Color32) -> String {
     let fill = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
-    format!(
-        r##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><defs><clipPath id="inner"><path d="{INNER}"/></clipPath><mask id="cut" maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24"><path fill="#fff" d="{OUTER}"/><path fill="#000" clip-path="url(#inner)" fill-rule="evenodd" d="M12 0H24V24H12Z {BOLT}"/></mask></defs><path fill="{fill}" mask="url(#cut)" d="{OUTER}"/></svg>"##
-    )
+    MARK.replace("currentColor", &fill)
 }
 
 /// Renders the mark as a `size`×`size` RGBA image with straight (not premultiplied)
