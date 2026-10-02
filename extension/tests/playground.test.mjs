@@ -87,6 +87,9 @@ test('HTTPS server serves the page and rejects cross-origin mutations and wrong 
   });
   try {
     const page = await fetch('/'); assert.equal(page.status, 200); assert.match(page.text, /Create passkey/);
+    const login = await fetch('/login'); assert.equal(login.status, 200); assert.match(login.text, /autocomplete="username"/);
+    assert.equal((await fetch('/login.css')).status, 200);
+    assert.equal((await fetch('/login.js')).status, 200);
     assert.equal((await fetch('/api/reset', 'POST', { origin: 'https://evil.test', 'content-type': 'application/json' }, '{}')).status, 403);
     assert.equal((await fetch('/', 'GET', { host: 'evil.test' })).status, 403);
     assert.equal((await fetch('/api/state', 'POST', { origin: app.origin, 'content-type': 'application/json' }, '{}')).status, 200);
@@ -105,4 +108,18 @@ test('password registration, login and change share the passkey account without 
   await assert.rejects(api('/api/password', {action: 'change', username, password: 'different', confirmation: 'mismatch', oldPassword: 'new'}), /do not match/);
   await register(api);
   assert.deepEqual(await api('/api/state'), {accounts: [{name: 'alice', password: true, passkeys: 1}]});
+});
+
+test('example.com usernames support password flows and alias the matching test account', async () => {
+  const api = createRelyingParty(origin);
+  const username = 'alice@example.com';
+  await api('/api/password', { action: 'register', username, password: 'sample-old', confirmation: 'sample-old' });
+  assert.equal((await api('/api/password', { action: 'login', username, password: 'sample-old' })).verified, true);
+  await api('/api/password', { action: 'change', username, oldPassword: 'sample-old', password: 'sample-new', confirmation: 'sample-new' });
+  assert.equal((await api('/api/password', { action: 'login', username: 'boltwarden-test-alice', password: 'sample-new' })).verified, true);
+  await register(api);
+  assert.deepEqual(await api('/api/state'), { accounts: [{ name: 'alice', password: true, passkeys: 1 }] });
+  for (const invalid of ['alice@gmail.com', 'alice@example.com.evil.test', '@example.com', 'alice@example.com\n']) {
+    await assert.rejects(api('/api/password', { action: 'register', username: invalid, password: 'sample', confirmation: 'sample' }), /Use boltwarden-test-NAME/);
+  }
 });

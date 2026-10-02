@@ -16,7 +16,9 @@ and bundles the locally included TypeScript and Preact sources. The extension
 does not download executable code or include a vault. Its native messaging host,
 `nl.mvl.boltwarden`, must be installed separately by the Boltwarden desktop app.
 
-`npm run zip` packages both extensions and the Firefox source archive.
+`npm run zip` packages both extensions and the Firefox source archive. Packaging
+omits the development `key` from the Chrome Web Store ZIP and restores it in the
+unpacked build. `npm run check:release` also requires Python 3 to inspect the ZIP.
 The Chrome manifest key is public and identifies the unpacked development build;
 it is not a signing key or a native connection credential.
 

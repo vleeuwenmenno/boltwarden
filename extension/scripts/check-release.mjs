@@ -4,6 +4,8 @@ import { readFile, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = async path => JSON.parse(await readFile(resolve(root, path), 'utf8'));
 const pkg = await read('package.json');
@@ -35,4 +37,12 @@ const files = await readdir(resolve(root, '.output'));
 for (const kind of ['chrome', 'firefox', 'sources']) {
   assert(files.includes(`${pkg.name}-${pkg.version}-${kind}.zip`), `Missing ${kind} archive`);
 }
+const chromeArchive = resolve(root, `.output/${pkg.name}-${pkg.version}-chrome.zip`);
+const { stdout } = await promisify(execFile)('python3', ['-c',
+  'import sys, zipfile; print(zipfile.ZipFile(sys.argv[1]).read("manifest.json").decode())', chromeArchive]);
+const storeManifest = JSON.parse(stdout);
+assert.equal(storeManifest.key, undefined, 'Chrome Web Store ZIP must not contain the development key');
+const unpackedChrome = await read('.output/chrome-mv3/manifest.json');
+delete unpackedChrome.key;
+assert.deepEqual(storeManifest, unpackedChrome, 'Store and unpacked manifests must differ only by the development key');
 console.log('Store manifest versions, identities, permissions, consent, and ZIPs: passed');

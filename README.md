@@ -12,6 +12,16 @@ Vaultwarden project.
 Open quick access from a keyboard shortcut or tray icon, search your vault,
 and copy the field you need. Use the full vault window to browse and edit entries.
 
+<!-- Official badge: https://extensionworkshop.com/documentation/publish/promoting-your-extension/ -->
+<a href="https://addons.mozilla.org/en-US/firefox/addon/boltwarden/">
+  <img src="docs/badges/firefox-addon.svg" alt="Get Boltwarden for Firefox" width="172" height="60">
+</a>
+
+The browser extension requires the Boltwarden desktop app.
+[Chrome Web Store listing](https://chromewebstore.google.com/detail/pomlcbogekpcooppkmjhdjalddakgmlo/)
+is pending review and publication. The Chrome download badge will be added when
+the extension is available.
+
 ## Features
 
 - **Quick access and full vault** — reach credentials from a keyboard shortcut,

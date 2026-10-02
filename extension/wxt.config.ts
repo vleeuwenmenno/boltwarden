@@ -3,11 +3,29 @@ import { defineConfig } from 'wxt';
 // This public key fixes the unpacked development ID. It is not an authentication key.
 import identities from "./lib/browser-identities.json";
 import packageJson from './package.json';
+import { readFile, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+
+let unpackedManifest: string | undefined;
 
 export default defineConfig({
   manifestVersion: 3,
   imports: false,
   hooks: {
+    async 'zip:extension:start'(wxt) {
+      if (wxt.config.browser !== 'chrome') return;
+      const path = resolve(wxt.config.outDir, 'manifest.json');
+      unpackedManifest = await readFile(path, 'utf8');
+      const manifest = JSON.parse(unpackedManifest);
+      // Chrome Web Store rejects the key used for unpacked development builds.
+      delete manifest.key;
+      await writeFile(path, JSON.stringify(manifest));
+    },
+    async 'zip:extension:done'(wxt) {
+      if (wxt.config.browser !== 'chrome' || unpackedManifest === undefined) return;
+      await writeFile(resolve(wxt.config.outDir, 'manifest.json'), unpackedManifest);
+      unpackedManifest = undefined;
+    },
     'config:resolved'(wxt) {
       // AMO reviewers must be able to run the documented tests from the source ZIP.
       wxt.config.zip.excludeSources = wxt.config.zip.excludeSources.filter(pattern =>
