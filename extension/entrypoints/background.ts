@@ -1,3 +1,4 @@
+import { pairingBrowserLabel } from '../lib/browser-label';
 import { pendingSaves } from '../lib/pending-saves';
 import { defineBackground } from 'wxt/utils/define-background';
 import { browser } from 'wxt/browser';
@@ -545,7 +546,7 @@ export default defineBackground(() => {
         case 'retry-save': await saves.retry(String(data.id)); return null;
         case 'discard-save': await saves.discard(String(data.id)); return null;
         case 'retry': await native.connect(); await native.refreshStatus(); return native.snapshot;
-        case 'pair': await native.pair('Boltwarden browser'); return native.snapshot;
+        case 'pair': await native.pair(await pairingBrowserLabel(browser.runtime, globalThis.navigator)); return native.snapshot;
         case 'unlock': await native.request({ type: 'RequestUnlock' }); return null;
         case 'list': {
           await native.connect(); await native.refreshStatus();

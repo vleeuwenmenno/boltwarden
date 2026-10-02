@@ -3,7 +3,7 @@ import { render } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { browser } from 'wxt/browser';
 import type { UiFrame, UiPage, UiResult, UiState, UiStateChange } from './ui-types';
-import type { Match } from './protocol';
+import { PROTOCOL_VERSION, type Match } from './protocol';
 import './ui.css';
 
 async function call<T>(type: string, fields: Record<string, unknown> = {}): Promise<T> {
@@ -301,6 +301,7 @@ function App({ options }: { options: boolean }) {
             {frame.more && <button class="more secondary" disabled={busy} onClick={() => void more(frame)}>{frame.kind === 'card' ? 'Load more cards' : 'Load more matching logins'}</button>}
           </section>)}
         </section>}
+        {options && <section class="connection-details"><h2>Version</h2><p>Extension version: {browser.runtime.getManifest().version}</p><p>Browser integration API: v{PROTOCOL_VERSION}</p></section>}
         {options && <section class="connection-details help"><h2>Using this extension</h2><p>The popup shows matching logins or your saved cards when a payment field is selected. Card numbers are masked until you choose a card to fill on an HTTPS page. Filtering narrows the loaded items.</p><p>Selected credentials are sent to the page when you fill. Passwords you submit can be sent to Boltwarden for saving after desktop approval. Pending saves stay in browser session storage until saved, discarded, or the browser session ends.</p><p><a href="/privacy.html" target="_blank" rel="noreferrer">Privacy and data handling</a></p><h3>Desktop setup</h3><p>Run <code>boltwarden install-browser</code>, start Boltwarden, and enable browser integration in desktop settings.</p></section>}
       </>}
     </div>

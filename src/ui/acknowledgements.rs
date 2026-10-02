@@ -11,7 +11,7 @@ pub fn draw(ui: &mut egui::Ui) {
         .id_salt("licenses-and-acknowledgements")
         .show(ui, |ui| {
             ui.heading("Boltwarden");
-            ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+            draw_versions(ui);
             ui.label("Created by Menno van Leeuwen.");
             ui.hyperlink_to(
                 "Project and source code",
@@ -60,4 +60,11 @@ pub fn draw(ui: &mut egui::Ui) {
                 ui.label("No matching dependencies.");
             }
         });
+}
+
+/// Shared version summary for settings and the quick-access version command.
+pub fn draw_versions(ui: &mut egui::Ui) {
+    ui.label(format!("Desktop version: {}", crate::version::APP));
+    ui.label(format!("Browser integration API: v{}", crate::version::BROWSER_API))
+        .on_hover_text("Protocol used between Boltwarden and its browser extensions; not the connected Bitwarden or Vaultwarden server version.");
 }

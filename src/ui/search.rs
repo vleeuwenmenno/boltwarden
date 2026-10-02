@@ -133,6 +133,7 @@ impl ListSort {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DisplayEntry {
+    VersionCommand,
     SettingsCommand,
     PairedBrowsersCommand,
     LockCommand,
@@ -145,6 +146,7 @@ enum DisplayEntry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenSelectedAction {
+    OpenAcknowledgements,
     None,
     OpenResult(usize),
     LockVault,
@@ -373,6 +375,7 @@ impl SearchState {
 
     pub fn open_selected_entry(&mut self) -> OpenSelectedAction {
         match self.display_entry(self.selected) {
+            Some(DisplayEntry::VersionCommand) => OpenSelectedAction::OpenAcknowledgements,
             Some(DisplayEntry::SettingsCommand) => {
                 self.view = SearchView::Settings;
                 self.selected = 0;
@@ -445,6 +448,10 @@ impl SearchState {
             return Vec::new();
         }
         [
+            (
+                command_matches(&self.query, &["version", "about"]),
+                DisplayEntry::VersionCommand,
+            ),
             (
                 settings_command_matches(&self.query),
                 DisplayEntry::SettingsCommand,
@@ -727,7 +734,7 @@ pub fn draw_search(
                 let hint = if state.start_list == StartList::RecentlyUsed {
                     "Items you open show up here · type to search"
                 } else {
-                    "Type to search · commands: browsers, settings, lock, archived, deleted, new, window"
+                    "Type to search · commands: browsers, settings, version, lock, archived, deleted, new, window"
                 };
                 widgets::empty_state(ui, t.icon("\u{f002}", "🔎"), hint, false);
             } else if state.display_entry_count() == 0 {
@@ -866,6 +873,9 @@ pub fn handle_keys(
                     OpenSelectedAction::LockVault => *action = Some(SearchAction::LockVault),
                     OpenSelectedAction::NewItem => *action = Some(SearchAction::NewItem),
                     OpenSelectedAction::OpenWindow => *action = Some(SearchAction::OpenWindow),
+                    OpenSelectedAction::OpenAcknowledgements => {
+                        *action = Some(SearchAction::OpenAcknowledgements)
+                    }
                     OpenSelectedAction::None => {}
                 }
             }
@@ -1028,6 +1038,16 @@ fn draw_results(
                 let selected = i == state.selected;
                 let (rect, response) = widgets::row(ui, selected, widgets::ROW_HEIGHT);
                 match entry {
+                    DisplayEntry::VersionCommand => widgets::paint_row_content(
+                        ui,
+                        rect,
+                        t.icon("\u{f05a}", "ⓘ"),
+                        None,
+                        "Version",
+                        Some(&crate::version::summary()),
+                        Some("command"),
+                        selected,
+                    ),
                     DisplayEntry::SettingsCommand => widgets::paint_row_content(
                         ui,
                         rect,
@@ -1129,6 +1149,7 @@ fn draw_results(
                         let item = &state.results[idx];
                         format!("{} {}", item.name, item.username.as_deref().unwrap_or(""))
                     }
+                    DisplayEntry::VersionCommand => "Version".into(),
                     DisplayEntry::SettingsCommand => "Settings".into(),
                     DisplayEntry::PairedBrowsersCommand => "Paired browsers".into(),
                     DisplayEntry::LockCommand => "Lock vault".into(),
@@ -1162,6 +1183,9 @@ fn draw_results(
                             if !state.offline() {
                                 action = Some(SearchAction::NewItem);
                             }
+                        }
+                        DisplayEntry::VersionCommand => {
+                            action = Some(SearchAction::OpenAcknowledgements)
                         }
                         DisplayEntry::WindowCommand => action = Some(SearchAction::OpenWindow),
                         DisplayEntry::VaultItem(idx) => {
@@ -1555,6 +1579,51 @@ mod tests {
             icon_host: None,
             state: Default::default(),
             dates: Default::default(),
+        }
+    }
+
+    #[test]
+    fn version_aliases_open_about_before_matching_vault_items() {
+        for query in ["version", "ver", "about", "ABOUT"] {
+            let mut state = SearchState {
+                query: query.into(),
+                results: vec![item("version vault entry")],
+                ..Default::default()
+            };
+            assert_eq!(state.display_entry(0), Some(DisplayEntry::VersionCommand));
+            assert_eq!(state.display_entry(1), Some(DisplayEntry::VaultItem(0)));
+            assert_eq!(
+                state.open_selected_entry(),
+                OpenSelectedAction::OpenAcknowledgements
+            );
+            assert_eq!(state.view, SearchView::Results);
+            let ctx = Context::default();
+            let mut input = egui::RawInput::default();
+            input.events.push(egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            let mut action = None;
+            ctx.run_ui(input, |root| {
+                handle_keys(root.ctx(), &mut state, &AppSettings::default(), &mut action);
+            })
+            .textures_delta
+            .clear();
+            assert!(matches!(action, Some(SearchAction::OpenAcknowledgements)));
+        }
+        for query in ["v", "a", "versions", "about:blank"] {
+            let state = SearchState {
+                query: query.into(),
+                ..Default::default()
+            };
+            assert!(
+                !state
+                    .visible_commands()
+                    .contains(&DisplayEntry::VersionCommand)
+            );
         }
     }
 

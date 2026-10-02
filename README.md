@@ -200,7 +200,11 @@ items still require verification, and moving to trash asks for confirmation.
 Ctrl-click toggles individual selections; Shift-click selects a range. Drag any
 selected item onto a sidebar folder to move the whole selection. Drop onto **No
 folder** to remove folder assignments, or **Favorites** to favorite the selection.
-Ctrl+A selects all visible items when the search field is not focused.
+Ctrl+A selects all visible items when the search field is not focused. Sidebar width and
+the divider between the item list and detail view are remembered across restarts.
+Layout is stored separately from shared preferences in
+`$XDG_CONFIG_HOME/boltwarden/window-layout.json` (normally
+`~/.config/boltwarden/window-layout.json`).
 
 Wayland apps can't grab global shortcuts, so bind the commands in your compositor.
 For Hyprland:
@@ -251,6 +255,19 @@ focused, the item view keeps its keys (`Enter` copies, `E` edits, `Del` trashes)
 
 Closing the window with unsaved edits asks first. It runs as its own process next to
 the popup and locks together with it.
+
+### Version information
+
+Type `version` (or `about`) in quick access to see the desktop release and browser
+integration API version. These also appear in the full window's **Settings** and
+**Licenses and acknowledgements** view. From a terminal, run `boltwarden --version`.
+The extension's **Connection settings** page shows its installed extension version
+and browser API version.
+
+Desktop releases embed the version from `Cargo.toml`; extension builds use
+`extension/package.json`. The browser API version comes from the wire protocol,
+independently of either release number. It is not the Vaultwarden/Bitwarden server
+version. Release CI rejects desktop tags that disagree with `Cargo.toml`.
 
 ### Settings and licenses
 
@@ -449,7 +466,12 @@ signed add-on; this repository does not supply signing credentials.
 Open the extension popup and request pairing. Compare its public-key fingerprint
 with the desktop approval, then approve in Boltwarden. Each browser profile pairs
 separately. Type `browsers` in quick access, open **Settings → Paired browsers**, or choose
-**Paired browsers** in the full client sidebar, to review and revoke pairings.
+**Paired browsers** in the full client sidebar, to review and revoke pairings. The
+**Paired browser extensions** view has a **Back to Settings** button (also Escape)
+that returns to Browser integration settings. Each entry shows its reported
+browser name and pairing-key fingerprint. Browser names are descriptive labels;
+the fingerprint identifies the key. Older generic pairings show **Browser name
+unavailable**; re-pair the extension to record its detected browser name.
 The view uses the same compact rows as the vault list. Select a browser and press
 Enter, then confirm revocation with Ctrl+Enter or the button. The full fingerprint,
 pairing date, and last authenticated connection are available in the row tooltip

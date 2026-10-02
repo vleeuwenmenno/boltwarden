@@ -26,6 +26,7 @@ mod tray;
 mod ui;
 mod unix_socket;
 mod uri_match;
+mod version;
 mod window;
 
 use app::{App, PopupCommand};
@@ -98,6 +99,10 @@ fn main() -> eframe::Result<()> {
         libc::setrlimit(libc::RLIMIT_CORE, &limit);
     }
     match std::env::args().nth(1).as_deref() {
+        Some("--version" | "-V" | "version") => {
+            println!("{}", version::summary());
+            return Ok(());
+        }
         Some("native-host") => {
             if let Err(error) = browser::native_host::run_native_host() {
                 eprintln!("native host: {error}");

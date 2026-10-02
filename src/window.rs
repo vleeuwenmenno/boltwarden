@@ -156,6 +156,7 @@ pub struct WindowApp {
     tx: mpsc::Sender<Reply>,
     rx: mpsc::Receiver<Reply>,
     settings: AppSettings,
+    layout: config::WindowLayout,
     settings_state: crate::ui::search::SearchState,
     settings_licenses: bool,
     settings_checked_at: Instant,
@@ -256,6 +257,11 @@ impl WindowApp {
             two_factor_state: TwoFactorState::default(),
             section: Section::All,
             order: config::load_window_order(),
+            layout: if crate::demo::enabled() {
+                config::WindowLayout::default()
+            } else {
+                config::load_window_layout()
+            },
             query: String::new(),
             query_changed_at: Instant::now(),
             searched: None,
@@ -686,6 +692,12 @@ impl WindowApp {
         self.save_settings();
     }
 
+    fn return_to_browser_settings(&mut self) {
+        self.settings_licenses = false;
+        self.settings_state.settings_group = Some(crate::ui::search::SettingsGroup::Browser);
+        self.set_section(Section::Settings);
+    }
+
     fn offline(&self) -> bool {
         self.sync_status.as_ref().is_some_and(|s| s.offline)
     }
@@ -760,6 +772,7 @@ impl WindowApp {
     }
 
     fn exit_now(&mut self, ctx: &Context) {
+        self.persist_layout(ctx);
         // Let eframe drop its clipboard worker before the Wayland display. Calling
         // process::exit from a frame races native teardown with that live worker.
         // Stop UI work and discard queued replies before requesting the close.
@@ -774,6 +787,39 @@ impl WindowApp {
         self.edit_state = None;
         self.backend.revoke_item_grants();
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    fn persist_layout(&mut self, ctx: &Context) {
+        if crate::demo::enabled() || ctx.input(|input| input.pointer.any_down()) {
+            return;
+        }
+        // egui 0.36 identifies panel resize handles with this suffix. Save only
+        // an explicit splitter drag, not the temporary clamp from a smaller
+        // viewport. The headless drag test verifies this ID and release timing.
+        let Some(stopped) = ctx.drag_stopped_id() else {
+            return;
+        };
+        let mut layout = self.layout;
+        if stopped == egui::Id::new("vault-sidebar").with("__resize")
+            && let Some(panel) =
+                egui::containers::panel::PanelState::load(ctx, egui::Id::new("vault-sidebar"))
+        {
+            layout.sidebar_width = panel.size().x;
+        }
+        if stopped == egui::Id::new("vault-list").with("__resize")
+            && let Some(panel) =
+                egui::containers::panel::PanelState::load(ctx, egui::Id::new("vault-list"))
+        {
+            layout.list_width = panel.size().x;
+        }
+        layout = layout.normalized();
+        if layout != self.layout {
+            if let Err(error) = config::save_window_layout(layout) {
+                self.error = Some(format!("Could not save window layout: {error}"));
+            } else {
+                self.layout = layout;
+            }
+        }
     }
 
     // Runs every frame, also while eframe skips drawing a minimized window.
@@ -1329,6 +1375,13 @@ impl WindowApp {
     }
 
     fn update_vault(&mut self, root: &mut egui::Ui) {
+        self.draw_vault(root);
+        // PanelState receives its final width during the release frame. This
+        // must follow drawing, including management pages that return early.
+        self.persist_layout(root.ctx());
+    }
+
+    fn draw_vault(&mut self, root: &mut egui::Ui) {
         self.refresh_settings(false);
         let ctx = &root.ctx().clone();
         let editing = self.edit_state.is_some()
@@ -1358,7 +1411,7 @@ impl WindowApp {
         let t = theme();
         egui::Panel::left("vault-sidebar")
             .resizable(true)
-            .default_size(230.0)
+            .default_size(self.layout.sidebar_width)
             .min_size(180.0)
             .max_size(360.0)
             .frame(
@@ -1399,6 +1452,7 @@ impl WindowApp {
                 )
                 .show(root, |ui| {
                     ui.heading("Settings");
+                    crate::ui::acknowledgements::draw_versions(ui);
                     ui.horizontal_wrapped(|ui| {
                         for (group, label) in [
                             (crate::ui::search::SettingsGroup::General, "General"),
@@ -1450,7 +1504,7 @@ impl WindowApp {
                 .show(root, |ui| {
                     if self.browser_setup_open {
                         ui.horizontal(|ui| {
-                            if widgets::button(ui, "Back", false, true).clicked() {
+                            if widgets::button(ui, "Back to paired browsers", false, true).clicked() {
                                 self.browser_setup_open = false;
                             }
                             ui.label(
@@ -1463,11 +1517,18 @@ impl WindowApp {
                         crate::ui::browser_setup::draw_browser_setup(ui, &mut self.browser_setup);
                         return;
                     }
+                    if widgets::button(ui, "Back to Settings", false, !self.paired_browsers.has_confirmation()).clicked() {
+                        self.return_to_browser_settings();
+                        return;
+                    }
+                    ui.add_space(8.0);
                     ui.label(
-                        RichText::new("Paired browsers")
+                        RichText::new("Paired browser extensions")
                             .size(t.title())
                             .color(t.text_strong),
                     );
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Each pairing grants one extension profile access to this vault. Revoke access to disconnect it.").size(t.small()).color(t.text_muted));
                     ui.add_space(8.0);
                     if widgets::choice_row(
                         ui,
@@ -1511,9 +1572,9 @@ impl WindowApp {
 
         egui::Panel::left("vault-list")
             .resizable(true)
-            .default_size(330.0)
+            .default_size(self.layout.list_width)
             .min_size(240.0)
-            .max_size(520.0)
+            .max_size((root.available_width() - 260.0).clamp(240.0, 520.0))
             .frame(
                 egui::Frame::new()
                     .fill(t.bg)
@@ -1826,6 +1887,16 @@ impl WindowApp {
                 self.set_section(Section::All);
             }
         }
+        if self.section == Section::PairedBrowsers
+            && !self.paired_browsers.has_confirmation()
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            if self.browser_setup_open {
+                self.browser_setup_open = false;
+            } else {
+                self.return_to_browser_settings();
+            }
+        }
         if select_all {
             self.selection.ids = self
                 .visible_items()
@@ -1956,6 +2027,7 @@ impl WindowApp {
                     ("↑↓", "Navigate"),
                     ("⏎", "Revoke"),
                     ("Ctrl+R", "Refresh"),
+                    ("Esc", "Settings"),
                     ("Ctrl+F", "Search vault"),
                 ]
             } else {
@@ -2377,6 +2449,157 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn splitter_drag_saves_on_release_and_restores_without_saving_viewport_clamps() {
+        use std::os::unix::fs::MetadataExt;
+
+        fn frame(app: &mut WindowApp, ctx: &Context, width: f32, events: Vec<egui::Event>) {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 760.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| app.update_vault(ui));
+            output.textures_delta.clear();
+        }
+
+        fn pointer(pos: egui::Pos2, pressed: bool) -> egui::Event {
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }
+        }
+
+        config::with_test_config(|directory| {
+            let (_, commands) = mpsc::channel();
+            let mut app =
+                WindowApp::with_settings(AppBackend::demo(), commands, AppSettings::default());
+            let ctx = Context::default();
+            let path = directory.join("boltwarden/window-layout.json");
+            // Management pages return before drawing the list but their sidebar
+            // splitter must still persist on the release frame itself.
+            app.section = Section::Settings;
+            frame(&mut app, &ctx, 1180.0, vec![]);
+            let sidebar =
+                egui::containers::panel::PanelState::load(&ctx, "vault-sidebar".into()).unwrap();
+            let start = egui::pos2(sidebar.outer_rect.right(), 300.0);
+            let end = egui::pos2(start.x + 45.0, start.y);
+            frame(
+                &mut app,
+                &ctx,
+                1180.0,
+                vec![egui::Event::PointerMoved(start)],
+            );
+            frame(&mut app, &ctx, 1180.0, vec![pointer(start, true)]);
+            frame(&mut app, &ctx, 1180.0, vec![egui::Event::PointerMoved(end)]);
+            assert!(!path.exists(), "never write while dragging");
+            frame(&mut app, &ctx, 1180.0, vec![pointer(end, false)]);
+            let saved = config::load_window_layout();
+            assert!((saved.sidebar_width - 275.0).abs() < 1.0, "{saved:?}");
+            let inode = std::fs::metadata(&path).unwrap().ino();
+            frame(&mut app, &ctx, 1180.0, vec![]);
+            frame(&mut app, &ctx, 1180.0, vec![pointer(end, true)]);
+            frame(&mut app, &ctx, 1180.0, vec![pointer(end, false)]);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().ino(),
+                inode,
+                "unchanged widths are not rewritten"
+            );
+
+            // A fresh context uses the persisted widths as panel defaults.
+            let (_, commands) = mpsc::channel();
+            let mut reopened =
+                WindowApp::with_settings(AppBackend::demo(), commands, AppSettings::default());
+            let fresh_ctx = Context::default();
+            frame(&mut reopened, &fresh_ctx, 1180.0, vec![]);
+            let restored =
+                egui::containers::panel::PanelState::load(&fresh_ctx, "vault-sidebar".into())
+                    .unwrap();
+            assert!((restored.size().x - saved.sidebar_width).abs() < 1.0);
+
+            let list =
+                egui::containers::panel::PanelState::load(&fresh_ctx, "vault-list".into()).unwrap();
+            let start = egui::pos2(list.outer_rect.right(), 300.0);
+            let end = egui::pos2(start.x + 100.0, start.y);
+            frame(
+                &mut reopened,
+                &fresh_ctx,
+                1180.0,
+                vec![egui::Event::PointerMoved(start)],
+            );
+            frame(
+                &mut reopened,
+                &fresh_ctx,
+                1180.0,
+                vec![pointer(start, true)],
+            );
+            frame(
+                &mut reopened,
+                &fresh_ctx,
+                1180.0,
+                vec![egui::Event::PointerMoved(end)],
+            );
+            frame(&mut reopened, &fresh_ctx, 1180.0, vec![pointer(end, false)]);
+            let saved = config::load_window_layout();
+            assert!((saved.list_width - 430.0).abs() < 1.0, "{saved:?}");
+            let inode = std::fs::metadata(&path).unwrap().ino();
+            frame(&mut reopened, &fresh_ctx, MIN_WINDOW_SIZE.x, vec![]);
+            let list =
+                egui::containers::panel::PanelState::load(&fresh_ctx, "vault-list".into()).unwrap();
+            assert!(MIN_WINDOW_SIZE.x - list.outer_rect.right() >= 259.0);
+            assert!(list.size().x < saved.list_width);
+            reopened.close_window(&fresh_ctx);
+            assert_eq!(
+                config::load_window_layout(),
+                saved,
+                "close must not save viewport clamps"
+            );
+            assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+        });
+    }
+
+    #[test]
+    fn paired_browser_back_returns_to_browser_settings_and_setup_back_stays_in_pairings() {
+        let backend = AppBackend::demo();
+        backend.lock_vault().unwrap();
+        let (_, commands) = mpsc::channel();
+        let mut app = WindowApp::with_settings(backend, commands, AppSettings::default());
+        app.section = Section::PairedBrowsers;
+        app.browser_setup_open = true;
+        let ctx = Context::default();
+        let escape = || {
+            let mut input = egui::RawInput::default();
+            input.events.push(egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            input
+        };
+        ctx.run_ui(escape(), |ui| app.handle_keys(ui.ctx(), false))
+            .textures_delta
+            .clear();
+        assert!(!app.browser_setup_open);
+        assert_eq!(app.section, Section::PairedBrowsers);
+        ctx.run_ui(escape(), |ui| app.handle_keys(ui.ctx(), false))
+            .textures_delta
+            .clear();
+        assert_eq!(app.section, Section::Settings);
+        assert_eq!(
+            app.settings_state.settings_group,
+            Some(crate::ui::search::SettingsGroup::Browser)
+        );
+        assert!(!app.settings_licenses);
+        assert!(!app.paired_browsers.is_busy());
+    }
 
     #[test]
     fn graceful_close_wipes_secrets_disconnects_workers_and_requests_native_close() {

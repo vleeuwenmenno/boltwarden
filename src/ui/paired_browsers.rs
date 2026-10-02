@@ -181,6 +181,17 @@ pub fn draw_paired_browsers(
         ui.add_space(4.0);
     }
 
+    if state.records.iter().any(browser_name_unavailable) {
+        ui.label(
+            RichText::new(
+                "Older pairings have no browser name. Re-pair that extension to add one.",
+            )
+            .size(t.small())
+            .color(t.text_muted),
+        );
+        ui.add_space(4.0);
+    }
+
     let selected = state.selected_index();
     let mut revoke = None;
     egui::ScrollArea::vertical()
@@ -236,6 +247,11 @@ pub fn draw_paired_browsers(
                     }
                     response.on_hover_ui(|ui| {
                         ui.label(RichText::new(label(record)).color(t.text_strong));
+                        ui.label(
+                            RichText::new("Browser name reported by the extension")
+                                .size(t.small())
+                                .color(t.text_muted),
+                        );
                         fingerprint(ui, &record.fingerprint);
                         ui.label(
                             RichText::new(pairing_dates(record))
@@ -260,7 +276,7 @@ pub fn draw_paired_browsers(
             .collect::<Vec<_>>()
             .join("\n");
         let body = format!(
-            "{}\n{}\n{}\n\nThis browser will disconnect. Pair it again to restore access.",
+            "{}\nKey fingerprint: {}\n{}\n\nThis extension profile will disconnect. Pair it again to restore access.",
             label(&record),
             fingerprint,
             pairing_dates(&record),
@@ -304,9 +320,13 @@ fn pairing_dates(record: &PairingRecord) -> String {
     dates
 }
 
+fn browser_name_unavailable(record: &PairingRecord) -> bool {
+    matches!(record.label.trim(), "" | "Boltwarden browser")
+}
+
 fn label(record: &PairingRecord) -> &str {
-    if record.label.trim().is_empty() {
-        "Unnamed browser"
+    if browser_name_unavailable(record) {
+        "Browser name unavailable"
     } else {
         &record.label
     }
@@ -417,6 +437,28 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         }
+    }
+
+    #[test]
+    fn historical_generic_labels_do_not_invent_a_browser_name() {
+        let mut state = loaded();
+        state.records[0].label = "Boltwarden browser".into();
+        assert_eq!(label(&state.records[0]), "Browser name unavailable");
+        assert_eq!(label(&state.records[1]), "Firefox on laptop");
+        let ctx = egui::Context::default();
+        let (_, texts) = frame(&ctx, &mut state, vec![]);
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Re-pair that extension"))
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Browser name unavailable"))
+        );
+        state.records[0].label = "  ".into();
+        assert!(browser_name_unavailable(&state.records[0]));
     }
 
     #[test]

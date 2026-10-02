@@ -1594,7 +1594,17 @@ impl App {
         self.refresh_settings(false);
         if self.acknowledgements_open {
             egui::CentralPanel::default().show(root, |ui| {
-                if crate::ui::widgets::button(ui, "Back to settings", false, true).clicked()
+                if crate::ui::widgets::button(
+                    ui,
+                    if self.search_state.view == SearchView::Settings {
+                        "Back to settings"
+                    } else {
+                        "Back to search"
+                    },
+                    false,
+                    true,
+                )
+                .clicked()
                     || ui.input_mut(|input| {
                         input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                     })

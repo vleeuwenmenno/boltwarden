@@ -8,7 +8,7 @@ import type { NativeSnapshot } from '../lib/native';
 const h = vi.hoisted(() => {
   const event = () => ({ listeners: [] as Array<(value: any) => void>, addListener(callback: (value: any) => void) { this.listeners.push(callback); }, emit(value?: any) { this.listeners.forEach(callback => callback(value)); } });
   const port = { onMessage: event(), onDisconnect: event(), disconnect: vi.fn() };
-  return { port, runtime: { connect: vi.fn(() => port), sendMessage: vi.fn(), openOptionsPage: vi.fn() } };
+  return { port, runtime: { getManifest: vi.fn(() => ({ version: '9.8.7' })), connect: vi.fn(() => port), sendMessage: vi.fn(), openOptionsPage: vi.fn() } };
 });
 vi.mock('wxt/browser', () => ({ browser: { runtime: h.runtime } }));
 import { mount } from '../lib/ui';
@@ -182,6 +182,8 @@ describe('popup invalidation', () => {
 
   it('keeps setup details in options without discovering the active page', async () => {
     await open(true); expect(calls('list')).toHaveLength(0);
+    expect(app.textContent).toContain('Extension version: 9.8.7');
+    expect(app.textContent).toContain('Browser integration API: v1');
     expect(app.textContent).toContain('Pending saves stay in browser session storage'); expect(app.textContent).toContain('ABCD:1234');
     expect(document.querySelector('a[href="/privacy.html"]')?.textContent).toBe('Privacy and data handling');
     expect(app.textContent).toContain('boltwarden install-browser');

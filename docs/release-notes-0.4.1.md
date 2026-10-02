@@ -23,6 +23,13 @@ texts embedded in release binaries for offline viewing. Toolbar buttons now show
 hover and pressed feedback. Closing the full window gracefully shuts down its
 clipboard worker, fixing a Wayland shutdown crash.
 
+Sidebar and item/detail divider widths are saved across restarts. Desktop and
+browser API versions are visible in Settings and through the `version` / `about`
+quick commands or `boltwarden --version`; extension settings show their own
+installed version and browser API version. Paired browser extensions now provide
+a Back to Settings action and descriptive browser names for new pairings, while
+preserving key fingerprints as their identity.
+
 ## Credit card autofill
 
 Select a saved credit card in the toolbar popup on an HTTPS payment form. Listings

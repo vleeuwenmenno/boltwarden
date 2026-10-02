@@ -612,3 +612,8 @@ describe('credit card document routing', () => {
     expect(messages.some(value => value.type === 'fill')).toBe(false); expect(secrets.number).toBe(''); expect(secrets.code).toBe('');
   });
 });
+
+it('pairs with a browser label instead of the old generic extension label', async () => {
+  expect(await ui({ type: 'pair' })).toMatchObject({ ok: true });
+  expect(h.native.pair).toHaveBeenCalledWith('Chromium-based browser');
+});

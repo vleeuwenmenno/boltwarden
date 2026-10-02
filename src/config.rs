@@ -186,6 +186,53 @@ pub fn save_window_order(order: ListOrder) -> io::Result<()> {
     write_private("window-order.json", &data)
 }
 
+/// Splitter widths are separate from shared settings so popup updates cannot reset them.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct WindowLayout {
+    pub sidebar_width: f32,
+    pub list_width: f32,
+}
+
+impl Default for WindowLayout {
+    fn default() -> Self {
+        Self {
+            sidebar_width: 230.0,
+            list_width: 330.0,
+        }
+    }
+}
+
+impl WindowLayout {
+    pub fn normalized(self) -> Self {
+        let defaults = Self::default();
+        let bounded = |value: f32, fallback: f32, min: f32, max: f32| {
+            if value.is_finite() {
+                value.clamp(min, max)
+            } else {
+                fallback
+            }
+        };
+        Self {
+            sidebar_width: bounded(self.sidebar_width, defaults.sidebar_width, 180.0, 360.0),
+            list_width: bounded(self.list_width, defaults.list_width, 240.0, 520.0),
+        }
+    }
+}
+
+pub fn load_window_layout() -> WindowLayout {
+    config_path("window-layout.json")
+        .and_then(|path| fs::read(path).ok())
+        .and_then(|data| serde_json::from_slice::<WindowLayout>(&data).ok())
+        .unwrap_or_default()
+        .normalized()
+}
+
+pub fn save_window_layout(layout: WindowLayout) -> io::Result<()> {
+    let data = serde_json::to_vec(&layout.normalized()).map_err(io::Error::other)?;
+    write_private("window-layout.json", &data)
+}
+
 fn default_true() -> bool {
     true
 }
@@ -835,6 +882,41 @@ mod tests {
 
         restore_var("XDG_CONFIG_HOME", previous_config_home);
         let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn window_layout_survives_settings_updates_and_rejects_invalid_sizes() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = std::env::temp_dir().join(format!("boltwarden-layout-{}", uuid::Uuid::new_v4()));
+        let previous = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &temp);
+        }
+        assert_eq!(load_window_layout(), WindowLayout::default());
+        let layout = WindowLayout {
+            sidebar_width: 275.0,
+            list_width: 410.0,
+        };
+        save_window_layout(layout).unwrap();
+        save_settings(&AppSettings::default()).unwrap();
+        save_window_order(ListOrder::Modified).unwrap();
+        assert_eq!(load_window_layout(), layout);
+        save_window_layout(WindowLayout {
+            sidebar_width: f32::NAN,
+            list_width: 9999.0,
+        })
+        .unwrap();
+        assert_eq!(
+            load_window_layout(),
+            WindowLayout {
+                sidebar_width: 230.0,
+                list_width: 520.0
+            }
+        );
+        fs::write(temp.join(APP_DIR).join("window-layout.json"), "invalid").unwrap();
+        assert_eq!(load_window_layout(), WindowLayout::default());
+        restore_var("XDG_CONFIG_HOME", previous);
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
