@@ -302,6 +302,13 @@ impl BwClient {
     }
 
     #[cfg(test)]
+    pub(crate) fn browser_totp_test_fixture() -> Self {
+        let mut client = Self::browser_test_fixture();
+        client.items[0].totp = Some("JBSWY3DPEHPK3PXP".into());
+        client
+    }
+
+    #[cfg(test)]
     pub(crate) fn browser_passkey_test_fixture() -> Self {
         passkey_vault_tests::fixture()
     }
@@ -782,6 +789,171 @@ impl BwClient {
         Ok(matches)
     }
 
+    /// Only editable personal logins are offered for browser writes.
+    pub fn browser_write_targets(
+        &self,
+        url: &str,
+        matching: UriMatchType,
+    ) -> Result<Vec<BrowserMatchSummary>, BwError> {
+        self.require_unlocked()?;
+        self.require_online()?;
+        Ok(self
+            .browser_matches(url, matching)?
+            .into_iter()
+            .filter(|item| {
+                self.ciphers.get(&item.id).is_some_and(|stored| {
+                    !item.insecure_downgrade
+                        && raw_get(&stored.raw, "organizationId").is_none()
+                        && ensure_editable(&stored.raw).is_ok()
+                })
+            })
+            .take(64)
+            .collect())
+    }
+
+    fn browser_write_target(
+        &self,
+        target: &BrowserMatchSummary,
+        verified: bool,
+    ) -> Result<StoredCipher, BwError> {
+        self.require_unlocked()?;
+        self.require_online()?;
+        let stored = self.ciphers.get(&target.id).ok_or(BwError::NotFound)?;
+        if browser_revision(stored)? != target.revision
+            || !self.items.iter().any(|item| {
+                item.id == target.id && item.state == ItemState::Active && item.item_type == "login"
+            })
+            || raw_get(&stored.raw, "organizationId").is_some()
+        {
+            return Err(BwError::Cli(
+                "The selected login changed. Try again.".into(),
+            ));
+        }
+        if self.item_requires_reprompt(&target.id) && !verified {
+            return Err(BwError::RepromptRequired);
+        }
+        ensure_editable(&stored.raw)?;
+        Ok(stored.clone())
+    }
+
+    pub fn browser_password_already_saved(
+        &self,
+        targets: &[BrowserMatchSummary],
+        username: &str,
+        password: &str,
+    ) -> bool {
+        targets.iter().any(|target| {
+            self.ciphers.get(&target.id).is_some_and(|stored| {
+                draft_from_raw(&stored.raw, &stored.item_key)
+                    .ok()
+                    .map(Zeroizing::new)
+                    .is_some_and(|draft| {
+                        draft.login.as_ref().is_some_and(|login| {
+                            (username.is_empty() || login.username == username)
+                                && login.password == password
+                        })
+                    })
+            })
+        })
+    }
+
+    pub fn browser_save_password(
+        &mut self,
+        url: &str,
+        username: &str,
+        password: &str,
+        target: Option<&BrowserMatchSummary>,
+        verified: bool,
+    ) -> Result<(), BwError> {
+        self.require_unlocked()?;
+        self.require_online()?;
+        if password.is_empty() || password.len() > 4096 || username.len() > 1024 {
+            return Err(BwError::Cli("Invalid login fields".into()));
+        }
+        if let Some(target) = target {
+            let stored = self.browser_write_target(target, verified)?;
+            let mut draft = Zeroizing::new(draft_from_raw(&stored.raw, &stored.item_key)?);
+            let login = draft.login.as_mut().ok_or(BwError::NotFound)?;
+            if !username.is_empty() {
+                login.username = username.into();
+            }
+            login.password.zeroize();
+            login.password = password.into();
+            let body = build_save_request(&stored, &draft, &iso8601_now())?;
+            let response = self.send_authed(Method::PUT, &cipher_path(&target.id)?, Some(&body))?;
+            let raw: Value = expect_success(response, "update browser password")?
+                .json()
+                .map_err(|_| BwError::Parse("Invalid save response".into()))?;
+            if raw_get(&raw, "id").and_then(Value::as_str) != Some(target.id.as_str()) {
+                return Err(BwError::Parse("Server returned a different item".into()));
+            }
+            self.replace_cipher(raw)?;
+        } else {
+            let parsed = Url::parse(url).map_err(|_| BwError::Cli("Invalid website".into()))?;
+            self.create_item(&Zeroizing::new(ItemDraft {
+                name: parsed.host_str().unwrap_or("Login").into(),
+                login: Some(LoginDraft {
+                    username: username.into(),
+                    password: password.into(),
+                    uris: vec![DraftUri {
+                        uri: parsed.origin().ascii_serialization(),
+                        original_index: None,
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }))?;
+        }
+        Ok(())
+    }
+
+    pub fn browser_totp_matches(
+        &self,
+        frame_url: &str,
+        default_match: UriMatchType,
+    ) -> Result<Vec<BrowserMatchSummary>, BwError> {
+        let mut matches = self.browser_matches(frame_url, default_match)?;
+        matches.retain(|summary| {
+            self.items.iter().any(|item| {
+                item.id == summary.id
+                    && item
+                        .totp
+                        .as_deref()
+                        .is_some_and(|seed| !seed.trim().is_empty())
+            })
+        });
+        Ok(matches)
+    }
+
+    /// Browser grants are operation-specific; desktop item grants never authorize OTP release.
+    pub fn browser_totp(
+        &self,
+        id: &str,
+        revision: &str,
+        frame_url: &str,
+        default_match: UriMatchType,
+        protected_authorized: bool,
+    ) -> Result<TotpCode, BwError> {
+        drop(self.browser_credentials(
+            id,
+            revision,
+            frame_url,
+            default_match,
+            protected_authorized,
+        )?);
+        let seed = self
+            .items
+            .iter()
+            .find(|item| item.id == id)
+            .and_then(|item| item.totp.as_deref())
+            .ok_or(BwError::NotFound)?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| BwError::Cli(format!("system clock error: {e}")))?
+            .as_secs();
+        generate_totp(seed, now)
+    }
+
     pub fn browser_credentials(
         &self,
         id: &str,
@@ -969,13 +1141,32 @@ impl BwClient {
 
     /// Registers a new personal login only. The encrypted key must be accepted by
     /// the server and decoded locally before a successful response can escape.
+    #[cfg(test)]
     pub fn browser_passkey_create(
         &mut self,
         context: &crate::passkeys::ValidatedRequest,
         options: &crate::passkeys::CreateOptions,
         verification: PasskeyVerificationEvidence,
     ) -> Result<crate::passkeys::PasskeyResult, BwError> {
+        self.browser_passkey_create_on(context, options, verification, None)
+    }
+
+    pub fn browser_passkey_create_on(
+        &mut self,
+        context: &crate::passkeys::ValidatedRequest,
+        options: &crate::passkeys::CreateOptions,
+        verification: PasskeyVerificationEvidence,
+        target: Option<&BrowserMatchSummary>,
+    ) -> Result<crate::passkeys::PasskeyResult, BwError> {
         self.browser_passkey_can_create()?;
+        let target_cipher = target
+            .map(|target| {
+                self.browser_write_target(
+                    target,
+                    verification == PasskeyVerificationEvidence::FreshPassword,
+                )
+            })
+            .transpose()?;
         if (verification == PasskeyVerificationEvidence::VaultUnlock && !self.has_verified_unlock())
             || (!verification.verified()
                 && (options.user_verification == "required" || context.requires_user_verification))
@@ -996,8 +1187,33 @@ impl BwClient {
             crate::passkeys::generate_credential(context, options, verification.verified())
                 .map_err(passkey_error)?;
         let key = self.user_key.as_deref().ok_or(BwError::NotUnlocked)?;
-        let body = build_passkey_create_request(context, options, &generated, key)?;
-        let response = self.send_authed(Method::POST, "/api/ciphers", Some(&body))?;
+        let (method, path, body) =
+            if let (Some(target), Some(stored)) = (target, target_cipher.as_ref()) {
+                let draft = draft_from_raw(&stored.raw, &stored.item_key)?;
+                let mut body = build_save_request(stored, &draft, &iso8601_now())?;
+                let created =
+                    build_passkey_create_request(context, options, &generated, &stored.item_key)?;
+                let credential = created["login"]["fido2Credentials"][0].clone();
+                let login = body
+                    .get_mut("login")
+                    .and_then(Value::as_object_mut)
+                    .ok_or(BwError::NotFound)?;
+                let mut credentials = login
+                    .get("fido2Credentials")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                credentials.push(credential);
+                login.insert("fido2Credentials".into(), Value::Array(credentials));
+                (Method::PUT, cipher_path(&target.id)?, body)
+            } else {
+                (
+                    Method::POST,
+                    "/api/ciphers".into(),
+                    build_passkey_create_request(context, options, &generated, key)?,
+                )
+            };
+        let response = self.send_authed(method, &path, Some(&body))?;
         let raw: Value = expect_success(response, "create passkey")?
             .json()
             .map_err(|_| BwError::Parse("invalid create passkey response".into()))?;
@@ -1006,7 +1222,9 @@ impl BwClient {
             .filter(|id| !id.is_empty())
             .ok_or_else(|| BwError::Parse("create response has no item id".into()))?
             .to_owned();
-        if self.ciphers.contains_key(&id) || raw_get(&raw, "organizationId").is_some() {
+        if target.map_or_else(|| self.ciphers.contains_key(&id), |target| target.id != id)
+            || raw_get(&raw, "organizationId").is_some()
+        {
             return Err(BwError::Parse(
                 "server did not create a new personal item".into(),
             ));
@@ -5572,6 +5790,76 @@ mod tests {
                 .browser_matches("https://one.example/", UriMatchType::Host)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn browser_totp_rechecks_authorization_revision_uri_and_lock() {
+        let mut client = protected_fixture();
+        client.items[0].totp = Some("JBSWY3DPEHPK3PXP".into());
+        let summary = client
+            .browser_totp_matches("https://one.example/", UriMatchType::Host)
+            .unwrap()
+            .remove(0);
+        assert!(matches!(
+            client.browser_totp(
+                "cipher-edit",
+                &summary.revision,
+                "https://one.example/",
+                UriMatchType::Host,
+                false
+            ),
+            Err(BwError::RepromptRequired)
+        ));
+        assert!(matches!(
+            client.browser_totp(
+                "cipher-edit",
+                &summary.revision,
+                "https://unrelated.example/",
+                UriMatchType::Host,
+                true
+            ),
+            Err(BwError::NotFound)
+        ));
+        assert!(matches!(
+            client.browser_totp(
+                "cipher-edit",
+                "stale",
+                "https://one.example/",
+                UriMatchType::Host,
+                true
+            ),
+            Err(BwError::NotFound)
+        ));
+        let code = client
+            .browser_totp(
+                "cipher-edit",
+                &summary.revision,
+                "https://one.example/",
+                UriMatchType::Host,
+                true,
+            )
+            .unwrap();
+        assert_eq!(code.code.len(), 6);
+        assert!(code.code.bytes().all(|b| b.is_ascii_digit()));
+        client.items[0].totp = None;
+        assert!(
+            client
+                .browser_totp_matches("https://one.example/", UriMatchType::Host)
+                .unwrap()
+                .is_empty()
+        );
+        client.user_key = None;
+        assert!(
+            client
+                .browser_totp(
+                    "cipher-edit",
+                    &summary.revision,
+                    "https://one.example/",
+                    UriMatchType::Host,
+                    true
+                )
+                .is_err()
         );
     }
 

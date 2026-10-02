@@ -8,7 +8,7 @@ CARGO ?= cargo
 NPM ?= npm
 BROWSER_TARGET ?= all
 
-.PHONY: all build release install install-service install-browser uninstall uninstall-service check test clean extension-deps extension-check extension-test extension-build extension-zip
+.PHONY: all build release install install-service install-browser uninstall uninstall-service check test clean extension-deps extension-check extension-test extension-build extension-zip playground
 
 all: release
 
@@ -53,6 +53,9 @@ extension-build:
 
 extension-zip:
 	$(NPM) --prefix extension run zip
+
+playground:
+	$(NPM) --prefix extension run playground
 
 clean:
 	$(CARGO) clean

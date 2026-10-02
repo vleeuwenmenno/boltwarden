@@ -1,6 +1,6 @@
 {
   "name": "boltwarden-browser",
-  "version": "0.3.0",
+  "version": "0.5.4",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,12 +13,15 @@
     "test:e2e": "npm run build && node tests/browser-e2e.mjs",
     "postinstall": "wxt prepare",
     "test:passkeys": "npm run build && node tests/passkey-e2e.mjs && node tests/passkey-firefox-e2e.mjs",
-    "test:inline": "npm run build && node tests/inline-e2e.mjs && node tests/inline-firefox-e2e.mjs"
+    "test:inline": "npm run build && node tests/inline-e2e.mjs && node tests/inline-firefox-e2e.mjs",
+    "playground": "node playground/server.mjs",
+    "test:playground": "node --test tests/playground.test.mjs"
   },
   "dependencies": {
     "preact": "11.0.0"
   },
   "devDependencies": {
+    "@simplewebauthn/server": "14.0.3",
     "fake-indexeddb": "6.2.5",
     "happy-dom": "20.14.5",
     "typescript": "5.9.3",

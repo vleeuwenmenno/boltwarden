@@ -45,7 +45,7 @@ function cbor(value) {
   throw new Error('Unsupported fixture CBOR');
 }
 function receive(message) {
-  appendFileSync(`${stateFile}.log`, `${JSON.stringify({ type: message.type, frame_url: message.frame_url, document_id: message.document_id })}\n`);
+  appendFileSync(`${stateFile}.log`, `${JSON.stringify({ type: message.type, frame_url: message.frame_url, document_id: message.document_id, ...(message.type === 'SaveLogin' ? {login_digest: createHash('sha256').update(JSON.stringify(message.login)).digest('hex')} : {}) })}\n`);
   const reply = payload => send({ id: message.id, ...payload });
   if (message.type === 'Hello') {
     challenge = { nonce: randomBytes(32).toString('base64url'), pairing_id: message.pairing_id ?? randomUUID() };
@@ -66,12 +66,16 @@ function receive(message) {
     reply({ type: 'UnlockRequested' });
     setTimeout(() => changeLock(true, epoch + 1), 120); return;
   }
-  if (!unlocked && ['ListMatches', 'FillLogin', 'PasskeyGet', 'PasskeyCreate'].includes(message.type)) { reply({ type: 'Error', code: 'Locked', message: 'Vault locked' }); return; }
-  if (message.type === 'ListMatches') {
+  if (!unlocked && ['ListMatches', 'ListTotpMatches', 'FillLogin', 'FillTotp', 'SaveLogin', 'PasskeyGet', 'PasskeyCreate'].includes(message.type)) { reply({ type: 'Error', code: 'Locked', message: 'Vault locked' }); return; }
+  if (message.type === 'ListMatches' || message.type === 'ListTotpMatches') {
     const item = { id: 'one', name: 'Test login', username: 'alice', reprompt: false, requires_confirmation: message.frame_url.includes('/insecure'), revision: '1' };
     reply({ type: 'Matches', items: message.frame_url.includes('/multiple') ? [item, { ...item, id: 'two', name: 'Other login', username: 'bob' }] : [item], epoch, next_offset: null, warning: null }); return;
   }
   if (message.type === 'Cancel') { clearTimeout(pending.get(message.request_id)); pending.delete(message.request_id); reply({ type: 'Cancelled', request_id: message.request_id }); return; }
+  if (message.type === 'SaveLogin') { reply({type: 'LoginSaved', saved: true}); return; }
+  if (message.type === 'FillTotp') {
+    reply({ type: 'Totp', code: '012345', expires_at: Math.floor(Date.now() / 1000) + 30, document_id: message.document_id, epoch }); return;
+  }
   if (message.type === 'FillLogin') {
     const respond = () => { pending.delete(message.id); reply({ type: 'Credentials', username: message.item_id === 'two' ? 'bob' : 'alice', password: 'test-password-only', document_id: message.document_id, epoch }); };
     if (message.frame_url.includes('/slow')) pending.set(message.id, setTimeout(respond, 800)); else respond();

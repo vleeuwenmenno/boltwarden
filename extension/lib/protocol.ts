@@ -24,8 +24,9 @@ export type Request =
   | { type: 'RequestPairing'; pairing_id: string; sig: string; host_pid: number; public_key_spki: string; label: string }
   | { type: 'Status' }
   | { type: 'RequestUnlock' }
-  | ({ type: 'ListMatches'; offset?: number } & PageContext)
-  | ({ type: 'FillLogin'; item_id: string; revision: string; interaction: 'shortcut' | 'popup'; confirm_insecure: boolean; confirm_cross_origin: boolean } & PageContext)
+  | ({ type: 'ListMatches' | 'ListTotpMatches'; offset?: number } & PageContext)
+  | ({ type: 'FillLogin' | 'FillTotp'; item_id: string; revision: string; interaction: 'shortcut' | 'popup'; confirm_insecure: boolean; confirm_cross_origin: boolean } & PageContext)
+  | ({ type: 'SaveLogin'; login: { username: string; password: string } } & PageContext)
   | ({ type: 'PasskeyGet'; options: GetOptions } & PageContext)
   | ({ type: 'PasskeyCreate'; options: CreateOptions } & PageContext)
   | { type: 'Cancel'; request_id: string };
@@ -36,8 +37,10 @@ export type Response =
   | { type: 'Authenticated' | 'Paired'; pairing_id: string }
   | { type: 'Status'; enabled: boolean; unlocked: boolean; epoch: number }
   | { type: 'UnlockRequested' }
+  | { type: 'LoginSaved'; saved: boolean }
   | { type: 'Matches'; items: Match[]; epoch: number; next_offset: number | null; warning?: string | null }
   | { type: 'Cancelled'; request_id: string }
+  | { type: 'Totp'; code: string; expires_at: number; document_id: string; epoch: number }
   | { type: 'Credentials'; username: string; password: string; document_id: string; epoch: number }
   | { type: 'Error'; code: string; message: string };
 
@@ -74,8 +77,10 @@ export function parseWire(value: unknown): WireMessage {
     case 'Authenticated': case 'Paired': valid = text(value.pairing_id); break;
     case 'Status': valid = typeof value.enabled === 'boolean' && typeof value.unlocked === 'boolean' && epoch(value.epoch); break;
     case 'UnlockRequested': valid = true; break;
+    case 'LoginSaved': valid = typeof value.saved === 'boolean'; break;
     case 'Matches': valid = Array.isArray(value.items) && value.items.length <= 1000 && value.items.every(isMatch) && epoch(value.epoch) && (value.next_offset === null || epoch(value.next_offset)) && (value.warning === undefined || value.warning === null || text(value.warning)); break;
     case 'Cancelled': valid = text(value.request_id); break;
+    case 'Totp': valid = text(value.code) && /^\d{6,10}$/.test(value.code) && epoch(value.expires_at) && text(value.document_id) && epoch(value.epoch); break;
     case 'Credentials': valid = text(value.username) && text(value.password) && text(value.document_id) && epoch(value.epoch); break;
     case 'PasskeyResult': valid = isPasskeyResult(value); break;
     case 'Error': valid = text(value.code) && text(value.message); break;

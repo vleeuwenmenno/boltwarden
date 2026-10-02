@@ -66,8 +66,8 @@ export default defineContentScript({
       // A queued operation belongs to this isolated document, not to an initial
       // background generation that delayed navigation events can still replace.
       readyTimer = setTimeout(() => {
-        if (pending && !pending.sent) finish({ type: 'fallback' });
-      }, 1500);
+        if (pending && !pending.sent) finish({ type: 'fallback', reason: 'document-readiness-timeout' });
+      }, Math.max(1000, event.data.options.timeout_ms - 500));
       channel.postMessage({ type: 'ack', id: pending.id }); connect(); flush();
     });
     ctx.addEventListener(window, 'pagehide', () => { connection?.disconnect(); connection = undefined; generation = ''; ready = false; finish({ type: 'error', name: 'AbortError', message: 'The page changed.' }); });

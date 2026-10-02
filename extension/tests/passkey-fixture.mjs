@@ -6,7 +6,8 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, verify } from 'node:crypto';
 
-export const challenge = Buffer.from('boltwarden-webauthn-browser-proof').toString('base64url');
+// Exercise the maximum supported challenge through both browser bridges and responses.
+export const challenge = Buffer.alloc(65_536, 42).toString('base64url');
 export const userHandle = Buffer.from('browser-proof-user').toString('base64url');
 export const fixtureHtml = `<!doctype html><html><head><title>Boltwarden passkey fixture</title></head><body><h1>Passkey browser proof</h1><script>
 const challenge = Uint8Array.from(atob('${challenge}'.replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0));
@@ -25,6 +26,13 @@ window.passkeyFixture = {
     extensions: { credProps: true }, timeout: 10000, ...overrides } })); },
   async get(overrides = {}, signal) { return evidence(await navigator.credentials.get({ publicKey: {
     challenge, rpId: 'localhost', userVerification: 'required', timeout: 10000, ...overrides }, signal })); },
+  async getCrossRealm() {
+    const frame = document.createElement('iframe'); document.body.append(frame);
+    try {
+      return await this.get({challenge: new frame.contentWindow.Uint8Array(challenge).buffer,
+        extensions: {appid: 'https://www.gstatic.com/securitykey/origins.json'}});
+    } finally { frame.remove(); }
+  },
   startGet(overrides = {}) { window.passkeyAbort = new AbortController(); window.passkeyPending = this.get(overrides, window.passkeyAbort.signal).then(value => ({ value }), error => ({ error: error.name })); },
   abort() { window.passkeyAbort.abort(); },
 };
@@ -35,9 +43,11 @@ export async function startPasskeyFixture(directory) {
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert, '-days', '1',
     '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost'], { stdio: 'ignore' });
   const server = createServer({ key: await readFile(key), cert: await readFile(cert) }, (request, response) => {
+    if (request.url === '/slow-resource') { setTimeout(() => { response.writeHead(200, {'Content-Type': 'image/svg+xml'}); response.end('<svg xmlns="http://www.w3.org/2000/svg"/>'); }, 4000); return; }
     const headers = { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' };
     if (request.url.startsWith('/policy-denied')) headers['Permissions-Policy'] = 'publickey-credentials-get=(), publickey-credentials-create=()';
-    response.writeHead(200, headers); response.end(fixtureHtml);
+    response.writeHead(200, headers);
+    response.end(request.url === '/early-passkey' ? fixtureHtml.replace('</body>', '<img src="/slow-resource"><script>window.earlyAssertion = passkeyFixture.get();</script></body>') : fixtureHtml);
   });
   await new Promise((resolve, reject) => { server.on('error', reject); server.listen(0, '127.0.0.1', resolve); });
   return { origin: `https://localhost:${server.address().port}`, close: () => new Promise(resolve => server.close(resolve)) };

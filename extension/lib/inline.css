@@ -20,3 +20,22 @@ button:disabled { opacity: .5; cursor: default; }
 .warning { color: #e0af68; }
 .action { display: block; width: 100%; border: 0; border-radius: 4px; padding: 9px 8px; background: transparent; color: #7aa2f7; text-align: left; font-size: 12px; }
 .action:hover { background: #20222f; }
+
+.otp-row { height: 58px; gap: 10px; }
+.otp-row .account { display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 2px; }
+.otp-row .account strong { max-width: 100%; }
+.otp-preview { display: flex; align-items: center; gap: 8px; flex: none; }
+.otp-code { color: #c0caf5; font: 16px/1.4 ui-monospace, monospace; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.otp-expiry { color: #7b819e; font-size: 11px; font-variant-numeric: tabular-nums; min-width: 22px; text-align: right; }
+.otp-expiry.expiring { color: #e0af68; }
+
+.suggested-password { display: flex; flex-direction: column; gap: 6px; }
+.suggested-password strong { font-weight: 500; }
+.suggested-password code { color: #c0caf5; font: 14px/1.4 ui-monospace, monospace; overflow-wrap: anywhere; }
+
+.generator-controls { display: grid; grid-template-columns: 1fr 80px; gap: 10px; padding: 8px; }
+.generator-controls label { display: flex; flex-direction: column; gap: 4px; color: #a9b1d6; font-size: 12px; }
+.generator-controls select, .generator-controls input[type="number"] { width: 100%; box-sizing: border-box; border: 1px solid #424557; border-radius: 4px; padding: 5px; background: #1a1b26; color: #c0caf5; font: inherit; }
+.generator-controls .generator-toggle { flex-direction: row; align-items: center; }
+.generator-controls input[type="checkbox"] { accent-color: #7aa2f7; }
+.generator-controls :focus-visible { outline: 1px solid #7aa2f7; }

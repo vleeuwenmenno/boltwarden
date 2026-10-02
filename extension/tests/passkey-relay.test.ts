@@ -50,11 +50,19 @@ describe('passkey relay document readiness', () => {
     expect(channel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'error', name: 'AbortError' }));
     expect(channel.close).toHaveBeenCalled();
   });
-  it('falls back promptly when no trusted readiness arrives and never sends the queued request later', async () => {
+  it('does not fall back after 1.5 seconds on a slow-loading page', async () => {
+    const channel = request();
+    connection.onMessage.emit({type: 'generation', generation: 'loading', ready: false});
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(channel.close).not.toHaveBeenCalled();
+    connection.onMessage.emit({type: 'generation', generation: 'loading', ready: true});
+    expect(connection.postMessage).toHaveBeenCalledWith(expect.objectContaining({type: 'operation', generation: 'loading'}));
+  });
+  it('waits within the request deadline for readiness and never sends after fallback', async () => {
     const channel = request();
     connection.onMessage.emit({ type: 'generation', generation: 'unknown', ready: false });
-    await vi.advanceTimersByTimeAsync(1500);
-    expect(channel.postMessage).toHaveBeenCalledWith({ type: 'fallback', id: 'request' });
+    await vi.advanceTimersByTimeAsync(59500);
+    expect(channel.postMessage).toHaveBeenCalledWith({ type: 'fallback', reason: 'document-readiness-timeout', id: 'request' });
     connection.onMessage.emit({ type: 'generation', generation: 'unknown', ready: true });
     expect(connection.postMessage.mock.calls.some(([message]) => message.type === 'operation')).toBe(false);
   });

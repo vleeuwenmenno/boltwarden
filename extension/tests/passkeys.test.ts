@@ -1,6 +1,7 @@
+import { runInNewContext } from 'node:vm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { normalize, credential } from '../lib/passkey-page';
-import { decode, isOperation, isPasskeyResult, PASSKEY_PORT, type PasskeyResult } from '../lib/passkey-types';
+import { decode, encode, MAX_CHALLENGE_BYTES, MAX_CLIENT_DATA_ENCODED, isOperation, isPasskeyResult, PASSKEY_PORT, type PasskeyResult } from '../lib/passkey-types';
 import { NativeError } from '../lib/protocol';
 import type { NativeClient } from '../lib/native';
 
@@ -9,7 +10,7 @@ const h = vi.hoisted(() => {
   const browser = {
     runtime: { id: 'extension', onConnect: event() },
     webRequest: { onBeforeRequest: event(), onHeadersReceived: event(), onBeforeRedirect: event(), onErrorOccurred: event() },
-    webNavigation: { onBeforeNavigate: event(), onErrorOccurred: event(), onCommitted: event(), onCompleted: event(), onHistoryStateUpdated: event(), onReferenceFragmentUpdated: event(), getFrame: vi.fn() },
+    webNavigation: { onBeforeNavigate: event(), onErrorOccurred: event(), onCommitted: event(), onCompleted: event(), onDOMContentLoaded: event(), onHistoryStateUpdated: event(), onReferenceFragmentUpdated: event(), getFrame: vi.fn() },
     tabs: { sendMessage: vi.fn(), query: vi.fn(), get: vi.fn(), onRemoved: event(), onActivated: event() },
     windows: { onFocusChanged: event(), WINDOW_ID_NONE: -1 },
   };
@@ -34,10 +35,48 @@ describe('WebAuthn serialization boundary', () => {
   });
   it('delegates conditional, unsupported extensions, attestation and algorithms to the browser', () => {
     expect(normalize('get', { ...get, mediation: 'conditional' })).toBeNull();
-    expect(normalize('get', { publicKey: { ...get.publicKey, extensions: { appid: 'https://example.com' } } })).toBeNull();
+    expect(normalize('get', { publicKey: { ...get.publicKey, extensions: { prf: { eval: { first: new Uint8Array(32) } } } } })).toBeNull();
     expect(normalize('create', { publicKey: { ...create.publicKey!, attestation: 'direct' } })).toBeNull();
     expect(normalize('create', { publicKey: { ...create.publicKey!, pubKeyCredParams: [{ type: 'public-key', alg: -257 }] } })).toBeNull();
     expect(normalize('create', create)?.kind).toBe('create');
+  });
+  it('keeps RP-scoped assertions eligible with optional AppID and UI hints', () => {
+    const operation = normalize('get', {publicKey: {...get.publicKey, rpId: 'google.com',
+      hints: ['security-key', 'hybrid'], extensions: {appid: 'https://www.gstatic.com/securitykey/origins.json'}}} as CredentialRequestOptions);
+    expect(operation?.kind).toBe('get');
+    expect(operation?.options).toMatchObject({rp_id: 'google.com'});
+    expect(operation?.options).not.toHaveProperty('appid');
+    expect(normalize('get', {publicKey: {...get.publicKey, hints: [42] as unknown as string[]}} as CredentialRequestOptions)).toBeNull();
+    expect(normalize('get', {publicKey: {...get.publicKey, extensions: {appid: 42 as unknown as string}}})).toBeNull();
+  });
+  it('accepts genuine cross-realm ArrayBuffers and rejects array-like imitations', () => {
+    const challenge = runInNewContext('new Uint8Array([1,2,3]).buffer');
+    const id = runInNewContext('new Uint8Array([4,5,6]).buffer');
+    expect(challenge instanceof ArrayBuffer).toBe(false);
+    expect(normalize('get', {publicKey: {challenge, allowCredentials: [{type: 'public-key', id}]}})?.options.challenge).toBe('AQID');
+    const rejected = vi.fn();
+    expect(normalize('get', {publicKey: {challenge: [1,2,3] as unknown as ArrayBuffer}}, rejected)).toBeNull();
+    expect(rejected).toHaveBeenCalledWith('challenge: Expected BufferSource');
+  });
+  it('preserves long challenges through requests and client data, with bounded limits', () => {
+    for (const length of [1025, 8192, MAX_CHALLENGE_BYTES]) {
+      const challenge = new Uint8Array(length).fill(42);
+      for (const kind of ['get', 'create'] as const) {
+        const source = kind === 'get' ? get : create;
+        const operation = normalize(kind, {publicKey: {...source.publicKey!, challenge}});
+        expect(operation).not.toBeNull();
+        expect(isOperation(operation)).toBe(true);
+        expect(new Uint8Array(decode(operation!.options.challenge))).toEqual(challenge);
+        const client = encode(new TextEncoder().encode(JSON.stringify({type: `webauthn.${kind}`, challenge: operation!.options.challenge, origin: 'https://accounts.google.com', crossOrigin: false})));
+        expect(isPasskeyResult({...result, client_data_json: client})).toBe(true);
+      }
+    }
+    for (const length of [0, MAX_CHALLENGE_BYTES + 1]) {
+      const challenge = new Uint8Array(length);
+      expect(normalize('get', {publicKey: {challenge}})).toBeNull();
+      expect(isOperation({...normalize('get', get), options: {...normalize('get', get)!.options, challenge: encode(challenge)}})).toBe(false);
+    }
+    expect(isPasskeyResult({...result, client_data_json: 'A'.repeat(MAX_CLIENT_DATA_ENCODED + 1)})).toBe(false);
   });
   it('bounds untrusted descriptors and response fields', () => {
     expect(normalize('get', { publicKey: { ...get.publicKey, allowCredentials: [{ type: 'public-key', id: new Uint8Array(1024) }] } })).toBeNull();

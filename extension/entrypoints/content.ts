@@ -1,6 +1,7 @@
 import { defineContentScript } from 'wxt/utils/define-content-script';
 import { browser } from 'wxt/browser';
-import { activeInput, fillForm, loginForms, sameForm, selectForm, visibleInput, type LoginForm } from '../lib/forms';
+import { activeInput, fillForm, fillOtp, formContains, formKind, loginForms, sameForm, selectForm, visibleInput, type LoginForm } from '../lib/forms';
+import { installPasswordCapture, saveNotice } from '../lib/password-capture';
 import { createInlineController } from '../lib/inline';
 import type { InlineAction, InlineValue } from '../lib/inline-types';
 
@@ -37,7 +38,7 @@ export default defineContentScript({
       if (inline || ctx.isInvalid || suspended) return;
       inline = createInlineController(document, {
         pin(input) {
-          const form = loginForms(document).find(form => form.username === input || form.password === input);
+          const form = loginForms(document).find(form => formContains(form, input));
           if (!form || activeInput(document) !== input || !visibleInput(input)) return undefined;
           inlinePin = { token: crypto.randomUUID(), form, url: location.href, input };
           return inlinePin.token;
@@ -60,6 +61,7 @@ export default defineContentScript({
         }
         if (message.generation !== generation) return;
         if (message.type === 'inline-state') { inline?.state(message.connection, message.reason); return; }
+        if (message.type === 'save-status' && typeof message.message === 'string') { saveNotice(document, message.message); return; }
         if (typeof message.id !== 'string') return;
         if (message.type === 'inline-response') {
           const waiting = pending.get(message.id);
@@ -75,12 +77,12 @@ export default defineContentScript({
             const active = activeInput(document);
             if (typeof message.requestedToken === 'string') {
               const focused = currentInline(message.requestedToken);
-              connection.postMessage({ type: 'inspected', id: message.id, generation, token: focused ? inlinePin!.token : null, focused, formCount: forms.length });
+              connection.postMessage({ type: 'inspected', id: message.id, generation, token: focused ? inlinePin!.token : null, focused, kind: focused ? formKind(inlinePin!.form) : undefined, formCount: forms.length });
             } else {
               const form = selectForm(forms, active);
               selected = form ? { token: crypto.randomUUID(), form, url: location.href } : undefined;
-              connection.postMessage({ type: 'inspected', id: message.id, generation, token: selected?.token ?? null,
-                focused: document.hasFocus() && active instanceof HTMLInputElement && ['text', 'email', 'tel', 'password'].includes(active.type),
+              connection.postMessage({ type: 'inspected', id: message.id, generation, token: selected?.token ?? null, kind: form ? formKind(form) : undefined,
+                focused: document.hasFocus() && active instanceof HTMLInputElement && ['text', 'email', 'tel', 'password', 'number'].includes(active.type),
                 formCount: forms.length });
             }
           } else if (message.type === 'fill') {
@@ -89,11 +91,17 @@ export default defineContentScript({
             if (isInline) inlinePin = undefined; else selected = undefined;
             const current = () => !!target && target.url === location.href && message.generation === generation
               && loginForms(document).some(form => sameForm(form, target.form))
-              && (!isInline || ('input' in target && activeInput(document) === target.input && visibleInput(target.input as HTMLInputElement)));
-            if (!target || target.token !== message.token || typeof message.username !== 'string' || typeof message.password !== 'string' || !current()) {
+              && (!isInline || ('input' in target && (activeInput(document) === target.input || !!target.form.otp && formContains(target.form, activeInput(document))) && visibleInput(target.input as HTMLInputElement)));
+            if (!target || target.token !== message.token || !current()) {
               throw new Error('The page or login form changed. Try again.');
             }
-            fillForm(target.form, message.username, message.password, visibleInput, current);
+            if (target.form.otp) {
+              if (message.kind !== 'totp' || typeof message.code !== 'string' || typeof message.expiresAt !== 'number') throw new Error('Expected a verification code.');
+              fillOtp(target.form, message.code, message.expiresAt, visibleInput, current);
+            } else {
+              if (message.kind === 'totp' || typeof message.username !== 'string' || typeof message.password !== 'string') throw new Error('Expected login credentials.');
+              fillForm(target.form, message.username, message.password, visibleInput, current);
+            }
             if (isInline) inline?.reset();
             connection.postMessage({ type: 'filled', id: message.id, generation });
           }
@@ -118,6 +126,16 @@ export default defineContentScript({
     ctx.addEventListener(window, 'pagehide', stop);
     ctx.addEventListener(window, 'pageshow', () => { suspended = false; connect(); });
     ctx.onInvalidated(stop);
+    if (window.top === window && location.protocol === 'https:') {
+      const cleanup = installPasswordCapture(document, login => {
+        if (port && generation && !suspended) {
+          try { port.postMessage({ type: 'save-login', id: crypto.randomUUID(), generation, login }); }
+          catch { /* A disconnected extension cannot offer a save. */ }
+        }
+        login.password = ''; login.username = '';
+      });
+      ctx.onInvalidated(cleanup);
+    }
     connect();
   },
 });

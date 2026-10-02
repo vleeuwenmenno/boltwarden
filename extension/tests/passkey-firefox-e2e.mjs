@@ -7,6 +7,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { startPlayground } from '../playground/server.mjs';
 import { startPasskeyFixture, verifyRegistration, verifyAssertion } from './passkey-fixture.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -23,7 +24,7 @@ async function until(test, label, milliseconds = 15000) {
   throw new Error(`${label} timed out${last ? `: ${last.message}` : ''}`);
 }
 const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
-let browser, socket, fixture, logs = '';
+let browser, socket, fixture, playground, logs = '';
 const pending = new Map();
 try {
   await mkdir(home, { recursive: true }); await mkdir(profile, { recursive: true });
@@ -119,6 +120,10 @@ try {
   verifyRegistration(registration, fixture.origin);
   const assertion = await evaluate('passkeyFixture.get()');
   verifyAssertion(assertion, registration, fixture.origin);
+  const legacyOptionsAssertion = await evaluate('passkeyFixture.get({ hints: ["security-key", "hybrid"], extensions: { appid: "https://www.gstatic.com/securitykey/origins.json" } })');
+  verifyAssertion(legacyOptionsAssertion, registration, fixture.origin);
+  assert.deepEqual(legacyOptionsAssertion.extensions, {}, 'RP-scoped passkeys must not claim use of the legacy AppID');
+  verifyAssertion(await evaluate('passkeyFixture.getCrossRealm()'), registration, fixture.origin);
   await navigate('/deny');
   assert.equal(await evaluate('passkeyFixture.get().then(() => "unexpected", error => error.name)'), 'NotAllowedError');
   await navigate('/slow');
@@ -129,7 +134,39 @@ try {
   const nativeLog = await readFile(join(directory, 'pairing.json.log'), 'utf8');
   assert(nativeLog.includes('PasskeyCreate') && nativeLog.includes('PasskeyGet'), 'Both WebAuthn methods reached the paired native host');
   assert(nativeLog.includes('Cancel'), 'Abort reaches native request cancellation');
-  console.log(`Firefox ${session.capabilities.browserVersion}: passkey creation, assertion, credential methods, denial, and abort passed.`);
+  playground = await startPlayground({port: 0, directory: join(directory, 'playground')});
+  await send('WebDriver:Navigate', {url: playground.origin});
+  await until(() => evaluate('document.readyState === "complete" && !!document.getElementById("password-form")'), 'Playground ready');
+  await evaluate("(document.getElementById('test-password').scrollIntoView({block:'center'}), document.getElementById('test-password').focus(), true)");
+  for (const value of ['\uE015', '\uE007']) {
+    await send('WebDriver:PerformActions', {actions: [{type: 'key', id: 'keyboard', actions: [{type: 'keyDown', value}, {type: 'keyUp', value}]}]});
+  }
+  assert.equal(await evaluate("document.getElementById('test-password').value.length >= 16 && document.getElementById('test-password').value === document.getElementById('confirm-password').value"), true);
+  assert(!(await readFile(join(directory, 'pairing.json.log'), 'utf8')).includes('"type":"SaveLogin"'), 'Suggestion must not save');
+  for (const [action, password, oldPassword] of [['register', 'test-original', ''], ['change', 'test-updated', 'test-original']]) {
+    await evaluate(`(() => {
+      document.getElementById('password-action').value = '${action}'; document.getElementById('password-action').onchange();
+      document.getElementById('test-password').value = '${password}'; document.getElementById('confirm-password').value = '${password}'; document.getElementById('old-password').value = '${oldPassword}';
+      document.getElementById('confirm-password').dispatchEvent(new Event('input', {bubbles:true}));
+      document.getElementById('test-password').scrollIntoView({block:'center'}); document.getElementById('test-password').focus(); return true;
+    })()`);
+    await send('WebDriver:PerformActions', {actions: [{type: 'key', id: 'keyboard', actions: [{type: 'keyDown', value: '\uE007'}, {type: 'keyUp', value: '\uE007'}]}]});
+    await until(() => evaluate("document.getElementById('password-status').dataset.state === 'success' && document.getElementById('test-password').value === ''"), 'Password submitted');
+  }
+  await until(async () => (await readFile(join(directory, 'pairing.json.log'), 'utf8')).split('"type":"SaveLogin"').length === 3, 'Both password saves reached native bridge');
+  await evaluate(`(() => {
+    document.getElementById('password-action').value = 'change'; document.getElementById('password-action').onchange();
+    document.getElementById('test-password').value = 'new-sentinel'; document.getElementById('confirm-password').value = 'new-sentinel';
+    document.getElementById('old-password').scrollIntoView({block:'center'}); document.getElementById('old-password').focus(); return true;
+  })()`);
+  await delay(150);
+  await send('WebDriver:PerformActions', {actions: [{type:'key', id:'keyboard', actions:[{type:'keyDown', value:'\uE015'}, {type:'keyUp', value:'\uE015'}]}]});
+  await until(async () => (await readFile(join(directory, 'pairing.json.log'), 'utf8')).includes('"type":"ListMatches"'), 'Current password lookup');
+  await delay(200);
+  await send('WebDriver:PerformActions', {actions: [{type:'key', id:'keyboard', actions:[{type:'keyDown', value:'\uE007'}, {type:'keyUp', value:'\uE007'}]}]});
+  await until(() => evaluate("document.getElementById('old-password').value === 'test-password-only'"), 'Current password fill');
+  assert.equal(await evaluate("document.getElementById('test-password').value === 'new-sentinel' && document.getElementById('confirm-password').value === 'new-sentinel' && document.getElementById('test-username').value === 'boltwarden-test-alice'"), true);
+  console.log(`Firefox ${session.capabilities.browserVersion}: passkey creation, assertion, credential methods, denial, abort, password registration and change capture passed.`);
 } catch (error) {
   console.error(error);
   if (existsSync(join(directory, 'pairing.json.log'))) console.error(await readFile(join(directory, 'pairing.json.log'), 'utf8'));
@@ -143,6 +180,7 @@ try {
     browser.kill(); await Promise.race([stopped, delay(3000)]);
     if (browser.exitCode === null) { browser.kill('SIGKILL'); await stopped; }
   }
+  await playground?.close();
   await fixture?.close();
   await rm(directory, { recursive: true, force: true });
 }

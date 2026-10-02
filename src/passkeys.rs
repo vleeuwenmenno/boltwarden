@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+// Keep synchronized with extension/lib/passkey-types.ts.
+const MAX_CHALLENGE_BYTES: usize = 65_536;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialDescriptor {
@@ -218,7 +221,7 @@ fn validate_context(
     if rp != "localhost" && psl::domain_str(&rp).is_none() {
         return Err(SECURITY);
     }
-    let challenge = decode(challenge, 1024)?;
+    let challenge = decode(challenge, MAX_CHALLENGE_BYTES)?;
     if challenge.is_empty() || !(1..=60_000).contains(&timeout_ms) {
         return Err(INVALID);
     }
@@ -540,9 +543,18 @@ mod tests {
         assert!(decode("AR", 1).is_err()); // Non-zero discarded padding bits.
         let url = "https://example.com";
         let mut options = get(None);
-        for challenge in ["".into(), "AQ==".into(), encode(&[0; 1025])] {
+        for challenge in [
+            "".into(),
+            "AQ==".into(),
+            encode(&[0; MAX_CHALLENGE_BYTES + 1]),
+        ] {
             options.challenge = challenge;
             assert!(validate_get(url, url, &options).is_err());
+        }
+        for length in [1025, 8192, MAX_CHALLENGE_BYTES] {
+            options.challenge = encode(&vec![42; length]);
+            let validated = validate_get(url, url, &options).unwrap();
+            assert_eq!(validated.challenge, vec![42; length]);
         }
         options = get(None);
         options.timeout_ms = 60_001;
@@ -563,7 +575,7 @@ mod tests {
     #[test]
     fn generated_credential_registers_and_signs_with_verifiable_public_key() {
         let options = CreateOptions {
-            challenge: encode(b"registration challenge"),
+            challenge: encode(&vec![42; MAX_CHALLENGE_BYTES]),
             rp: RpEntity {
                 id: Some("example.com".into()),
                 name: "Example".into(),
@@ -606,7 +618,7 @@ mod tests {
         .unwrap();
         let public = decode(response.public_key.as_ref().unwrap(), 1024).unwrap();
         let verifying = VerifyingKey::from_public_key_der(&public).unwrap();
-        let client = decode(&assertion.client_data_json, 1024).unwrap();
+        let client = decode(&assertion.client_data_json, 131_072).unwrap();
         let client_json: serde_json::Value = serde_json::from_slice(&client).unwrap();
         assert_eq!(
             client_json,
@@ -695,7 +707,7 @@ mod tests {
             let mut signed = decode(&assertion.authenticator_data, 1024).unwrap();
             assert_eq!(signed[32], 0x19);
             signed.extend_from_slice(&Sha256::digest(
-                decode(&assertion.client_data_json, 4096).unwrap(),
+                decode(&assertion.client_data_json, 131_072).unwrap(),
             ));
             let signature =
                 Signature::from_der(&decode(assertion.signature.as_ref().unwrap(), 1024).unwrap())

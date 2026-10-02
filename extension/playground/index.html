@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Boltwarden · Passkey playground</title>
+  <link rel="stylesheet" href="/ui.css"><link rel="stylesheet" href="/playground.css">
+  <script src="/app.js" defer></script>
+</head>
+<body><main>
+  <header class="header"><span class="brand-mark" aria-hidden="true"></span><h1>Passkey playground</h1></header>
+  <section>
+    <p>Create a test passkey, then sign in. No email or online account needed.</p>
+    <p>Uses your real extension and vault. Test accounts stay available across browsers while this server runs.</p>
+    <label for="account">Test account</label>
+    <div class="row"><input id="account" value="alice" maxlength="64" pattern="[a-zA-Z0-9._-]+" autocomplete="off"><button id="new-account" class="secondary">New name</button></div>
+    <details><summary>Test options</summary>
+      <label for="verification">User verification</label>
+      <select id="verification"><option value="preferred">Preferred</option><option value="required">Required</option><option value="discouraged">Discouraged</option></select>
+      <label for="challenge">Challenge size</label>
+      <select id="challenge"><option value="32">Normal · 32 bytes</option><option value="8192">Large · 8 KiB</option><option value="65536">Maximum · 64 KiB</option></select>
+    </details>
+    <div class="row actions"><button id="create">Create passkey</button><button id="get" class="secondary">Sign in</button><button id="discover" class="secondary">Choose account</button><button id="cancel" class="secondary" hidden>Cancel</button></div>
+    <p>Sign in tests this account. Choose account tests passkey discovery without a username.</p>
+    <output id="status" role="status" aria-live="polite">Ready. Create a passkey to begin.</output>
+  </section>
+  <section>
+    <h2>Password save and update</h2>
+    <p>Use a made-up password. Register and approve saving in Boltwarden. Then change it and choose the existing login in the desktop prompt.</p>
+    <form id="password-form">
+      <label for="password-action">Action</label>
+      <select id="password-action"><option value="register">Register</option><option value="login">Sign in</option><option value="change">Change password</option></select>
+      <label for="test-username">Username</label><input id="test-username" name="username" autocomplete="username" value="boltwarden-test-alice" required>
+      <div id="old-password-row" hidden><label for="old-password">Current password</label><input id="old-password" name="current-password" type="password" autocomplete="current-password" disabled></div>
+      <label id="password-label" for="test-password">New password</label><input id="test-password" name="password" type="password" autocomplete="new-password" required>
+      <div id="confirm-password-row"><label for="confirm-password">Confirm password</label><input id="confirm-password" name="confirm-password" type="password" autocomplete="new-password" required></div>
+      <p id="password-suggestion-hint">Focus New password, then use the Boltwarden icon or press ↓ for a suggestion. Choose random, memorable, or PIN and adjust its options. Both fields fill together; saving is offered only after submission.</p>
+      <button type="submit">Submit test form</button>
+    </form>
+    <output id="password-status" role="status" aria-live="polite">Ready. Use a disposable password.</output>
+    <p>To test locked-vault recovery: lock Boltwarden, generate a password, and register. Unlock when prompted; the same submitted password should reach the save dialog. If cancelled, open the extension popup to retry or discard the pending save before closing the browser.</p>
+    <p>To test adding a passkey to that login, select the same test account above, click Create passkey, and select the saved login in Boltwarden. Its password should remain unchanged.</p>
+  </section>
+  <section>
+    <h2>Test accounts</h2><ul id="accounts"><li>No test accounts yet.</li></ul>
+    <button id="reset" class="secondary">Reset test data</button>
+    <p>Reset forgets server records only. Test passkeys remain in your vault as <code>boltwarden-test-*</code>; delete those items when finished.</p>
+  </section>
+</main></body></html>

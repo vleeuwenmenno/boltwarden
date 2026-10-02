@@ -362,6 +362,14 @@ fn b64_ids_pascal_aliases_and_nonresident_allowlist_use_original_entry() {
 
 /// Echo a single encrypted cipher create request, without real network services.
 fn creation_server(status: u16, omit_passkey: bool) -> (String, std::thread::JoinHandle<Value>) {
+    cipher_server(status, omit_passkey, false)
+}
+
+fn cipher_server(
+    status: u16,
+    omit_passkey: bool,
+    update: bool,
+) -> (String, std::thread::JoinHandle<Value>) {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -377,7 +385,11 @@ fn creation_server(status: u16, omit_passkey: bool) -> (String, std::thread::Joi
             headers.push(byte[0]);
         }
         let headers = String::from_utf8(headers).unwrap();
-        assert!(headers.starts_with("POST /api/ciphers HTTP/1.1\r\n"));
+        assert!(headers.starts_with(if update {
+            "PUT /api/ciphers/cipher-edit HTTP/1.1\r\n"
+        } else {
+            "POST /api/ciphers HTTP/1.1\r\n"
+        }));
         let length = headers
             .lines()
             .find_map(|line| {
@@ -390,7 +402,7 @@ fn creation_server(status: u16, omit_passkey: bool) -> (String, std::thread::Joi
         stream.read_exact(&mut body).unwrap();
         let request: Value = serde_json::from_slice(&body).unwrap();
         let mut response = request.clone();
-        response["id"] = json!("new-passkey");
+        response["id"] = json!(if update { "cipher-edit" } else { "new-passkey" });
         response["revisionDate"] = json!("2026-01-01T00:00:00.000Z");
         if omit_passkey {
             response["login"]["fido2Credentials"] = json!([]);
@@ -792,5 +804,165 @@ fn verified_unlock_registration_requires_proof_and_persists_uv_true_key() {
             )
             .unwrap();
         verify_assertion_uv(&assertion, created.public_key.as_ref().unwrap(), true);
+    });
+}
+
+#[test]
+fn attaching_passkey_preserves_login_and_requires_fresh_item_verification() {
+    config::with_test_config(|_| {
+        let mut client = fixture();
+        let target = client
+            .browser_write_targets("https://one.example/login", UriMatchType::Host)
+            .unwrap()
+            .remove(0);
+        let before = client.ciphers["cipher-edit"].raw.clone();
+        let (options, context) = create_options();
+        assert!(matches!(
+            client.browser_passkey_create_on(
+                &context,
+                &options,
+                PasskeyVerificationEvidence::VaultUnlock,
+                Some(&target)
+            ),
+            Err(BwError::RepromptRequired)
+        ));
+        let (url, server) = cipher_server(200, false, true);
+        client.base_url = url;
+        client.client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let created = client
+            .browser_passkey_create_on(
+                &context,
+                &options,
+                PasskeyVerificationEvidence::FreshPassword,
+                Some(&target),
+            )
+            .unwrap();
+        let posted = server.join().unwrap();
+        for field in ["password", "username", "totp", "uris"] {
+            assert_eq!(posted["login"][field], before["login"][field], "{field}");
+        }
+        for field in [
+            "notes",
+            "fields",
+            "favorite",
+            "reprompt",
+            "folderId",
+            "passwordHistory",
+        ] {
+            assert_eq!(posted[field], before[field], "{field}");
+        }
+        assert_eq!(
+            posted["login"]["fido2Credentials"][0],
+            before["login"]["fido2Credentials"][0]
+        );
+        assert_eq!(
+            posted["login"]["fido2Credentials"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(client.ciphers.len(), 1);
+        let candidate = client
+            .browser_passkey_candidates("example.com", &[])
+            .unwrap()
+            .into_iter()
+            .find(|item| item.credential_id == created.credential_id)
+            .unwrap();
+        let (get, context) = get_options();
+        let assertion = client
+            .browser_passkey_assert(
+                &candidate,
+                &context,
+                &get,
+                PasskeyVerificationEvidence::FreshPassword,
+            )
+            .unwrap();
+        verify_assertion(&assertion, created.public_key.as_ref().unwrap());
+        assert!(client.item_grants.is_empty());
+        assert!(
+            client.browser_write_target(&target, true).is_err(),
+            "old revision must be rejected"
+        );
+    });
+}
+
+#[test]
+fn browser_password_update_preserves_passkeys_and_history_without_desktop_grants() {
+    config::with_test_config(|_| {
+        let mut client = fixture();
+        let targets = client
+            .browser_write_targets("https://one.example/login", UriMatchType::Host)
+            .unwrap();
+        assert!(client.browser_password_already_saved(&targets, "alice", "current-password"));
+        assert!(!client.browser_password_already_saved(&targets, "alice", "new-password"));
+        let target = &targets[0];
+        let before = client.ciphers["cipher-edit"].raw.clone();
+        assert!(matches!(
+            client.browser_save_password(
+                "https://one.example/login",
+                "alice",
+                "new-password",
+                Some(target),
+                false
+            ),
+            Err(BwError::RepromptRequired)
+        ));
+        let (url, server) = cipher_server(200, false, true);
+        client.base_url = url;
+        client.client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        client
+            .browser_save_password(
+                "https://one.example/login",
+                "",
+                "new-password",
+                Some(target),
+                true,
+            )
+            .unwrap();
+        let posted = server.join().unwrap();
+        assert_eq!(
+            posted["login"]["fido2Credentials"],
+            before["login"]["fido2Credentials"]
+        );
+        assert_eq!(posted["fields"], before["fields"]);
+        assert_eq!(posted["login"]["uris"], before["login"]["uris"]);
+        assert_eq!(
+            raw_decrypt(
+                &posted["passwordHistory"][0],
+                "password",
+                &client.ciphers["cipher-edit"].item_key
+            )
+            .unwrap(),
+            "current-password"
+        );
+        let draft = draft_from_raw(
+            &client.ciphers["cipher-edit"].raw,
+            &client.ciphers["cipher-edit"].item_key,
+        )
+        .unwrap();
+        let login = draft.login.unwrap();
+        assert_eq!(login.password, "new-password");
+        assert_eq!(login.username, "alice");
+        assert!(client.item_grants.is_empty());
+        assert!(
+            client
+                .browser_save_password(
+                    "https://one.example/login",
+                    "alice",
+                    "stale",
+                    Some(target),
+                    true
+                )
+                .is_err()
+        );
     });
 }

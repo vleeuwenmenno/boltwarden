@@ -208,7 +208,7 @@ impl BrowserSetupState {
                 .as_ref()
                 == Some(&directory)
         }) {
-            return Err("This native-host folder is already listed.".into());
+            return Err("This native-host folder is already listed. Select that browser above and click Apply.".into());
         }
         let label = executable
             .file_name()
@@ -341,6 +341,7 @@ pub fn draw_browser_setup(ui: &mut Ui, state: &mut BrowserSetupState) {
                 if state.custom_open {
                     ui.add_space(12.0);
                     widgets::field_label(ui, "Browser executable");
+                    let previous_executable = state.executable.clone();
                     widgets::text_input(
                         ui,
                         egui::Id::new("browser-setup-executable"),
@@ -349,6 +350,14 @@ pub fn draw_browser_setup(ui: &mut Ui, state: &mut BrowserSetupState) {
                         false,
                         t.body(),
                     );
+                    if state.executable != previous_executable {
+                        if let Ok(path) = expand_path(&state.executable) {
+                            if let Some((family, directory)) = install::suggested_registration(&path) {
+                                state.family = family;
+                                state.directory = directory.to_string_lossy().into_owned();
+                            }
+                        }
+                    }
                     let family_label = if state.family == BrowserFamily::Firefox {
                         "Firefox"
                     } else {

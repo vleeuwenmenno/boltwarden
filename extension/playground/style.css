@@ -1,0 +1,21 @@
+main { max-width: 700px; margin: 36px auto; border: 1px solid var(--border); border-radius: 6px; }
+section { padding: 20px; display: grid; gap: 12px; }
+section + section { border-top: 1px solid var(--border); }
+label { color: var(--strong); }
+input, select { min-width: 0; padding: 9px 12px; background: var(--surface); color: var(--strong); border: 1px solid var(--border); border-radius: 4px; font: inherit; }
+input { flex: 1; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; }
+details { color: var(--muted); }
+details label, details select { display: block; margin-top: 10px; }
+summary { cursor: pointer; }
+output { padding: 12px; border: 1px solid var(--border); border-radius: 4px; overflow-wrap: anywhere; }
+output[data-state="success"] { color: var(--success); }
+output[data-state="error"] { color: var(--danger); }
+ul { list-style: none; margin: 0; padding: 0; }
+li { padding: 8px 0; }
+#reset { justify-self: start; }
+form { display: grid; gap: 10px; }
+form button { justify-self: start; }
+#old-password-row, #confirm-password-row { display: grid; gap: 10px; }
+[hidden] { display: none !important; }
+@media (max-width: 740px) { main { margin: 12px; } }

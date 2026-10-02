@@ -4,10 +4,10 @@ const h = vi.hoisted(() => {
   const event = () => ({ listeners: [] as Array<(...args: any[]) => any>, addListener(callback: (...args: any[]) => any) { this.listeners.push(callback); }, emit(...args: any[]) { return this.listeners.map(callback => callback(...args)); } });
   const browser = {
     runtime: { id: 'extension', onConnect: event(), onMessage: event(), getURL: (path: string) => `chrome-extension://extension${path}`, connectNative: vi.fn() },
-    storage: { local: { get: vi.fn(), set: vi.fn() } },
+    storage: { session: { get: vi.fn(async () => ({})), set: vi.fn(async () => {}) }, local: { get: vi.fn(), set: vi.fn() } },
     action: { setBadgeText: vi.fn(async () => {}), setTitle: vi.fn(async () => {}), openPopup: vi.fn(async () => {}) },
     webRequest: { onBeforeRequest: event(), onHeadersReceived: event(), onBeforeRedirect: event(), onErrorOccurred: event() },
-    webNavigation: { onBeforeNavigate: event(), onErrorOccurred: event(), onCommitted: event(), onCompleted: event(), onHistoryStateUpdated: event(), onReferenceFragmentUpdated: event(), getFrame: vi.fn() },
+    webNavigation: { onBeforeNavigate: event(), onErrorOccurred: event(), onCommitted: event(), onCompleted: event(), onDOMContentLoaded: event(), onHistoryStateUpdated: event(), onReferenceFragmentUpdated: event(), getFrame: vi.fn() },
     tabs: { sendMessage: vi.fn(), query: vi.fn(), get: vi.fn(), onRemoved: event(), onActivated: event() },
     windows: { onFocusChanged: event(), WINDOW_ID_NONE: -1 }, commands: { onCommand: event() },
   };
@@ -36,7 +36,7 @@ beforeEach(() => {
     : { type: 'Credentials', username: 'alice', password: 'secret', document_id: request.document_id, epoch: h.native.snapshot.epoch });
   (main as unknown as () => void)();
 });
-function documentPort(frameId = 0, url = tab.url, origin = new URL(url).origin, inspection: { token?: string | null; focused?: boolean; formCount?: number } = {}) {
+function documentPort(frameId = 0, url = tab.url, origin = new URL(url).origin, inspection: { token?: string | null; focused?: boolean; formCount?: number; kind?: string } = {}) {
   const messages: any[] = [];
   const onMessage = h.event(), onDisconnect = h.event();
   const port = { name: 'boltwarden-document-v1', sender: { id: 'extension', tab, frameId, url, origin, documentId: 'doc' }, onMessage, onDisconnect,
@@ -419,6 +419,14 @@ describe('inline document routing', () => {
       if (failure === 'none') expect(more.value.frame.items.map((item: any) => item.id)).toEqual(['login', 'two']);
     }
   });
+  it('unlocks a freshly pinned field without first requesting matches while locked', async () => {
+    h.native.snapshot = { state: 'locked', epoch: 1 };
+    const document = documentPort();
+    h.native.request.mockResolvedValue({ type: 'UnlockRequested' });
+    expect((await inline(document, 'unlock')).ok).toBe(true);
+    expect(h.native.request).toHaveBeenCalledExactlyOnceWith({ type: 'RequestUnlock' }, expect.any(AbortSignal));
+    expect(fillCalls()).toHaveLength(0);
+  });
   it('shows locked or unpaired state and unlocks only on explicit request without pairing', async () => {
     h.native.snapshot = { state: 'locked', epoch: 1 };
     const document = documentPort();
@@ -440,5 +448,109 @@ describe('inline document routing', () => {
     expect(document.messages.at(-1)).toMatchObject({ type: 'inline-state', reason: 'matches' });
     h.native.snapshot = { state: 'locked', epoch: 2 }; h.native.onChange(h.native.snapshot, { type: 'Locked', epoch: 2 });
     expect(document.messages.at(-1)).toMatchObject({ type: 'inline-state', reason: 'state', connection: { state: 'locked', epoch: 2 } });
+  });
+});
+
+
+describe('verification code routing', () => {
+  it.each([false, true])('releases only a fresh code to the pinned OTP form (expired: %s)', async expired => {
+    h.native.request.mockImplementation(async (request: any) => request.type === 'ListTotpMatches'
+      ? { type: 'Matches', items: [one], epoch: 1, next_offset: null }
+      : { type: 'Totp', code: '012345', expires_at: expired ? 1 : Math.floor(Date.now() / 1000) + 30, document_id: request.document_id, epoch: 1 });
+    const document = documentPort(0, tab.url, new URL(tab.url).origin, {kind: 'totp'});
+    const result = await inline(document, 'list');
+    expect(result.ok).toBe(true);
+    expect(result.value.frame.kind).toBe('totp');
+    const filled = await inline(document, 'fill', {targetId: result.value.frame.targetId, itemId: 'login'});
+    expect(filled.ok).toBe(!expired);
+    expect(h.native.request.mock.calls.some(([request]) => request.type === 'FillTotp')).toBe(true);
+    const delivered = document.messages.filter(message => message.type === 'fill');
+    expect(delivered).toHaveLength(expired ? 0 : 1);
+    if (!expired) {
+      expect(delivered[0]).toMatchObject({kind: 'totp', code: '012345', token: 'target'});
+      expect(delivered[0]).not.toHaveProperty('password');
+    }
+    expect(filled.value ?? {}).not.toHaveProperty('code');
+  });
+});
+
+
+describe('OTP toolbar and shortcut', () => {
+  it.each(['popup', 'shortcut'])('uses code-only requests for %s', async interaction => {
+    h.native.request.mockImplementation(async (request: any) => request.type === 'ListTotpMatches'
+      ? {type: 'Matches', items: [one], epoch: 1, next_offset: null}
+      : {type: 'Totp', code: '012345', expires_at: Math.floor(Date.now()/1000) + 30, document_id: request.document_id, epoch: 1});
+    const document = documentPort(0, tab.url, new URL(tab.url).origin, {kind: 'totp'});
+    if (interaction === 'popup') {
+      const listed = await ui({type: 'list'});
+      expect((await ui({type: 'fill', targetId: listed.value.frames[0].targetId, itemId: 'login'})).ok).toBe(true);
+    } else await shortcut();
+    await vi.waitFor(() => expect(document.messages.some(message => message.type === 'fill')).toBe(true));
+    expect(h.native.request.mock.calls.find(([request]) => request.type === 'FillTotp')?.[0]).toMatchObject({interaction});
+    expect(document.messages.find(message => message.type === 'fill')).toMatchObject({kind: 'totp', code: '012345'});
+    expect(fillCalls()).toHaveLength(0);
+  });
+});
+
+describe('inline code previews', () => {
+  it.each([false, true])('checks item verification before preview (protected: %s)', async reprompt => {
+    h.native.request.mockImplementation(async (request: any) => request.type === 'ListTotpMatches'
+      ? {type: 'Matches', items: [{...one, reprompt}], epoch: 1, next_offset: null}
+      : {type: 'Totp', code: '012345', expires_at: Math.floor(Date.now()/1000) + 30, document_id: request.document_id, epoch: 1});
+    const document = documentPort(0, tab.url, new URL(tab.url).origin, {kind: 'totp'});
+    const listed = await inline(document, 'list');
+    const result = await inline(document, 'preview', {targetId: listed.value.frame.targetId, itemId: 'login'});
+    expect(result.ok).toBe(!reprompt);
+    expect(h.native.request.mock.calls.filter(([request]) => request.type === 'FillTotp')).toHaveLength(reprompt ? 0 : 1);
+    expect(document.messages.filter(message => message.type === 'fill')).toHaveLength(0);
+    if (!reprompt) expect(result.value.preview).toMatchObject({itemId: 'login', code: '012345'});
+  });
+  it('discards a pending preview after locking', async () => {
+    let complete!: (value: any) => void;
+    h.native.request.mockImplementation(async (request: any) => request.type === 'ListTotpMatches'
+      ? {type: 'Matches', items: [one], epoch: 1, next_offset: null}
+      : new Promise(resolve => {complete = resolve;}));
+    const document = documentPort(0, tab.url, new URL(tab.url).origin, {kind: 'totp'});
+    const listed = await inline(document, 'list');
+    const pending = inline(document, 'preview', {targetId: listed.value.frame.targetId, itemId: 'login'});
+    await vi.waitFor(() => expect(complete).toBeDefined());
+    const request = h.native.request.mock.calls.find(([request]) => request.type === 'FillTotp')![0];
+    h.native.snapshot = {state: 'locked', epoch: 2}; h.native.onChange(h.native.snapshot, {type: 'Locked', epoch: 2});
+    complete({type: 'Totp', code: '012345', expires_at: Math.floor(Date.now()/1000) + 30, document_id: request.document_id, epoch: 1});
+    expect((await pending).ok).toBe(false);
+  });
+});
+
+
+it('preserves the initial inline lookup through native connection startup', async () => {
+  h.native.snapshot = {state: 'disconnected', epoch: 0};
+  h.native.onChange(h.native.snapshot);
+  const document = documentPort();
+  h.native.connect.mockImplementationOnce(async () => {
+    h.native.snapshot = {state: 'connecting', epoch: 0}; h.native.onChange(h.native.snapshot);
+    h.native.snapshot = {state: 'ready', epoch: 1}; h.native.onChange(h.native.snapshot);
+  });
+  const result = await inline(document, 'list');
+  expect(result.ok).toBe(true);
+  expect(result.value.frame.items[0].id).toBe('login');
+});
+
+describe('submitted password saves', () => {
+  it('uses the browser-owned top-level URL, survives navigation, and drops captured plaintext after completion', async () => {
+    h.native.request.mockResolvedValue({type: 'LoginSaved', saved: true});
+    const document = documentPort();
+    const login = {username: 'alice', password: 'new-password'};
+    document.port.onMessage.emit({type: 'save-login', id: 'save', generation: 'old-after-navigation', login, top_url: 'https://evil.test'});
+    await vi.waitFor(() => expect(document.messages.some(message => message.type === 'save-status')).toBe(true));
+    expect(h.native.request.mock.calls[0]![0]).toMatchObject({type: 'SaveLogin', top_url: tab.url, frame_url: tab.url});
+    expect(login).toEqual({username: '', password: ''});
+  });
+  it('rejects iframe and HTTP captures and limits concurrent saves per tab', async () => {
+    h.native.request.mockImplementation(() => new Promise(() => {}));
+    const send = (document: ReturnType<typeof documentPort>) => document.port.onMessage.emit({type: 'save-login', id: 'save', login: {username: 'alice', password: 'secret'}});
+    send(documentPort(2)); send(documentPort(0, 'http://example.com/login'));
+    expect(h.native.request).not.toHaveBeenCalled();
+    const document = documentPort(); send(document); send(document);
+    await vi.waitFor(() => expect(h.native.request).toHaveBeenCalledTimes(1));
   });
 });

@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it } from 'vitest';
-import { activeInput, fillForm, loginForms, selectForm, visibleInput } from '../lib/forms';
+import { activeInput, fillForm, fillOtp, loginForms, selectForm, visibleInput } from '../lib/forms';
 
 const visible = (input: HTMLInputElement) => !input.disabled && !input.readOnly && input.type !== 'hidden' && input.getAttribute('aria-hidden') !== 'true';
 beforeEach(() => { document.body.innerHTML = ''; });
@@ -25,9 +25,12 @@ describe('form selection', () => {
     document.body.innerHTML = '<form><input type="email" autocomplete="one-time-code"></form><form><input type="text" autocomplete="new-password" name="username"></form><form><input type="email"><input type="password" autocomplete="new-password"></form>';
     expect(loginForms(document, visible)).toEqual([]);
   });
-  it('never selects registration, password-change, OTP, or hidden fields', () => {
+  it('keeps OTP separate from registration, password-change, or hidden fields', () => {
     document.body.innerHTML = '<form><input autocomplete="username"><input type="password" autocomplete="new-password"></form><form><input type="password"><input type="password"></form><form><input autocomplete="one-time-code" name="username"></form><form><input name="username" type="hidden"></form>';
-    expect(loginForms(document, visible)).toEqual([]);
+    const forms = loginForms(document, visible);
+    expect(forms).toHaveLength(1);
+    expect(forms[0]?.otp).toHaveLength(1);
+    expect(forms[0]?.password).toBeUndefined();
   });
   it('finds logins and focus inside an open shadow root', () => {
     const host = document.createElement('div'); document.body.append(host);
@@ -84,4 +87,63 @@ describe('fill safety', () => {
     input.getClientRects = () => [{ width: 100, height: 20 }] as unknown as DOMRectList;
     expect(visibleInput(input)).toBe(false);
   });
+});
+
+
+describe('verification codes', () => {
+  const expires = () => Math.floor(Date.now() / 1000) + 30;
+  it.each(['autocomplete="one-time-code"', 'name="passcode"', 'aria-label="Zescijferige code"'])('recognizes and fills single code fields: %s', attributes => {
+    document.body.innerHTML = `<form><input ${attributes} maxlength="6"></form>`;
+    const form = loginForms(document, visible)[0]!;
+    fillOtp(form, '012345', expires(), visible);
+    expect(form.otp![0]!.value).toBe('012345');
+    expect(form.password).toBeUndefined();
+  });
+  it('does not guess recovery codes or arbitrary numeric fields', () => {
+    document.body.innerHTML = '<form><input name="recovery_code" autocomplete="one-time-code"></form><form><input type="number" maxlength="6"></form>';
+    expect(loginForms(document, visible)).toEqual([]);
+  });
+  it('fills six boxes with auto-advance without submitting', () => {
+    document.body.innerHTML = `<form>${Array.from({length: 6}, (_, i) => `<input maxlength="1" ${i === 0 ? 'autocomplete="one-time-code"' : ''}>`).join('')}</form>`;
+    const form = loginForms(document, visible)[0]!;
+    let submits = 0;
+    document.querySelector('form')!.addEventListener('submit', () => submits++);
+    form.otp!.forEach((field, i) => field.addEventListener('input', () => form.otp![i + 1]?.focus()));
+    fillOtp(form, '012345', expires(), visible);
+    expect(form.otp!.map(field => field.value).join('')).toBe('012345');
+    expect(submits).toBe(0);
+  });
+  it.each(['expired', 'length', 'hidden', 'changed'])('refuses unsafe code fills: %s', reason => {
+    document.body.innerHTML = '<form><input autocomplete="one-time-code" maxlength="6"></form>';
+    const form = loginForms(document, visible)[0]!;
+    if (reason === 'hidden') form.otp![0]!.disabled = true;
+    expect(() => fillOtp(form, reason === 'length' ? '12345678' : '123456', reason === 'expired' ? 1 : expires(), visible, () => reason !== 'changed')).toThrow();
+    expect(form.otp![0]!.value).toBe('');
+  });
+  it('stops after an input handler replaces a later box', () => {
+    document.body.innerHTML = `<form>${'<input maxlength="1" autocomplete="one-time-code">'.repeat(6)}</form>`;
+    const form = loginForms(document, visible)[0]!;
+    form.otp![0]!.addEventListener('input', () => form.otp![1]!.remove());
+    expect(() => fillOtp(form, '123456', expires(), visible)).toThrow();
+    expect(form.otp!.slice(1).every(field => field.value === '')).toBe(true);
+  });
+});
+
+it('fills only the explicit current password on a change form, preserving new passwords and username', () => {
+  document.body.innerHTML = '<form><input autocomplete="username" value="chosen-account"><input id="old" type="password" autocomplete="current-password"><input id="new" type="password" autocomplete="new-password" value="new-secret"><input id="confirm" type="password" autocomplete="new-password" value="new-secret"></form>';
+  const forms = loginForms(document, visible);
+  expect(forms).toHaveLength(1); expect(forms[0]!.username).toBeUndefined();
+  fillForm(forms[0]!, 'different-account', 'saved-secret', visible);
+  expect(document.querySelector<HTMLInputElement>('#old')!.value).toBe('saved-secret');
+  expect(document.querySelector<HTMLInputElement>('#new')!.value).toBe('new-secret');
+  expect(document.querySelector<HTMLInputElement>('#confirm')!.value).toBe('new-secret');
+  expect(document.querySelector<HTMLInputElement>('[autocomplete=username]')!.value).toBe('chosen-account');
+});
+it('accepts named old-password fields but rejects ambiguous or conflicting current-password hints', () => {
+  document.body.innerHTML = '<form><input type="password" name="old-password"><input type="password" autocomplete="new-password"></form>';
+  expect(loginForms(document, visible)).toHaveLength(1);
+  document.querySelector('form')!.insertAdjacentHTML('beforeend', '<input type="password" autocomplete="current-password">');
+  expect(loginForms(document, visible)).toHaveLength(0);
+  document.body.innerHTML = '<form><input type="password" autocomplete="current-password" name="new-password"><input type="password" name="confirm-password"></form>';
+  expect(loginForms(document, visible)).toHaveLength(0);
 });

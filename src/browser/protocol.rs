@@ -19,6 +19,24 @@ pub fn identities() -> &'static BrowserIdentities {
     })
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+pub struct CapturedLogin {
+    pub username: String,
+    pub password: String,
+}
+impl std::fmt::Debug for CapturedLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CapturedLogin([redacted])")
+    }
+}
+impl Drop for CapturedLogin {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.username.zeroize();
+        self.password.zeroize();
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RequestEnvelope {
     pub version: u8,
@@ -58,6 +76,13 @@ pub enum BrowserRequest {
         #[serde(default)]
         offset: usize,
     },
+    ListTotpMatches {
+        top_url: String,
+        frame_url: String,
+        document_id: String,
+        #[serde(default)]
+        offset: usize,
+    },
     PasskeyGet {
         top_url: String,
         frame_url: String,
@@ -70,7 +95,25 @@ pub enum BrowserRequest {
         document_id: String,
         options: CreateOptions,
     },
+    SaveLogin {
+        top_url: String,
+        frame_url: String,
+        document_id: String,
+        login: CapturedLogin,
+    },
     FillLogin {
+        item_id: String,
+        revision: String,
+        top_url: String,
+        frame_url: String,
+        document_id: String,
+        interaction: FillInteraction,
+        #[serde(default)]
+        confirm_insecure: bool,
+        #[serde(default)]
+        confirm_cross_origin: bool,
+    },
+    FillTotp {
         item_id: String,
         revision: String,
         top_url: String,
@@ -121,6 +164,9 @@ pub enum BrowserResponse {
         epoch: u64,
     },
     UnlockRequested,
+    LoginSaved {
+        saved: bool,
+    },
     Cancelled {
         request_id: String,
     },
@@ -134,6 +180,12 @@ pub enum BrowserResponse {
     Credentials {
         username: String,
         password: String,
+        document_id: String,
+        epoch: u64,
+    },
+    Totp {
+        code: String,
+        expires_at: u64,
         document_id: String,
         epoch: u64,
     },
@@ -151,6 +203,9 @@ impl std::fmt::Debug for BrowserResponse {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Credentials {
+                document_id, epoch, ..
+            }
+            | Self::Totp {
                 document_id, epoch, ..
             } => formatter
                 .debug_struct("Credentials")
@@ -188,6 +243,7 @@ impl Drop for BrowserResponse {
                 username.zeroize();
                 password.zeroize();
             }
+            Self::Totp { code, .. } => code.zeroize(),
             Self::PasskeyResult { result } => {
                 result.credential_id.zeroize();
                 result.client_data_json.zeroize();

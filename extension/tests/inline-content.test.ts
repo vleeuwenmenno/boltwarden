@@ -68,3 +68,24 @@ describe('inline document token isolation', () => {
     expect(fields.password.value).toBe(''); expect(harness.options!.current(token)).toBe(false);
   });
 });
+
+
+describe('OTP document pins', () => {
+  it('refuses passwords in OTP fields and consumes code pins once', () => {
+    const fields = form(); fields.password.remove(); fields.username.autocomplete = 'one-time-code'; fields.username.focus();
+    const token = harness.options!.pin(fields.username)!;
+    expect(inspect(token)).toMatchObject({kind: 'totp', token});
+    send({type: 'fill', scope: 'inline', id: 'wrong-kind', token, username: 'alice', password: 'secret'});
+    expect(harness.posted.at(-1)!.type).toBe('failure');
+    expect(fields.username.value).toBe('');
+    const fresh = harness.options!.pin(fields.username)!;
+    const request = {type: 'fill', scope: 'inline', id: 'code', token: fresh, kind: 'totp', code: '012345', expiresAt: Math.floor(Date.now()/1000) + 30};
+    send(request);
+    expect(harness.posted.at(-1)!.type).toBe('filled');
+    expect(fields.username.value).toBe('012345');
+    fields.username.value = '';
+    send(request);
+    expect(harness.posted.at(-1)!.type).toBe('failure');
+    expect(fields.username.value).toBe('');
+  });
+});

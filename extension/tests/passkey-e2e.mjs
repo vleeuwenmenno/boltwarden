@@ -1,7 +1,9 @@
 // Real Chromium extension, real native messaging, synthetic logins, disposable HOME/profile.
 // Requires Node >=22.12 and Chromium; no external automation dependency or personal profile.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { startPlayground } from '../playground/server.mjs';
 import { startPasskeyFixture, verifyRegistration, verifyAssertion } from './passkey-fixture.mjs';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -16,7 +18,7 @@ const screenshots = process.env.BOLTWARDEN_TEST_SCREENSHOTS;
 const home = join(directory, 'home'), profile = join(directory, 'profile');
 const log = [];
 const fixture = await startPasskeyFixture(directory), site = fixture.origin;
-let browser, socket;
+let browser, socket, playground;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(test, label, milliseconds = 15000) {
   const end = Date.now() + milliseconds;
@@ -87,10 +89,10 @@ try {
   async function click(session, label) {
     await evaluate(session, `(() => { const button = [...document.querySelectorAll('button')].find(button => button.textContent.includes(${JSON.stringify(label)})); if (!button || button.disabled) throw Error('Button not ready'); button.click(); })()`);
   }
-  async function screenshot(session, name) {
+  async function screenshot(session, name, captureBeyondViewport = true) {
     if (!screenshots) return;
     await mkdir(screenshots, { recursive: true });
-    const { data } = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true }, session);
+    const { data } = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport }, session);
     await writeFile(join(screenshots, `${name}.png`), Buffer.from(data, 'base64'));
   }
   async function key(session, value) {
@@ -123,7 +125,17 @@ try {
   assert.equal(await calls('PasskeyCreate'), 1, 'Creation must use native bridge');
   const assertion = await evaluate(websiteSession, 'passkeyFixture.get()');
   verifyAssertion(assertion, registration, site);
-  assert.equal(await calls('PasskeyGet'), 1, 'Assertion must use native bridge');
+  const legacyOptionsAssertion = await evaluate(websiteSession, 'passkeyFixture.get({ hints: ["security-key", "hybrid"], extensions: { appid: "https://www.gstatic.com/securitykey/origins.json" } })');
+  verifyAssertion(legacyOptionsAssertion, registration, site);
+  assert.deepEqual(legacyOptionsAssertion.extensions, {}, 'RP-scoped passkeys must not claim use of the legacy AppID');
+  verifyAssertion(await evaluate(websiteSession, 'passkeyFixture.getCrossRealm()'), registration, site);
+  assert.equal(await calls('PasskeyGet'), 3, 'Plain, cross-realm and legacy-option assertions must use native bridge');
+
+  await navigate('/early-passkey');
+  const early = await evaluate(websiteSession, 'earlyAssertion');
+  verifyAssertion(early, registration, site);
+  assert.notEqual(await evaluate(websiteSession, 'document.readyState'), 'complete', 'Passkey must work before slow subresources finish loading');
+  await navigate('/');
 
   await writeFile(join(directory, 'pairing.json.control'), JSON.stringify({ unlocked: false, epoch: 2 }));
   await delay(200);
@@ -172,6 +184,79 @@ try {
   const cancellations = await calls('Cancel');
   assert.equal(await evaluate(websiteSession, 'passkeyFixture.get({ timeout: 1200 }).then(() => "unexpected", error => error.name)'), 'NotAllowedError');
   await until(async () => await calls('Cancel') > cancellations, 'Deadline cancellation');
+  playground = await startPlayground({port: 0, directory: join(directory, 'playground')});
+  await send('Page.navigate', {url: playground.origin}, websiteSession);
+  await until(() => evaluate(websiteSession, 'document.readyState === "complete" && !!document.getElementById("create")'), 'Playground load');
+  for (const [button, message, type] of [['create', 'Passkey registered', 'PasskeyCreate'], ['get', 'Signature verified', 'PasskeyGet'], ['discover', 'Signature verified', 'PasskeyGet']]) {
+    const before = await calls(type);
+    await evaluate(websiteSession, `document.getElementById('challenge').value = '65536'; document.getElementById('${button}').click()`);
+    await until(() => evaluate(websiteSession, `document.getElementById('status').dataset.state === 'success' && document.getElementById('status').textContent.includes('${message}') && !document.getElementById('${button}').disabled`), `Playground ${button}`);
+    assert.equal(await calls(type), before + 1, 'Playground must use extension, not virtual browser fallback');
+  }
+  const savesBeforeSuggestion = await calls('SaveLogin');
+  await evaluate(websiteSession, "document.getElementById('test-password').scrollIntoView({block:'center'}); document.getElementById('test-password').focus()");
+  await evaluate(websiteSession, 'new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  await key(websiteSession, 'ArrowDown');
+  await screenshot(websiteSession, 'password-suggestion', false);
+  async function clickGenerator(label) {
+    const { root } = await send('DOM.getDocument', { depth: -1, pierce: true }, websiteSession);
+    const walk = node => [node, ...(node.children ?? []).flatMap(walk), ...(node.shadowRoots ?? []).flatMap(walk)];
+    const button = walk(root).find(node => label === 'Length' ? node.nodeName === 'INPUT' && node.attributes?.includes('length') : node.nodeName === 'BUTTON' && walk(node).some(child => child.nodeValue === label));
+    assert.ok(button, `Generator button: ${label}`);
+    await send('DOM.scrollIntoViewIfNeeded', { nodeId: button.nodeId }, websiteSession);
+    const { model } = await send('DOM.getBoxModel', { nodeId: button.nodeId }, websiteSession);
+    const x = (model.content[0] + model.content[4]) / 2, y = (model.content[1] + model.content[5]) / 2;
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 }, websiteSession);
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 }, websiteSession);
+    await delay(100);
+  }
+  await clickGenerator('Length');
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 }, websiteSession);
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 }, websiteSession);
+  await send('Input.insertText', { text: '18' }, websiteSession);
+  await clickGenerator('Generate another');
+  await clickGenerator('Use suggested password');
+  assert.equal(await evaluate(websiteSession, "document.getElementById('test-password').value.length === 18 && document.getElementById('test-password').value === document.getElementById('confirm-password').value"), true);
+  await delay(150);
+  assert.equal(await calls('SaveLogin'), savesBeforeSuggestion, 'Generating and filling must never save');
+  await evaluate(websiteSession, "document.getElementById('confirm-password').value = 'mismatch'; document.getElementById('confirm-password').dispatchEvent(new Event('input', {bubbles:true}))");
+  await key(websiteSession, 'Enter'); await delay(150);
+  assert.equal(await calls('SaveLogin'), savesBeforeSuggestion, 'Mismatched confirmation must not submit or save');
+  for (const [action, password, oldPassword] of [['register', 'test-original', ''], ['change', 'test-updated', 'test-original'], ['login', 'test-updated', '']]) {
+    const before = await calls('SaveLogin');
+    const unlocksBefore = await calls('RequestUnlock');
+    if (action === 'register') {
+      await writeFile(join(directory, 'pairing.json.control'), JSON.stringify({ unlocked: false, epoch: 100 }));
+      await delay(300);
+    }
+    await evaluate(websiteSession, `(() => {
+      document.getElementById('password-action').value = '${action}'; document.getElementById('password-action').onchange();
+      document.getElementById('test-password').value = '${password}'; document.getElementById('confirm-password').value = '${password}'; document.getElementById('old-password').value = '${oldPassword}';
+      document.getElementById('confirm-password').dispatchEvent(new Event('input', {bubbles:true}));
+      document.getElementById('test-password').scrollIntoView({block: 'center'}); document.getElementById('test-password').focus();
+    })()`);
+    await key(websiteSession, 'Enter');
+    await until(async () => await calls('SaveLogin') === before + 1, `Password ${action} captured`);
+    await until(() => evaluate(websiteSession, "document.getElementById('password-status').dataset.state === 'success' && document.getElementById('test-password').value === ''"), `Password ${action} server check`);
+    const captured = (await logs()).filter(message => message.type === 'SaveLogin').at(-1);
+    if (action === 'register') assert.equal(await calls('RequestUnlock'), unlocksBefore + 1, 'Locked submission must request unlock before saving');
+    assert.equal(captured.login_digest, createHash('sha256').update(JSON.stringify({username: 'boltwarden-test-alice', password})).digest('hex'));
+  }
+  await evaluate(websiteSession, `(() => {
+    document.getElementById('password-action').value = 'change'; document.getElementById('password-action').onchange();
+    document.getElementById('test-password').value = 'new-sentinel'; document.getElementById('confirm-password').value = 'new-sentinel';
+    document.getElementById('old-password').scrollIntoView({block:'center'}); document.getElementById('old-password').focus();
+  })()`);
+  await evaluate(websiteSession, 'new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  const lookupsBeforeCurrent = await calls('ListMatches');
+  await key(websiteSession, 'ArrowDown');
+  await until(async () => await calls('ListMatches') > lookupsBeforeCurrent, 'Current password inline lookup');
+  await delay(200); await key(websiteSession, 'Enter');
+  await until(() => evaluate(websiteSession, "document.getElementById('old-password').value === 'test-password-only'"), 'Current password inline fill');
+  assert.equal(await evaluate(websiteSession, "document.getElementById('test-password').value === 'new-sentinel' && document.getElementById('confirm-password').value === 'new-sentinel' && document.getElementById('test-username').value === 'boltwarden-test-alice'"), true);
+  console.log('Playground password registration, change and login submissions reached the native bridge with the expected new password.');
+  await screenshot(websiteSession, 'passkey-playground');
+  console.log('Local playground passed: registration, sign-in and account discovery verified independently with 64 KiB challenges.');
   console.log('Chromium passkey proof passed: signed pairing, ES256 create/get, prototypes/methods/JSON, independent signature, unlock, denial without fallback, explicit native fallback, unsupported attestation, iframe delegation, policy denial, AbortSignal, deadline and SPA cancellation.');
 } catch (error) {
   console.error(log.join('').slice(-3000)); throw error;
@@ -179,6 +264,7 @@ try {
   socket?.close(); browser?.kill('SIGTERM');
   if (browser && browser.exitCode === null) await Promise.race([new Promise(resolve => browser.once('exit', resolve)), delay(3000)]);
   if (browser && browser.exitCode === null) browser.kill('SIGKILL');
+  await playground?.close();
   await fixture.close();
   if (process.env.BOLTWARDEN_KEEP_TEST_PROFILE) console.log(`Preserved test profile: ${directory}`);
   else await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

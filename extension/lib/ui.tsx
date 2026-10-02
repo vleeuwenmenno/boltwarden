@@ -1,3 +1,4 @@
+import type { PendingSaveSummary } from './pending-saves';
 import { render } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { browser } from 'wxt/browser';
@@ -30,6 +31,7 @@ function Symbol({ name }: { name: 'key' | 'refresh' | 'settings' | 'lock' | 'war
 }
 
 function App({ options }: { options: boolean }) {
+  const [pending, setPending] = useState<PendingSaveSummary[]>([]);
   const [state, setState] = useState<UiState>();
   const [page, setPage] = useState<UiPage>();
   const [error, setError] = useState('');
@@ -76,6 +78,7 @@ function App({ options }: { options: boolean }) {
     try {
       if (retry) await call('retry');
       const next = await call<UiState>('state');
+      void call<PendingSaveSummary[]>('pending-saves').then(items => { if (live()) setPending(items ?? []); }).catch(() => {});
       if (!live()) return;
       // Retain the public fingerprint even when a newer connection event has
       // superseded this response during the native handshake.
@@ -95,6 +98,7 @@ function App({ options }: { options: boolean }) {
   function connectionChanged(event: UiStateChange) {
     if (!live() || event.type !== 'state-changed') return;
     const previous = currentState.current?.connection;
+    void call<PendingSaveSummary[]>('pending-saves').then(items => setPending(items ?? [])).catch(() => {});
     updateState({ fingerprint: currentState.current?.fingerprint ?? '', connection: event.connection });
     const changed = !previous || previous.state !== event.connection.state;
     const invalid = event.reason !== 'state' || (changed && event.connection.state !== 'ready');
@@ -231,13 +235,16 @@ function App({ options }: { options: boolean }) {
     : connection?.state === 'unpaired' ? 'Not paired' : connection?.state === 'disabled' ? 'Disabled'
       : connection?.state === 'disconnected' ? 'Unavailable' : 'Connecting';
 
+  const codePage = !!page?.frames.length && page.frames.every(frame => frame.kind === 'totp');
+  const searchLabel = codePage ? 'Filter verification accounts' : 'Filter this page’s logins';
+
   return <main class={options ? 'options' : 'popup'} onKeyDown={keyboard}>
     <header class="header">
       <span class="brand-mark" aria-hidden="true" />
       {ready && !options && !confirmation ? <>
         <h1 class="visually-hidden">Boltwarden</h1>
-        <label class="visually-hidden" for="search">Filter this page’s logins</label>
-        <input ref={search} id="search" class="search" type="search" placeholder="Filter this page’s logins" autoComplete="off" spellcheck={false}
+        <label class="visually-hidden" for="search">{searchLabel}</label>
+        <input ref={search} id="search" class="search" type="search" placeholder={searchLabel} autoComplete="off" spellcheck={false}
           value={query} disabled={busy && !page} onInput={event => { setQuery(event.currentTarget.value); setSelected(''); }}
           aria-controls="matching-logins" aria-describedby="search-scope" />
         <span id="search-scope" class="visually-hidden">Filters names and usernames among loaded matches for this page.</span>
@@ -255,6 +262,13 @@ function App({ options }: { options: boolean }) {
         </div>
         <div class="buttons"><button ref={cancel} class="secondary" onClick={() => setConfirmation(undefined)}>Cancel</button><button onClick={() => void fill(confirmation, true)}>Confirm and fill</button></div>
       </section> : <>
+        {pending.map(entry => <section class="notice" key={entry.id}>
+          <strong>Password awaiting save · {entry.origin}</strong>
+          <p>{entry.username}</p><p role="status">{entry.message}</p>
+          <p class="detail">Kept only until saved, discarded, or this browser session ends.</p>
+          <div class="buttons"><button disabled={entry.busy} onClick={() => void call('retry-save', { id: entry.id }).catch(error => setError(errorMessage(error)))}>Retry save</button>
+          <button class="secondary" disabled={entry.busy} onClick={() => void call('discard-save', { id: entry.id }).catch(error => setError(errorMessage(error)))}>Discard</button></div>
+        </section>)}
         {error && <p role="alert" class="notice error">{error}</p>}
         {message && !filled && <p role="status" class="notice">{message}</p>}
         {(!connection || connection.state === 'connecting') && <section class="empty-state"><span class="spinner large" /><h2>Connecting to Boltwarden…</h2></section>}
@@ -271,7 +285,7 @@ function App({ options }: { options: boolean }) {
           {page.warning && <p class="notice warning" role="status">{page.warning}</p>}
           {rows.length === 0 && <section class="empty-state no-matches"><div class="state-icon"><Symbol name="key" /></div><h2>{filteringLoadedMatches ? 'No matching logins' : 'No logins for this page'}</h2><p>{filteringLoadedMatches ? 'Try another name or username.' : page.message || 'Open a login form, then refresh.'}</p></section>}
           {groups.filter(({ frame, items }) => items.length || frame.more).map(({ frame, items }) => <section key={frame.targetId} class="frame">
-            <h2 class="frame-heading"><span title={frame.origin}>{frame.origin}</span>{frame.crossOrigin && <span class="frame-warning" title="This embedded page has a different origin">Embedded page</span>}</h2>
+            <h2 class="frame-heading"><span title={frame.origin}>{frame.origin}{frame.kind === 'totp' ? ' · Verification codes' : ''}</span>{frame.crossOrigin && <span class="frame-warning" title="This embedded page has a different origin">Embedded page</span>}</h2>
             {items.map(item => {
               const row = { frame, item }, key = selectionKey(row), selected = key === activeKey;
               return <button id={`login-${encodeURIComponent(key)}`} class={`login${selected ? ' selected' : ''}`} key={item.id} disabled={busy}

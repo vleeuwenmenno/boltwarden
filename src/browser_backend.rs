@@ -3,7 +3,7 @@ use crate::browser::{
     BrowserHandler, BrowserRequest, BrowserResponse, FillInteraction, MatchSummary, PairingRequest,
     RequestContext,
 };
-use crate::browser_approval::BrowserApprovalRequest;
+use crate::browser_approval::{BrowserApprovalChoice, BrowserApprovalRequest};
 use crate::{VaultState, interaction, uri_match};
 use std::sync::{Mutex, Weak, mpsc};
 
@@ -111,12 +111,36 @@ fn browser_process_description(host_pid: u32) -> String {
     format!("Native host PID: {host_pid}")
 }
 
+fn write_choices(targets: &[crate::bw::BrowserMatchSummary]) -> Vec<BrowserApprovalChoice> {
+    std::iter::once(BrowserApprovalChoice {
+        id: uuid::Uuid::new_v4().to_string(),
+        label: "Create new login".into(),
+        description: "Personal vault".into(),
+        requires_password: false,
+    })
+    .chain(targets.iter().map(|target| BrowserApprovalChoice {
+        id: uuid::Uuid::new_v4().to_string(),
+        label: target.name.clone(),
+        description: target.username.clone().unwrap_or_default(),
+        requires_password: target.reprompt,
+    }))
+    .collect()
+}
+
 impl BrowserHandler for DaemonBrowserBackend {
     fn handle(&self, ctx: &RequestContext, request: BrowserRequest) -> BrowserResponse {
         if ctx.is_cancelled() {
             return error("Cancelled");
         }
         let request = match request {
+            BrowserRequest::SaveLogin {
+                top_url,
+                frame_url,
+                document_id,
+                login,
+            } => {
+                return self.save_login(ctx, top_url, frame_url, document_id, login);
+            }
             BrowserRequest::PasskeyGet {
                 top_url,
                 frame_url,
@@ -135,6 +159,10 @@ impl BrowserHandler for DaemonBrowserBackend {
             }
             request => request,
         };
+        let totp = matches!(
+            request,
+            BrowserRequest::ListTotpMatches { .. } | BrowserRequest::FillTotp { .. }
+        );
         let Some(vault) = self.vault.upgrade() else {
             return error("DaemonUnavailable");
         };
@@ -176,15 +204,26 @@ impl BrowserHandler for DaemonBrowserBackend {
                 frame_url,
                 document_id,
                 offset,
+            }
+            | BrowserRequest::ListTotpMatches {
+                top_url,
+                frame_url,
+                document_id,
+                offset,
             } => {
                 let Some(_) = context(&top_url, &frame_url, &document_id) else {
                     return error("InvalidContext");
                 };
                 sync_browser_vault(&mut state);
-                match state
-                    .bw
-                    .browser_matches(&frame_url, state.browser_default_match)
-                {
+                match if totp {
+                    state
+                        .bw
+                        .browser_totp_matches(&frame_url, state.browser_default_match)
+                } else {
+                    state
+                        .bw
+                        .browser_matches(&frame_url, state.browser_default_match)
+                } {
                     Ok(items) => {
                         if ctx.is_cancelled() {
                             return error("Cancelled");
@@ -222,15 +261,30 @@ impl BrowserHandler for DaemonBrowserBackend {
                 interaction,
                 confirm_insecure,
                 confirm_cross_origin,
+            }
+            | BrowserRequest::FillTotp {
+                item_id,
+                revision,
+                top_url,
+                frame_url,
+                document_id,
+                interaction,
+                confirm_insecure,
+                confirm_cross_origin,
             } => {
                 let Some(cross_origin) = context(&top_url, &frame_url, &document_id) else {
                     return error("InvalidContext");
                 };
                 sync_browser_vault(&mut state);
-                let matches = match state
-                    .bw
-                    .browser_matches(&frame_url, state.browser_default_match)
-                {
+                let matches = match if totp {
+                    state
+                        .bw
+                        .browser_totp_matches(&frame_url, state.browser_default_match)
+                } else {
+                    state
+                        .bw
+                        .browser_matches(&frame_url, state.browser_default_match)
+                } {
                     Ok(items) => items,
                     Err(e) => return map_error(e),
                 };
@@ -257,7 +311,12 @@ impl BrowserHandler for DaemonBrowserBackend {
                 if protected {
                     let request = BrowserApprovalRequest {
                         id: String::new(),
-                        title: "Verify browser fill".into(),
+                        title: if totp {
+                            "Verify browser 2FA code"
+                        } else {
+                            "Verify browser fill"
+                        }
+                        .into(),
                         description: format!(
                             "Fill {} ({})\nDestination: {}\nTop-level page: {}",
                             item.name,
@@ -287,6 +346,24 @@ impl BrowserHandler for DaemonBrowserBackend {
                 }
                 if !state.browser_enabled || epoch != state.browser_epoch || ctx.is_cancelled() {
                     return error("StaleRequest");
+                }
+                if totp {
+                    return match state.bw.browser_totp(
+                        &item_id,
+                        &revision,
+                        &frame_url,
+                        state.browser_default_match,
+                        protected,
+                    ) {
+                        Ok(code) if !ctx.is_cancelled() => BrowserResponse::Totp {
+                            expires_at: code.step.saturating_add(1).saturating_mul(code.period),
+                            code: code.code,
+                            document_id,
+                            epoch,
+                        },
+                        Ok(_) => error("Cancelled"),
+                        Err(e) => map_error(e),
+                    };
                 }
                 match state.bw.browser_credentials(
                     &item_id,
@@ -513,6 +590,92 @@ impl DaemonBrowserBackend {
         }
     }
 
+    fn save_login(
+        &self,
+        ctx: &RequestContext,
+        top_url: String,
+        frame_url: String,
+        document_id: String,
+        login: crate::browser::protocol::CapturedLogin,
+    ) -> BrowserResponse {
+        if top_url != frame_url
+            || context(&top_url, &frame_url, &document_id) != Some(false)
+            || !frame_url.starts_with("https://")
+            || login.password.is_empty()
+            || login.password.len() > 4096
+            || login.username.len() > 1024
+        {
+            return error("InvalidRequest");
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let cancelled = || ctx.is_cancelled() || std::time::Instant::now() >= deadline;
+        let Some(vault) = self.vault.upgrade() else {
+            return error("DaemonUnavailable");
+        };
+        let Ok(mut state) = vault.lock() else {
+            return error("DaemonUnavailable");
+        };
+        if !state.browser_enabled {
+            return error("Disabled");
+        }
+        sync_browser_vault(&mut state);
+        let targets = match state
+            .bw
+            .browser_write_targets(&frame_url, state.browser_default_match)
+        {
+            Ok(targets) => targets,
+            Err(e) => return passkey_unavailable(e),
+        };
+        if state
+            .bw
+            .browser_password_already_saved(&targets, &login.username, &login.password)
+        {
+            return BrowserResponse::LoginSaved { saved: false };
+        }
+        let choices = write_choices(&targets);
+        let epoch = state.browser_epoch;
+        let approvals = state.browser_approvals.clone();
+        drop(state);
+        let selected = match approvals.request(BrowserApprovalRequest {
+            id: String::new(), title: "Save submitted password".into(),
+            description: format!("Website: {}\nUsername: {}\nCreate a login or select an existing login to update its username and password. This does not confirm the website accepted them.",
+                uri_match::page_url(&frame_url).unwrap().origin().ascii_serialization(), login.username),
+            fingerprint: None, requires_password: false, choices: choices.clone(), action_label: Some("Save password".into()), allow_fallback: false,
+        }, cancelled) { Ok(Some(id)) => id, _ => return error("Cancelled") };
+        let Some(index) = choices.iter().position(|choice| choice.id == selected) else {
+            return error("Cancelled");
+        };
+        let target = index.checked_sub(1).and_then(|index| targets.get(index));
+        let Ok(mut state) = vault.lock() else {
+            return error("DaemonUnavailable");
+        };
+        if !state.browser_enabled || state.browser_epoch != epoch || cancelled() {
+            return error("Cancelled");
+        }
+        sync_browser_vault(&mut state);
+        if state.browser_epoch != epoch || cancelled() {
+            return error("Cancelled");
+        }
+        let result = state.bw.browser_save_password(
+            &frame_url,
+            &login.username,
+            &login.password,
+            target,
+            target.is_some_and(|item| item.reprompt),
+        );
+        if !state.bw.has_session() {
+            crate::lock_vault_state(&mut state, "session revoked");
+            return error("Locked");
+        }
+        match result {
+            Ok(()) => {
+                crate::notify_browser_matches(&state);
+                BrowserResponse::LoginSaved { saved: true }
+            }
+            Err(e) => BrowserResponse::error("SaveFailed", &e.to_string()),
+        }
+    }
+
     fn passkey_create(
         &self,
         ctx: &RequestContext,
@@ -558,19 +721,32 @@ impl DaemonBrowserBackend {
             Ok(ids) => ids,
             Err(_) => return passkey_error("NotAllowedError", "Invalid credential identifier."),
         };
+        let targets = match state
+            .bw
+            .browser_write_targets(&frame_url, state.browser_default_match)
+        {
+            Ok(targets) => targets,
+            Err(e) => return passkey_unavailable(e),
+        };
+        let choices = write_choices(&targets);
         let policy = state.passkey_verification;
         let requires_password =
             passkey_requires_password(&state, validated.requires_user_verification);
         let epoch = state.browser_epoch;
         let approvals = state.browser_approvals.clone();
         drop(state);
-        if let Err(reason) = approvals.request(BrowserApprovalRequest {
+        let selected = match approvals.request(BrowserApprovalRequest {
             id: String::new(), title: "Create a passkey".into(),
-            description: format!("Website: {}\nPasskey for: {}\nAccount: {} ({})\nA new login will be saved in your personal vault.",
+            description: format!("Website: {}\nPasskey for: {}\nAccount: {} ({})\nCreate a login or add this passkey to an existing login. Its password and other fields will be kept.",
                 validated.origin, validated.rp_id, options.user.display_name, options.user.name),
-            fingerprint: None, requires_password, choices: Vec::new(),
+            fingerprint: None, requires_password, choices: choices.clone(),
             action_label: Some("Create passkey".into()), allow_fallback: true,
-        }, cancelled) { return passkey_approval_error(&reason); }
+        }, cancelled) { Ok(Some(id)) => id, Err(reason) => return passkey_approval_error(&reason), _ => return passkey_approval_error("Cancelled") };
+        let Some(index) = choices.iter().position(|choice| choice.id == selected) else {
+            return passkey_approval_error("Cancelled");
+        };
+        let target = index.checked_sub(1).and_then(|index| targets.get(index));
+        let requires_password = requires_password || target.is_some_and(|target| target.reprompt);
         let Ok(mut state) = vault.lock() else {
             return error("DaemonUnavailable");
         };
@@ -601,9 +777,10 @@ impl DaemonBrowserBackend {
         if cancelled() {
             return passkey_approval_error("Cancelled");
         }
-        let created = state
-            .bw
-            .browser_passkey_create(&validated, &options, verification);
+        let created =
+            state
+                .bw
+                .browser_passkey_create_on(&validated, &options, verification, target);
         if !state.bw.has_session() {
             crate::lock_vault_state(&mut state, "session revoked");
             return error("Locked");

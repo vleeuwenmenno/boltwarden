@@ -1,11 +1,15 @@
-import { decode, encode, isOperation, isPasskeyResult, MAX_TIMEOUT, PASSKEY_CHANNEL, type Descriptor, type PasskeyOperation, type PasskeyResult, type Verification } from './passkey-types';
+import { decode, encode, isOperation, isPasskeyResult, MAX_CHALLENGE_BYTES, MAX_TIMEOUT, PASSKEY_CHANNEL, type Descriptor, type PasskeyOperation, type PasskeyResult, type Verification } from './passkey-types';
 
 function buffer(value: BufferSource, maximum: number): string {
+  // instanceof rejects genuine ArrayBuffers created in another same-origin realm.
+  if (!ArrayBuffer.isView(value)) {
+    try { Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength')!.get!.call(value); }
+    catch { throw new TypeError('Expected BufferSource'); }
+  }
   const bytes = ArrayBuffer.isView(value)
     ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
     : new Uint8Array(value);
-  if (!(value instanceof ArrayBuffer) && !ArrayBuffer.isView(value)) throw new TypeError('Expected BufferSource');
-  if (!bytes.byteLength || bytes.byteLength > maximum) throw new TypeError('Unsupported byte length');
+  if (!bytes.byteLength || bytes.byteLength > maximum) throw new TypeError(`Unsupported byte length: ${bytes.byteLength} (expected 1..${maximum})`);
   return encode(bytes);
 }
 function descriptors(values: PublicKeyCredentialDescriptor[] | undefined): Descriptor[] {
@@ -16,19 +20,29 @@ function descriptors(values: PublicKeyCredentialDescriptor[] | undefined): Descr
 const verification = (value: string | undefined): Verification => (value ?? 'preferred') as Verification;
 
 /** Unsupported options retain the original native call, including its validation. */
-export function normalize(kind: 'get' | 'create', options: CredentialRequestOptions | CredentialCreationOptions | undefined): PasskeyOperation | null {
+export function normalize(kind: 'get' | 'create', options: CredentialRequestOptions | CredentialCreationOptions | undefined, rejected: (reason: string) => void = () => {}): PasskeyOperation | null {
+  const reject = (reason: string) => { rejected(reason); return null; };
+  let stage = 'request';
   try {
-    if (!options?.publicKey) return null;
-    if ('mediation' in options && options.mediation !== undefined && !['optional', 'required'].includes(options.mediation)) return null;
+    if (!options?.publicKey) return reject('no-public-key-options');
+    if ('mediation' in options && options.mediation !== undefined && !['optional', 'required'].includes(options.mediation)) return reject('mediation');
     const publicKey = options.publicKey;
-    if ('hints' in publicKey && Array.isArray(publicKey.hints) && publicKey.hints.length) return null;
+    // Hints guide browser UI; they are not authenticator requirements.
+    if ('hints' in publicKey && publicKey.hints !== undefined
+      && (!Array.isArray(publicKey.hints) || publicKey.hints.some(hint => typeof hint !== 'string'))) return reject('hints');
     const timeout = publicKey.timeout ?? 60_000;
-    if (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout < 0) return null;
-    const common = { challenge: buffer(publicKey.challenge, 1024), timeout_ms: Math.max(1000, Math.min(Math.floor(timeout), MAX_TIMEOUT)) };
+    if (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout < 0) return reject('timeout');
+    stage = 'challenge';
+    const common = { challenge: buffer(publicKey.challenge, MAX_CHALLENGE_BYTES), timeout_ms: Math.max(1000, Math.min(Math.floor(timeout), MAX_TIMEOUT)) };
     let operation: PasskeyOperation;
     if (kind === 'get') {
       const request = publicKey as PublicKeyCredentialRequestOptions;
-      if (request.extensions && Object.keys(request.extensions).length) return null;
+      // Ignore the optional legacy AppID extension for RP-scoped WebAuthn keys.
+      // Never substitute AppID for rpId or claim legacy U2F support in the result.
+      // If no ordinary credential matches, the original request goes to the browser.
+      if (request.extensions && (Object.keys(request.extensions).some(key => key !== 'appid')
+        || (request.extensions.appid !== undefined && typeof request.extensions.appid !== 'string'))) return reject('extensions');
+      stage = 'allow-credentials';
       operation = { kind, options: { ...common, ...(request.rpId === undefined ? {} : { rp_id: request.rpId }),
         allow_credentials: descriptors(request.allowCredentials), user_verification: verification(request.userVerification) } };
     } else {
@@ -44,8 +58,8 @@ export function normalize(kind: 'get' | 'create', options: CredentialRequestOpti
         resident_key: selection?.residentKey ?? (selection?.requireResidentKey ? 'required' : 'discouraged'),
         user_verification: verification(selection?.userVerification), cred_props: request.extensions?.credProps === true } };
     }
-    return isOperation(operation) ? operation : null;
-  } catch { return null; }
+    return isOperation(operation) ? operation : reject('normalized-options');
+  } catch (error) { return reject(`${stage}: ${error instanceof TypeError ? error.message : 'invalid-value'}`); }
 }
 
 /** Own methods support normal WebAuthn consumers. Native internal slots cannot
@@ -103,7 +117,7 @@ export function installPageBridge() {
         channel.port1.onmessage = ({ data }) => {
           if (!data || data.id !== id) return;
           if (data.type === 'ack') { clearTimeout(startup); return; }
-          if (data.type === 'fallback') { finish('fallback'); return; }
+          if (data.type === 'fallback') { console.info('[Boltwarden] Passkey fallback:', typeof data.reason === 'string' ? data.reason : 'bridge-fallback'); finish('fallback'); return; }
           if (data.type === 'result' && isPasskeyResult(data.result) && data.result.kind === operation.kind) { finish(data.result); return; }
           if (data.type === 'error') {
             const name = ['AbortError', 'NotAllowedError', 'SecurityError', 'InvalidStateError', 'NotSupportedError', 'DataError', 'OperationError'].includes(data.name) ? data.name : 'UnknownError';
@@ -111,7 +125,7 @@ export function installPageBridge() {
           }
         };
         // No relay after extension reload must not permanently replace native WebAuthn.
-        startup = setTimeout(() => { cancel(); finish('fallback'); }, 1000);
+        startup = setTimeout(() => { console.info('[Boltwarden] Passkey fallback: relay-unavailable'); cancel(); finish('fallback'); }, 1000);
         timer = setTimeout(() => { cancel(); finish(new DOMException('The passkey request timed out.', 'NotAllowedError'), true); }, operation.options.timeout_ms);
         window.postMessage({ source: PASSKEY_CHANNEL, type: 'request', id, ...operation }, location.origin, [channel.port2]);
       });
@@ -123,12 +137,27 @@ export function installPageBridge() {
       channel.port1.close(); channel.port2.close();
     }
   };
+  function reportUnsupported(kind: 'get' | 'create', options: CredentialRequestOptions | CredentialCreationOptions | undefined, reason: string) {
+    if (!options?.publicKey) return;
+    // Log option names only. Never log challenges, credential IDs, users, or payloads.
+    console.info('[Boltwarden] Passkey fallback: unsupported-options', JSON.stringify({
+      kind, reason, mediation: 'mediation' in options ? options.mediation : undefined,
+      optionNames: Object.keys(options.publicKey), extensionNames: Object.keys(options.publicKey.extensions ?? {}),
+      allowCredentialCount: 'allowCredentials' in options.publicKey ? options.publicKey.allowCredentials?.length : undefined,
+      appidType: typeof options.publicKey.extensions?.appid,
+      userVerification: 'userVerification' in options.publicKey ? options.publicKey.userVerification : undefined,
+    }));
+  }
   container.get = function(options) {
-    const operation = this === container ? normalize('get', options) : null;
+    let reason = 'receiver';
+    const operation = this === container ? normalize('get', options, value => { reason = value; }) : null;
+    if (!operation) reportUnsupported('get', options, reason);
     return operation && options ? request(operation, options) : Reflect.apply(native.get, this, [options]);
   };
   container.create = function(options) {
-    const operation = this === container ? normalize('create', options) : null;
+    let reason = 'receiver';
+    const operation = this === container ? normalize('create', options, value => { reason = value; }) : null;
+    if (!operation) reportUnsupported('create', options, reason);
     return operation && options ? request(operation, options) : Reflect.apply(native.create, this, [options]);
   };
 }

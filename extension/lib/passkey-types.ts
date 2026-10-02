@@ -18,6 +18,10 @@ export interface PasskeyResult {
 }
 export const PASSKEY_CHANNEL = 'boltwarden-webauthn-v1';
 export const PASSKEY_PORT = 'boltwarden-passkeys-v1';
+// Keep synchronized with src/passkeys.rs; leave room in the 256 KiB native frame.
+export const MAX_CHALLENGE_BYTES = 65_536;
+export const MAX_CHALLENGE_ENCODED = Math.ceil(MAX_CHALLENGE_BYTES * 4 / 3);
+export const MAX_CLIENT_DATA_ENCODED = 131_072;
 export const MAX_TIMEOUT = 60_000;
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const text = (value: unknown, limit = 1024): value is string => typeof value === 'string' && value.length <= limit;
@@ -32,7 +36,7 @@ const descriptors = (value: unknown) => Array.isArray(value) && value.length <= 
 export function isOperation(value: unknown): value is PasskeyOperation {
   if (!object(value) || !object(value.options)) return false;
   const options = value.options;
-  if (!binary(options.challenge, 1400) || !verification(options.user_verification)
+  if (!binary(options.challenge, MAX_CHALLENGE_ENCODED) || !verification(options.user_verification)
     || !Number.isSafeInteger(options.timeout_ms) || Number(options.timeout_ms) < 1000 || Number(options.timeout_ms) > MAX_TIMEOUT) return false;
   if (value.kind === 'get') return (options.rp_id === undefined || text(options.rp_id, 253)) && descriptors(options.allow_credentials);
   return value.kind === 'create' && object(options.rp) && text(options.rp.name)
@@ -46,7 +50,7 @@ export function isOperation(value: unknown): value is PasskeyOperation {
 
 export function isPasskeyResult(value: unknown): value is PasskeyResult {
   if (!object(value) || value.type !== 'PasskeyResult' || !binary(value.credential_id, 1400)
-    || !binary(value.client_data_json, 16_384) || !binary(value.authenticator_data, 16_384)
+    || !binary(value.client_data_json, MAX_CLIENT_DATA_ENCODED) || !binary(value.authenticator_data, 16_384)
     || !text(value.document_id, 128) || !Number.isSafeInteger(value.epoch) || Number(value.epoch) < 0) return false;
   if (value.kind === 'get') return binary(value.signature, 512)
     && (value.user_handle === null || value.user_handle === undefined || binary(value.user_handle, 86));

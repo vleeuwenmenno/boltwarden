@@ -1,3 +1,4 @@
+import { pendingSaves } from '../lib/pending-saves';
 import { defineBackground } from 'wxt/utils/define-background';
 import { browser } from 'wxt/browser';
 import { NativeClient } from '../lib/native';
@@ -16,11 +17,12 @@ interface DocumentState {
 }
 interface Target {
   scope?: 'inline';
+  kind?: 'login' | 'totp';
   id: string; document: DocumentState; generation: string; token: string; context: PageContext;
   controller: AbortController; items: Match[]; epoch: number; crossOrigin: boolean; focused: boolean; nextOffset: number | null; filling: boolean; warning?: string | null;
 }
 interface InlineState {
-  token: string; generation: string; controller: AbortController; busy: boolean; target?: Target;
+  token: string; generation: string; controller: AbortController; busy: boolean; kind?: 'login' | 'totp'; target?: Target;
 }
 const changed = () => new Error('The page changed. Select a login field and try again.');
 
@@ -41,6 +43,23 @@ export default defineBackground(() => {
   });
   let previousSnapshot = { ...native.snapshot };
   const passkeys = installPasskeyBroker(native);
+
+  const saves = pendingSaves(native, browser.storage.session, () => notifyUi('page'), (entry, message) => {
+    const destination = documents.get(`${entry.tabId}:0`);
+    if (destination?.origin === new URL(entry.url).origin) {
+      try { destination.port.postMessage({ type: 'save-status', generation: destination.generation, message }); } catch { /* tab closed */ }
+    }
+  });
+  const saving = new Set<number>();
+  async function saveLogin(document: DocumentState, sourceUrl: string, message: Record<string, any>) {
+    const login = message.login;
+    if (document.frameId !== 0 || !sourceUrl.startsWith('https:') || saving.has(document.tabId)
+      || !login || typeof login.username !== 'string' || typeof login.password !== 'string'
+      || !login.password || login.password.length > 4096 || login.username.length > 1024) return;
+    saving.add(document.tabId);
+    try { await saves.add(document.tabId, sourceUrl, document.documentId ?? document.generation, login); }
+    finally { login.password = ''; login.username = ''; saving.delete(document.tabId); }
+  }
 
   function trustedUi(sender: Port['sender']) {
     return sender?.id === browser.runtime.id
@@ -96,6 +115,7 @@ export default defineBackground(() => {
   }
   native.onChange = (snapshot, event) => {
     passkeys.nativeChanged(snapshot, event);
+    void saves.resume();
     const stateChanged = snapshot.state !== previousSnapshot.state || snapshot.epoch !== previousSnapshot.epoch || snapshot.error !== previousSnapshot.error;
     const matchesChanged = event?.type === 'MatchesChanged'
       || (!event && snapshot.state === 'ready' && snapshot.epoch !== previousSnapshot.epoch);
@@ -105,7 +125,7 @@ export default defineBackground(() => {
       for (const target of targets.values()) if (!target.filling) target.items = [];
       for (const state of inlineTargets.values()) if (state.target && !state.target.filling) state.target.items = [];
       pickerTabs.clear();
-    } else if (event || snapshot.state !== 'ready') clearTargets();
+    } else if (event || (snapshot.state !== 'ready' && snapshot.state !== 'connecting')) clearTargets();
     previousSnapshot = { ...snapshot };
     const text = snapshot.state === 'ready' ? '' : snapshot.state === 'locked' ? 'L' : '!';
     badge(text, undefined, snapshot.error ?? `Boltwarden: ${snapshot.state}`);
@@ -138,7 +158,11 @@ export default defineBackground(() => {
       generation: crypto.randomUUID(), navigating: false, pending: new Map() };
     documents.set(key, document);
     port.onMessage.addListener(message => {
-      if (!message || typeof message !== 'object' || message.generation !== document.generation || typeof message.id !== 'string') return;
+      if (!message || typeof message !== 'object' || typeof message.id !== 'string' || message.id.length > 64) return;
+      // A submit may be followed immediately by navigation. Its source remains the
+      // browser-owned URL of this content-script connection, never a page-supplied URL.
+      if (message.type === 'save-login') { void saveLogin(document, parsed.href, message); return; }
+      if (message.generation !== document.generation) return;
       if (message.type === 'inline-request') {
         if (message.id.length > 64) return;
         const generation = document.generation;
@@ -269,14 +293,14 @@ export default defineBackground(() => {
       if (inspected.type !== 'inspected' || generation !== document.generation) throw changed();
       if (inspected.token === null) return null;
       if (typeof inspected.token !== 'string' || inspected.token.length > 64) throw changed();
-      const target: Target = { id: crypto.randomUUID(), document, generation, token: inspected.token,
+      const target: Target = { kind: inspected.kind === 'totp' ? 'totp' : 'login', id: crypto.randomUUID(), document, generation, token: inspected.token,
         context: { top_url: tab.url, frame_url: document.url, document_id: `${document.tabId}:${document.frameId}:${generation}` },
         controller: new AbortController(), items: [], epoch: native.snapshot.epoch,
         crossOrigin: new URL(tab.url).origin !== document.origin, focused: inspected.focused === true, nextOffset: null, filling: false };
       targets.set(target.id, target);
       try {
         await validate(target);
-        const matches = expect(await native.request({ type: 'ListMatches', ...target.context }, target.controller.signal), 'Matches');
+        const matches = expect(await native.request({ type: target.kind === 'totp' ? 'ListTotpMatches' : 'ListMatches', ...target.context }, target.controller.signal), 'Matches');
         await validate(target);
         if (matches.epoch !== native.snapshot.epoch) throw changed();
         target.items = matches.items; target.epoch = matches.epoch; target.nextOffset = matches.next_offset; target.warning = matches.warning;
@@ -303,7 +327,7 @@ export default defineBackground(() => {
     return results.flatMap(result => result.status === 'fulfilled' && result.value ? [result.value] : []);
   }
   function page(found: Target[], tabId = found[0]?.document.tabId): UiPage {
-    return { frames: found.filter(target => target.items.length > 0).map(target => ({ targetId: target.id,
+    return { frames: found.filter(target => target.items.length > 0).map(target => ({ kind: target.kind, targetId: target.id,
       origin: target.document.origin, crossOrigin: target.crossOrigin, items: target.items, more: target.nextOffset !== null })),
       warning: Array.from(new Set([...found.flatMap(target => target.warning ? [target.warning] : []),
         ...(tabId !== undefined && discoveryWarnings.has(tabId) ? [discoveryWarnings.get(tabId)!] : [])])).join(' ') || undefined,
@@ -327,11 +351,14 @@ export default defineBackground(() => {
     const reply = await ask(document, { type: 'inspect', requestedToken: state.token });
     assertInline(document, state);
     if (reply.type !== 'inspected' || reply.token !== state.token || reply.focused !== true) throw changed();
+    const kind = reply.kind === 'totp' ? 'totp' : 'login';
+    if (state.kind && state.kind !== kind) throw changed();
+    state.kind = kind;
     return validateInline(document, state);
   }
   function inlineFrame(target: Target): UiFrame {
     const insecure = new URL(target.context.top_url).protocol !== 'https:' || new URL(target.context.frame_url).protocol !== 'https:';
-    return { targetId: target.id, origin: target.document.origin, crossOrigin: target.crossOrigin,
+    return { kind: target.kind, targetId: target.id, origin: target.document.origin, crossOrigin: target.crossOrigin,
       items: insecure ? target.items.map(item => ({ ...item, requires_confirmation: true })) : target.items, more: target.nextOffset !== null };
   }
   function inlineMatches(target: Target, matches: ReturnType<typeof expect<'Matches'>>, offset: number) {
@@ -353,9 +380,9 @@ export default defineBackground(() => {
       if (state?.token === data.token) clearInline(document);
       return { connection: { ...native.snapshot } };
     }
-    if (!['list', 'more', 'fill', 'unlock', 'open-popup'].includes(String(data.action))) throw changed();
+    if (!['list', 'more', 'preview', 'fill', 'unlock', 'open-popup'].includes(String(data.action))) throw changed();
     if (inlineWork >= 2) throw new Error('Another login request is in progress. Try again.');
-    if (data.action === 'list' || (data.action === 'open-popup' && !state)) {
+    if (data.action === 'list' || ((data.action === 'open-popup' || data.action === 'unlock') && !state)) {
       clearInline(document);
       state = { token: data.token, generation: document.generation, controller: new AbortController(), busy: false };
       inlineTargets.set(document, state);
@@ -369,13 +396,13 @@ export default defineBackground(() => {
         await native.connect();
         await inspectInline(document, current);
         if (native.snapshot.state !== 'ready') return { connection: { ...native.snapshot } };
-        const target: Target = { scope: 'inline', id: crypto.randomUUID(), document, generation: current.generation,
+        const target: Target = { scope: 'inline', kind: current.kind, id: crypto.randomUUID(), document, generation: current.generation,
           token: current.token, context: { top_url: tab.url, frame_url: document.url, document_id: `${document.tabId}:${document.frameId}:${current.generation}` },
           controller: current.controller, items: [], epoch: native.snapshot.epoch,
           crossOrigin: new URL(tab.url).origin !== document.origin, focused: true, nextOffset: null, filling: false };
         current.target = target;
         await validate(target);
-        const matches = expect(await native.request({ type: 'ListMatches', ...target.context }, target.controller.signal), 'Matches');
+        const matches = expect(await native.request({ type: target.kind === 'totp' ? 'ListTotpMatches' : 'ListMatches', ...target.context }, target.controller.signal), 'Matches');
         await inspectInline(document, current); await validate(target);
         inlineMatches(target, matches, 0);
         return { connection: { ...native.snapshot }, frame: inlineFrame(target), warning: target.warning ?? undefined,
@@ -397,6 +424,21 @@ export default defineBackground(() => {
       const target = current.target;
       if (!target || target.id !== data.targetId || target.epoch !== native.snapshot.epoch || native.snapshot.state !== 'ready') throw changed();
       await validate(target);
+      if (data.action === 'preview') {
+        const item = target.items.find(candidate => candidate.id === data.itemId);
+        // Preview must never trigger a protected-item prompt or bypass destination consent.
+        if (target.kind !== 'totp' || !item || item.reprompt || item.requires_confirmation || target.crossOrigin
+          || new URL(target.context.frame_url).protocol !== 'https:' || new URL(target.context.top_url).protocol !== 'https:') throw changed();
+        const code = expect(await native.request({ type: 'FillTotp', ...target.context, item_id: item.id, revision: item.revision,
+          interaction: 'popup', confirm_insecure: false, confirm_cross_origin: false }, current.controller.signal), 'Totp');
+        try {
+          await inspectInline(document, current); await validate(target);
+          if (native.snapshot.state !== 'ready' || code.epoch !== native.snapshot.epoch || code.document_id !== target.context.document_id
+            || Date.now() >= code.expires_at * 1000) throw changed();
+          return { connection: { ...native.snapshot }, frame: inlineFrame(target), warning: target.warning ?? undefined,
+            preview: { itemId: item.id, code: code.code, expiresAt: code.expires_at } };
+        } finally { code.code = ''; }
+      }
       if (data.action === 'fill') {
         if (typeof data.itemId !== 'string') throw changed();
         const item = target.items.find(candidate => candidate.id === data.itemId);
@@ -408,7 +450,7 @@ export default defineBackground(() => {
       }
       if (target.filling || target.nextOffset === null) throw changed();
       const offset = target.nextOffset;
-      const matches = expect(await native.request({ type: 'ListMatches', ...target.context, offset }, target.controller.signal), 'Matches');
+      const matches = expect(await native.request({ type: target.kind === 'totp' ? 'ListTotpMatches' : 'ListMatches', ...target.context, offset }, target.controller.signal), 'Matches');
       await inspectInline(document, current); await validate(target);
       inlineMatches(target, matches, offset);
       return { connection: { ...native.snapshot }, frame: inlineFrame(target), warning: target.warning ?? undefined };
@@ -426,10 +468,11 @@ export default defineBackground(() => {
     if (item.requires_confirmation && !insecure) throw new Error('Confirm filling on this insecure page.');
     await validate(target);
     target.filling = true;
-    let credentials: ReturnType<typeof expect<'Credentials'>> | undefined;
+    let credentials: ReturnType<typeof expect<'Credentials'>> | ReturnType<typeof expect<'Totp'>> | undefined;
     try {
-      credentials = expect(await native.request({ type: 'FillLogin', ...target.context, item_id: item.id, revision: item.revision,
-        interaction, confirm_insecure: insecure, confirm_cross_origin: crossOrigin }, target.controller.signal), 'Credentials');
+      const response = await native.request({ type: target.kind === 'totp' ? 'FillTotp' : 'FillLogin', ...target.context, item_id: item.id, revision: item.revision,
+        interaction, confirm_insecure: insecure, confirm_cross_origin: crossOrigin }, target.controller.signal);
+      credentials = target.kind === 'totp' ? expect(response, 'Totp') : expect(response, 'Credentials');
       if (target.scope === 'inline') {
         const state = inlineTargets.get(target.document);
         if (!state || state.target !== target) throw changed();
@@ -438,11 +481,16 @@ export default defineBackground(() => {
       await validate(target);
       if (native.snapshot.state !== 'ready' || credentials.epoch !== native.snapshot.epoch
         || credentials.document_id !== target.context.document_id) throw changed();
-      const reply = await ask(target.document, { type: 'fill', token: target.token, ...(target.scope ? { scope: target.scope } : {}), username: credentials.username, password: credentials.password });
+      if (credentials.type === 'Totp' && Date.now() >= credentials.expires_at * 1000 - 1000) throw new Error('Verification code expired. Choose the account again for a fresh code.');
+      const payload = credentials.type === 'Totp' ? { kind: 'totp', code: credentials.code, expiresAt: credentials.expires_at }
+        : { username: credentials.username, password: credentials.password };
+      const reply = await ask(target.document, { type: 'fill', token: target.token, ...(target.scope ? { scope: target.scope } : {}), ...payload })
+        .finally(() => { if ('code' in payload) payload.code = ''; else { payload.username = ''; payload.password = ''; } });
       if (reply.type !== 'filled') throw changed();
       badge('', target.document.tabId, 'Boltwarden: login filled');
     } finally {
-      if (credentials) { credentials.username = ''; credentials.password = ''; }
+      if (credentials?.type === 'Credentials') { credentials.username = ''; credentials.password = ''; }
+      if (credentials?.type === 'Totp') credentials.code = '';
       if (target.scope === 'inline') {
         if (inlineTargets.get(target.document)?.target === target) clearInline(target.document);
       } else clearTargets(target.document.tabId, false);
@@ -484,6 +532,9 @@ export default defineBackground(() => {
           await native.connect().catch(() => {});
           return { connection: native.snapshot, fingerprint: (await publicIdentity()).fingerprint };
         }
+        case 'pending-saves': return saves.list();
+        case 'retry-save': await saves.retry(String(data.id)); return null;
+        case 'discard-save': await saves.discard(String(data.id)); return null;
         case 'retry': await native.connect(); await native.refreshStatus(); return native.snapshot;
         case 'pair': await native.pair('Boltwarden browser'); return native.snapshot;
         case 'unlock': await native.request({ type: 'RequestUnlock' }); return null;
@@ -510,7 +561,7 @@ export default defineBackground(() => {
           if (!target || target.filling || target.nextOffset === null) throw changed();
           await validate(target);
           const offset = target.nextOffset;
-          const matches = expect(await native.request({ type: 'ListMatches', ...target.context, offset }, target.controller.signal), 'Matches');
+          const matches = expect(await native.request({ type: target.kind === 'totp' ? 'ListTotpMatches' : 'ListMatches', ...target.context, offset }, target.controller.signal), 'Matches');
           await validate(target);
           if (matches.epoch !== target.epoch || (matches.next_offset !== null && matches.next_offset <= offset)) throw changed();
           const seen = new Set(target.items.map(item => item.id));

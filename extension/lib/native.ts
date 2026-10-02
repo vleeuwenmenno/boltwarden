@@ -111,7 +111,7 @@ export class NativeClient {
     await this.connect();
     if (!this.authenticated) throw new NativeError('Unpaired', 'Pair this browser with Boltwarden first.');
     return this.raw(request, signal, request.type === 'PasskeyGet' || request.type === 'PasskeyCreate'
-      ? request.options.timeout_ms + 1000 : request.type === 'FillLogin' ? 65000 : request.type === 'ListMatches' ? 30000 : 10000);
+      ? request.options.timeout_ms + 1000 : (request.type === 'SaveLogin' || request.type === 'FillLogin' || request.type === 'FillTotp') ? 65000 : (request.type === 'ListMatches' || request.type === 'ListTotpMatches') ? 30000 : 10000);
   }
 
   private raw(request: Request, signal?: AbortSignal, timeout = 10000): Promise<Response> {

@@ -41,7 +41,23 @@ enum Browser {
     Vivaldi,
     VivaldiSnapshot,
     Brave,
+    BraveOrigin,
     Edge,
+    Zen,
+    LibreWolf,
+    FirefoxDeveloper,
+    Helium,
+    Opera,
+    OperaGx,
+    OperaBeta,
+    OperaDeveloper,
+    ChromeBeta,
+    ChromeDev,
+    BraveBeta,
+    BraveNightly,
+    EdgeBeta,
+    EdgeDev,
+    UngoogledChromium,
     All,
 }
 
@@ -104,12 +120,140 @@ const KNOWN_BROWSERS: &[KnownBrowser] = &[
         config_dir: "BraveSoftware/Brave-Browser/NativeMessagingHosts",
     },
     KnownBrowser {
+        browser: Browser::BraveOrigin,
+        id: "brave-origin",
+        label: "Brave Origin",
+        executables: &["brave-origin", "brave-origin-browser"],
+        family: BrowserFamily::Chromium,
+        config_dir: "BraveSoftware/Brave-Origin/NativeMessagingHosts",
+    },
+    KnownBrowser {
         browser: Browser::Edge,
         id: "edge",
         label: "Microsoft Edge",
         executables: &["microsoft-edge-stable", "microsoft-edge"],
         family: BrowserFamily::Chromium,
         config_dir: "microsoft-edge/NativeMessagingHosts",
+    },
+    KnownBrowser {
+        browser: Browser::Zen,
+        id: "zen",
+        label: "Zen",
+        executables: &["zen", "zen-browser", "zen-bin"],
+        family: BrowserFamily::Firefox,
+        config_dir: ".mozilla/native-messaging-hosts",
+    },
+    KnownBrowser {
+        browser: Browser::LibreWolf,
+        id: "librewolf",
+        label: "LibreWolf",
+        executables: &["librewolf"],
+        family: BrowserFamily::Firefox,
+        config_dir: ".librewolf/native-messaging-hosts",
+    },
+    KnownBrowser {
+        browser: Browser::FirefoxDeveloper,
+        id: "firefox-developer",
+        label: "Firefox Developer Edition",
+        executables: &["firefox-developer-edition"],
+        family: BrowserFamily::Firefox,
+        config_dir: ".mozilla/native-messaging-hosts",
+    },
+    KnownBrowser {
+        browser: Browser::Helium,
+        id: "helium",
+        label: "Helium",
+        executables: &["helium", "helium-browser"],
+        family: BrowserFamily::Chromium,
+        config_dir: "net.imput.helium/NativeMessagingHosts",
+    },
+    KnownBrowser {
+        browser: Browser::Opera,
+        id: "opera",
+        label: "Opera",
+        executables: &["opera", "opera-stable"],
+        family: BrowserFamily::Chromium,
+        config_dir: "opera/NativeMessagingHosts",
+    },
+    KnownBrowser {
+        browser: Browser::OperaGx,
+        id: "opera-gx",
+        label: "Opera GX",
+        executables: &["opera-gx"],
+        family: BrowserFamily::Chromium,
+        config_dir: "opera-gx/NativeMessagingHosts",
+    },
+    KnownBrowser {
+        browser: Browser::OperaBeta,
+        id: "opera-beta",
+        label: "Opera Beta",
+        executables: &["opera-beta"],
+        family: BrowserFamily::Chromium,
+        config_dir: "opera-beta/NativeMessagingHosts",
+    },
+    KnownBrowser {
+        browser: Browser::OperaDeveloper,
+        id: "opera-developer",
+        label: "Opera Developer",
+        executables: &["opera-developer"],
+        family: BrowserFamily::Chromium,
+        config_dir: "opera-developer/NativeMessagingHosts",
+    },
+    KnownBrowser {
+        browser: Browser::ChromeBeta,
+        id: "chrome-beta",
+        label: "Google Chrome Beta",
+        executables: &["google-chrome-beta"],
+        family: BrowserFamily::Chromium,
+        config_dir: "google-chrome-beta/NativeMessagingHosts",
+    },
+    KnownBrowser {
+        browser: Browser::ChromeDev,
+        id: "chrome-dev",
+        label: "Google Chrome Dev",
+        executables: &["google-chrome-unstable"],
+        family: BrowserFamily::Chromium,
+        config_dir: "google-chrome-unstable/NativeMessagingHosts",
+    },
+    KnownBrowser {
+        browser: Browser::BraveBeta,
+        id: "brave-beta",
+        label: "Brave Beta",
+        executables: &["brave-browser-beta", "brave-beta"],
+        family: BrowserFamily::Chromium,
+        config_dir: "BraveSoftware/Brave-Browser-Beta/NativeMessagingHosts",
+    },
+    KnownBrowser {
+        browser: Browser::BraveNightly,
+        id: "brave-nightly",
+        label: "Brave Nightly",
+        executables: &["brave-browser-nightly", "brave-nightly"],
+        family: BrowserFamily::Chromium,
+        config_dir: "BraveSoftware/Brave-Browser-Nightly/NativeMessagingHosts",
+    },
+    KnownBrowser {
+        browser: Browser::EdgeBeta,
+        id: "edge-beta",
+        label: "Microsoft Edge Beta",
+        executables: &["microsoft-edge-beta"],
+        family: BrowserFamily::Chromium,
+        config_dir: "microsoft-edge-beta/NativeMessagingHosts",
+    },
+    KnownBrowser {
+        browser: Browser::EdgeDev,
+        id: "edge-dev",
+        label: "Microsoft Edge Dev",
+        executables: &["microsoft-edge-dev"],
+        family: BrowserFamily::Chromium,
+        config_dir: "microsoft-edge-dev/NativeMessagingHosts",
+    },
+    KnownBrowser {
+        browser: Browser::UngoogledChromium,
+        id: "ungoogled-chromium",
+        label: "Ungoogled Chromium",
+        executables: &["ungoogled-chromium"],
+        family: BrowserFamily::Chromium,
+        config_dir: "chromium/NativeMessagingHosts",
     },
 ];
 
@@ -151,8 +295,7 @@ pub fn discover() -> Result<Vec<BrowserRegistration>> {
 
 fn discover_at(paths: &Paths, search: &[PathBuf]) -> Result<Vec<BrowserRegistration>> {
     let mut seen = HashSet::new();
-    let mut seen_directories = HashSet::new();
-    let mut registrations = Vec::new();
+    let mut registrations: Vec<BrowserRegistration> = Vec::new();
     for browser in KNOWN_BROWSERS {
         let Some(executable) = browser
             .executables
@@ -166,7 +309,13 @@ fn discover_at(paths: &Paths, search: &[PathBuf]) -> Result<Vec<BrowserRegistrat
             continue;
         }
         let native_host_dir = normalize_native_host_dir(&paths.native_host_dir(browser))?;
-        if !seen_directories.insert(native_host_dir.clone()) {
+        if let Some(shared) = registrations
+            .iter_mut()
+            .find(|row| row.native_host_dir == native_host_dir)
+        {
+            // Shared manifests cannot be independently enabled or disabled.
+            shared.label.push_str(" / ");
+            shared.label.push_str(browser.label);
             continue;
         }
         registrations.push(BrowserRegistration {
@@ -186,6 +335,18 @@ fn discover_at(paths: &Paths, search: &[PathBuf]) -> Result<Vec<BrowserRegistrat
 pub fn default_native_host_dir(family: BrowserFamily) -> Result<PathBuf> {
     let paths = Paths::from_env()?;
     Ok(default_native_host_dir_at(&paths, family))
+}
+
+/// Suggest the vendor directory for a known executable without launching it.
+pub fn suggested_registration(executable: &Path) -> Option<(BrowserFamily, PathBuf)> {
+    let name = executable.file_name()?.to_str()?;
+    let browser = KNOWN_BROWSERS
+        .iter()
+        .find(|browser| browser.executables.contains(&name))?;
+    Some((
+        browser.family,
+        Paths::from_env().ok()?.native_host_dir(browser),
+    ))
 }
 
 fn default_native_host_dir_at(paths: &Paths, family: BrowserFamily) -> PathBuf {
@@ -370,7 +531,16 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
                         .iter()
                         .find(|browser| browser.id == name)
                         .map(|browser| browser.browser)
-                        .ok_or("--browser must be firefox, chrome, chromium, vivaldi, vivaldi-snapshot, brave, edge, or all")?,
+                        .ok_or_else(|| {
+                            format!(
+                                "--browser must be {} or all",
+                                KNOWN_BROWSERS
+                                    .iter()
+                                    .map(|browser| browser.id)
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        })?,
                     None => return Err("--browser requires a browser name".into()),
                 }
             }
@@ -387,10 +557,12 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
 }
 
 fn destinations(paths: &Paths, browser: Browser) -> Vec<(PathBuf, BrowserFamily)> {
+    let mut seen = HashSet::new();
     KNOWN_BROWSERS
         .iter()
         .filter(|known| browser == Browser::All || known.browser == browser)
         .map(|known| (paths.native_host_dir(known), known.family))
+        .filter(|(path, _)| seen.insert(path.clone()))
         .collect()
 }
 
@@ -661,6 +833,7 @@ mod tests {
             "vivaldi/NativeMessagingHosts",
             "vivaldi-snapshot/NativeMessagingHosts",
             "BraveSoftware/Brave-Browser/NativeMessagingHosts",
+            "BraveSoftware/Brave-Origin/NativeMessagingHosts",
             "microsoft-edge/NativeMessagingHosts",
         ] {
             assert!(all.contains(&(
@@ -683,6 +856,76 @@ mod tests {
             default_native_host_dir_at(&fixture.paths, BrowserFamily::Chromium),
             fixture.paths.config.join("chromium/NativeMessagingHosts")
         );
+    }
+
+    #[test]
+    fn every_catalog_entry_discovers_parses_and_registers_its_own_family() {
+        for browser in KNOWN_BROWSERS {
+            let fixture = Fixture::new();
+            executable(&fixture.binaries.join(browser.executables[0]));
+            let rows = discover_at(&fixture.paths, &[fixture.binaries.clone()]).unwrap();
+            assert_eq!(rows.len(), 1, "{}", browser.id);
+            let row = &rows[0];
+            assert_eq!(row.id, browser.id);
+            assert_eq!(row.family, browser.family);
+            assert_eq!(row.native_host_dir, fixture.paths.native_host_dir(browser));
+            assert_eq!(
+                parse(["--browser".into(), browser.id.into()])
+                    .unwrap()
+                    .browser,
+                browser.browser
+            );
+            fixture.install(&row.native_host_dir, row.family).unwrap();
+            assert!(is_registered_at(&row.native_host_dir, &fixture.paths.launcher()).unwrap());
+        }
+    }
+
+    #[test]
+    fn firefox_and_zen_share_one_visible_registration() {
+        let fixture = Fixture::new();
+        executable(&fixture.binaries.join("firefox"));
+        executable(&fixture.binaries.join("zen"));
+        let rows = discover_at(&fixture.paths, &[fixture.binaries.clone()]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "Firefox / Zen");
+        assert_eq!(
+            rows[0].native_host_dir,
+            fixture.paths.home.join(".mozilla/native-messaging-hosts")
+        );
+        let all = destinations(&fixture.paths, Browser::All);
+        assert_eq!(
+            all.iter()
+                .map(|(path, _)| path)
+                .collect::<HashSet<_>>()
+                .len(),
+            all.len()
+        );
+    }
+
+    #[test]
+    fn brave_origin_is_discovered_separately_from_brave_and_chromium() {
+        let fixture = Fixture::new();
+        for name in ["brave", "brave-origin", "chromium"] {
+            executable(&fixture.binaries.join(name));
+        }
+        let rows = discover_at(&fixture.paths, &[fixture.binaries.clone()]).unwrap();
+        assert_eq!(rows.len(), 3);
+        let origin = rows.iter().find(|row| row.id == "brave-origin").unwrap();
+        assert_eq!(
+            origin.native_host_dir,
+            fixture
+                .paths
+                .config
+                .join("BraveSoftware/Brave-Origin/NativeMessagingHosts")
+        );
+        assert_eq!(
+            parse(["--browser".into(), "brave-origin".into()])
+                .unwrap()
+                .browser,
+            Browser::BraveOrigin
+        );
+        let (_, suggested) = suggested_registration(Path::new("/usr/bin/brave-origin")).unwrap();
+        assert!(suggested.ends_with("BraveSoftware/Brave-Origin/NativeMessagingHosts"));
     }
 
     #[test]

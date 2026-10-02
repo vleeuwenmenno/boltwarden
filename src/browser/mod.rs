@@ -489,7 +489,9 @@ fn read_loop(inner: &Arc<Inner>, connection: &Arc<Connection>, mut socket: UnixS
         if !allow_rate(&mut requests, 20)
             || (matches!(
                 envelope.request,
-                BrowserRequest::FillLogin { .. }
+                BrowserRequest::SaveLogin { .. }
+                    | BrowserRequest::FillLogin { .. }
+                    | BrowserRequest::FillTotp { .. }
                     | BrowserRequest::PasskeyGet { .. }
                     | BrowserRequest::PasskeyCreate { .. }
             ) && !allow_rate(&mut secret_requests, 5))

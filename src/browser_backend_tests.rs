@@ -105,6 +105,7 @@ impl Harness {
             if response["id"] == id {
                 return response;
             }
+            assert_ne!(response["type"], "Totp", "unexpected verification code");
             assert_ne!(
                 response["type"], "Credentials",
                 "unexpected secret response"
@@ -132,11 +133,19 @@ impl Harness {
     }
 
     fn decide(&self, request_id: &str, approved: bool, password: &str) -> Result<(), String> {
+        let selected_id = self
+            .vault
+            .lock()
+            .unwrap()
+            .browser_approvals
+            .active()
+            .filter(|request| request.title == "Create a passkey")
+            .and_then(|request| request.choices.first().map(|choice| choice.id.clone()));
         match crate::handle_rpc_request(
             RpcRequest::DecideBrowserApproval(BrowserApprovalDecision {
                 request_id: request_id.into(),
                 approved,
-                selected_id: None,
+                selected_id,
                 use_other_device: false,
                 password: password.into(),
             }),
@@ -282,6 +291,7 @@ impl Harness {
             .unwrap();
         while let Ok(body) = session::read_frame(&mut self.client, false) {
             let response: Value = serde_json::from_slice(&body).unwrap();
+            assert_ne!(response["type"], "Totp", "unexpected verification code");
             assert_ne!(
                 response["type"], "Credentials",
                 "cancelled request released credentials"
@@ -1119,5 +1129,139 @@ fn browser_passkey_vault_unlock_creation_still_requires_explicit_consent() {
                 "NotAllowedError"
             }
         );
+    }
+}
+
+#[test]
+fn protected_totp_requires_fresh_approval_and_releases_only_code() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let mut h = Harness::paired();
+    h.vault.lock().unwrap().bw = BwClient::browser_totp_test_fixture();
+    h.send(
+        "codes",
+        BrowserRequest::ListTotpMatches {
+            top_url: "https://one.example/".into(),
+            frame_url: "https://one.example/login".into(),
+            document_id: "document-1".into(),
+            offset: 0,
+        },
+    );
+    let list = h.read("codes");
+    assert_eq!(list["type"], "Matches");
+    let revision = list["items"][0]["revision"].as_str().unwrap().to_string();
+    assert!(!list.to_string().contains("JBSWY"));
+    h.send(
+        "code",
+        BrowserRequest::FillTotp {
+            item_id: "cipher-edit".into(),
+            revision,
+            top_url: "https://one.example/".into(),
+            frame_url: "https://one.example/login".into(),
+            document_id: "document-1".into(),
+            interaction: FillInteraction::Popup,
+            confirm_insecure: false,
+            confirm_cross_origin: false,
+        },
+    );
+    let approval = h.approval();
+    assert!(approval.requires_password);
+    h.decide(&approval.id, true, "correct").unwrap();
+    let response = h.read("code");
+    assert_eq!(response["type"], "Totp");
+    assert_eq!(response["code"].as_str().unwrap().len(), 6);
+    assert!(
+        response["expires_at"].as_u64().unwrap()
+            > std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+    );
+    assert!(response.get("password").is_none());
+    assert!(!response.to_string().contains("JBSWY"));
+    assert_eq!(response["document_id"], "document-1");
+}
+
+#[test]
+fn submitted_password_save_requires_explicit_choice_and_cancels_with_lock() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let mut h = Harness::paired();
+    h.send(
+        "save",
+        BrowserRequest::SaveLogin {
+            top_url: "https://one.example/login".into(),
+            frame_url: "https://one.example/login".into(),
+            document_id: "submitted".into(),
+            login: crate::browser::protocol::CapturedLogin {
+                username: "alice".into(),
+                password: "changed-password".into(),
+            },
+        },
+    );
+    let approval = h.approval();
+    assert_eq!(approval.title, "Save submitted password");
+    assert!(!approval.description.contains("changed-password"));
+    assert_eq!(approval.choices[0].label, "Create new login");
+    let protected = approval
+        .choices
+        .iter()
+        .find(|choice| choice.requires_password)
+        .unwrap();
+    assert!(
+        h.choose(&approval, Some(&protected.id), "wrong", false)
+            .is_err()
+    );
+    assert!(h.vault.lock().unwrap().bw.get_item("cipher-edit").is_err());
+    crate::invalidate_browser(&mut h.vault.lock().unwrap(), false);
+    h.wait_for_approval_end();
+    assert!(
+        h.choose(&approval, Some(&protected.id), "correct", false)
+            .is_err()
+    );
+}
+
+#[test]
+fn saved_password_submissions_do_not_prompt_and_http_or_iframe_saves_are_rejected() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let mut h = Harness::paired();
+    for (id, top, frame, code) in [
+        (
+            "same",
+            "https://one.example/login",
+            "https://one.example/login",
+            "",
+        ),
+        (
+            "http",
+            "http://one.example/login",
+            "http://one.example/login",
+            "InvalidRequest",
+        ),
+        (
+            "frame",
+            "https://other.example",
+            "https://one.example/login",
+            "InvalidRequest",
+        ),
+    ] {
+        h.send(
+            id,
+            BrowserRequest::SaveLogin {
+                top_url: top.into(),
+                frame_url: frame.into(),
+                document_id: "submitted".into(),
+                login: crate::browser::protocol::CapturedLogin {
+                    username: "alice".into(),
+                    password: "current-password".into(),
+                },
+            },
+        );
+        let result = h.read(id);
+        if code.is_empty() {
+            assert_eq!(result["type"], "LoginSaved");
+            assert_eq!(result["saved"], false);
+        } else {
+            assert_eq!(result["code"], code);
+        }
+        assert!(h.vault.lock().unwrap().browser_approvals.active().is_none());
     }
 }

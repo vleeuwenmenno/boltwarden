@@ -19,7 +19,7 @@ const log = [];
 const form = (email = false) => `<form><label>${email ? 'Email' : 'Username'}<input id="username" ${email ? 'type="email" autocomplete="email"' : 'autocomplete="username"'}></label><label>Password<input id="password" type="password" autocomplete="current-password"></label><button type="button" id="other">Other action</button></form>`;
 const html = path => `<!doctype html><html><head><title>Inline login fixture</title><style>
 body{margin:0;background:#11131a;color:#edf0f5;font:16px system-ui;display:grid;place-items:center;min-height:100vh}main{width:380px;padding:36px;border:1px solid #343947;border-radius:16px;background:#1c202b}h1{font-size:24px}label{display:block;margin:22px 0 8px}input{box-sizing:border-box;width:100%;margin-top:8px;padding:12px 38px 12px 12px;color:#f0f3f9;background:#11141c;border:1px solid #4c546b;border-radius:6px;font:16px system-ui}button{padding:10px 14px;border-radius:6px;border:1px solid #4c546b;background:#30394d;color:white}p{color:#adb6ca}
-</style></head><body><main><h1>Sign in to Example</h1><p>Synthetic browser test credentials only.</p>${path === '/iframe' ? '<button id="outside" type="button">Outside frame</button><iframe id="frame" src="/slow" style="width:100%;height:480px;border:0"></iframe>' : path === '/dynamic' ? '<div id="slot"></div>' : path === '/shadow' ? '<div id="shadow"></div>' : form(path === '/email')}</main><script>
+</style></head><body><main><h1>Sign in to Example</h1><p>Synthetic browser test credentials only.</p>${path === '/iframe' ? '<button id="outside" type="button">Outside frame</button><iframe id="frame" src="/slow" style="width:100%;height:480px;border:0"></iframe>' : path === '/dynamic' ? '<div id="slot"></div>' : path === '/shadow' ? '<div id="shadow"></div>' : path === '/otp' ? '<form><label>Zescijferige code<input id="otp" name="passcode" autocomplete="one-time-code" maxlength="6"></label></form>' : path === '/otp-split' ? '<form>' + Array.from({length:6}, (_, i) => `<input id="otp${i}" maxlength="1" autocomplete="one-time-code" style="width:42px;display:inline-block;padding:4px">`).join('') + '</form>' : form(path === '/email')}</main><script>
 ${path === '/shadow' ? `document.querySelector('#shadow').attachShadow({mode:'open'}).innerHTML = ${JSON.stringify('<style>label{display:block;margin:18px 0;color:#edf0f5}input{display:block;margin-top:8px;width:280px;height:34px}</style>' + form())};` : ''}
 window.addForm = () => document.querySelector('#slot').innerHTML = ${JSON.stringify(form())};
 </script></body></html>`;
@@ -84,7 +84,7 @@ try {
   }
   const attach = async targetId => (await send('Target.attachToTarget', { targetId, flatten: true })).sessionId;
   const worker = await until(async () => (await send('Target.getTargets')).targetInfos.find(target => target.type === 'service_worker' && target.url.includes(identities.chrome_id)), 'Extension service worker');
-  const workerSession = await attach(worker.targetId);
+  let workerSession = await attach(worker.targetId);
   const website = await send('Target.createTarget', { url: `${site}/single` });
   const websiteSession = await attach(website.targetId);
   await send('Target.activateTarget', { targetId: website.targetId });
@@ -124,6 +124,14 @@ try {
   await until(async () => (await text(panel.session)).includes('Test login'), 'Paired match list');
   assert(existsSync(join(directory, 'pairing.json')), 'Native host verified pairing proof');
   await send('Target.closeTarget', { targetId: panel.target.targetId });
+  // Keep pairing storage, but restart the extension background. No toolbar warm-up.
+  await send('ServiceWorker.enable', {}, websiteSession);
+  await send('ServiceWorker.stopAllWorkers', {}, websiteSession);
+  await until(async () => !(await send('Target.getTargets')).targetInfos.some(target => target.targetId === worker.targetId), 'Stopped extension worker');
+  await send('Page.navigate', {url: `${site}/single?cold-start`}, websiteSession);
+  const restartedWorker = await until(async () => (await send('Target.getTargets')).targetInfos.find(target => target.type === 'service_worker' && target.url.includes(identities.chrome_id)), 'Restarted extension worker');
+  workerSession = await attach(restartedWorker.targetId);
+
   const messages = async () => (await readFile(join(directory, 'pairing.json.log'), 'utf8')).trim().split('\n').map(JSON.parse);
   const calls = async type => (await messages()).filter(message => message.type === type).length;
   const field = selector => `(document.querySelector('#frame')?.contentDocument ?? document.querySelector('#shadow')?.shadowRoot ?? document).querySelector(${JSON.stringify(selector)})`;
@@ -191,6 +199,14 @@ try {
   await key(websiteSession, 'Enter'); await checkFilled();
   assert.equal(await calls('Cancel'), beforeSyncCancel, 'A sync event during fill must preserve the approved operation');
 
+  for (const [path, selector] of [['/otp', '#otp'], ['/otp-split', '#otp0']]) {
+    await navigate(path); await clickField(selector); await key(websiteSession, 'ArrowDown');
+    await until(async () => (await inlineText()).includes('012 345'), 'OTP code preview');
+    await screenshot(websiteSession, path === '/otp' ? 'otp-preview' : 'otp-split-preview');
+    await key(websiteSession, 'Enter');
+    await until(async () => await evaluate(websiteSession, `[...document.querySelectorAll('input')].map(input => input.value).join('')`) === '012345', 'OTP fill');
+  }
+
   await navigate('/slow');
   await openInline();
   const beforeSlow = await calls('FillLogin'), beforeCancel = await calls('Cancel');
@@ -212,6 +228,20 @@ try {
   await until(async () => await calls('Cancel') > beforeFrameCancel, 'Frame focus-change cancellation');
   await delay(900);
   assert.equal(await evaluate(websiteSession, `${field('#password')}.value`), '', 'Leaving a frame must suppress delayed credentials');
+
+  await navigate('/single');
+  await openInline();
+  await writeFile(join(directory, 'pairing.json.control'), JSON.stringify({ unlocked: false, epoch: 2 }));
+  await until(async () => (await inlineText()).includes('Unlock Boltwarden'), 'Inline lock state');
+  assert(!(await inlineText()).includes('Loading'), 'Locked menu must not keep loading');
+  const lockedMatches = await calls('ListMatches');
+  await key(websiteSession, 'Escape');
+  await key(websiteSession, 'ArrowDown');
+  await until(async () => (await inlineText()).includes('Unlock Boltwarden'), 'Reopened locked menu');
+  assert.equal(await calls('ListMatches'), lockedMatches, 'Do not query matches while locked');
+  await key(websiteSession, 'Enter');
+  await until(async () => (await inlineText()).includes('Test login'), 'Inline matches after unlock');
+  await key(websiteSession, 'Enter'); await checkFilled();
 
   await navigate('/single', httpSite);
   await clickField(); await key(websiteSession, 'ArrowDown');

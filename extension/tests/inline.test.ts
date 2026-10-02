@@ -99,6 +99,43 @@ describe('isolated inline login picker', () => {
     request.mockResolvedValue(ready); ui.state({ state: 'ready', epoch: 2 }); await settle();
     expect(request).toHaveBeenLastCalledWith('list', { token: original }); expect(shadow.querySelectorAll('[role=option]')).toHaveLength(2);
   });
+  it.each(['locked', 'unpaired', 'disabled'] as const)('shows known %s state immediately without a matching request', async state => {
+    const fields = form(); fields.username.focus(); const { ui, request, menu } = setup();
+    ui.state({ state, epoch: 1 });
+    trusted(fields.username, 'keydown', 'ArrowDown'); await settle();
+    expect(menu.hidden).toBe(false);
+    expect(shadow.textContent).not.toMatch(/Working|Loading/);
+    expect(request).not.toHaveBeenCalled();
+    expect(shadow.querySelector('.action')).not.toBeNull();
+    if (state === 'locked') {
+      expect(shadow.textContent).toContain('Unlock Boltwarden');
+      trusted(shadow.querySelector('.action')!, 'click'); await settle();
+      expect(request).toHaveBeenCalledWith('unlock', { token: expect.any(String) });
+    }
+  });
+  it('does not restart an unfinished lookup on repeated matching or page updates', async () => {
+    const fields = form(); fields.username.focus();
+    let finish!: (value: InlineValue) => void;
+    const request = vi.fn<InlineOptions['request']>().mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const { ui } = setup(request); ui.state(ready.connection);
+    trusted(fields.username, 'keydown', 'ArrowDown');
+    for (let i = 0; i < 4; i++) { ui.state(ready.connection, 'matches'); ui.state(ready.connection, 'page'); }
+    expect(request).toHaveBeenCalledTimes(1);
+    finish(ready); await settle();
+    expect(shadow.querySelectorAll('[role=option]')).toHaveLength(2);
+    expect(shadow.textContent).not.toContain('Loading');
+  });
+  it('replaces a pending lookup with locked state and ignores its late result', async () => {
+    const fields = form(); fields.username.focus();
+    let finish!: (value: InlineValue) => void;
+    const request = vi.fn<InlineOptions['request']>().mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const { ui } = setup(request); trusted(fields.username, 'keydown', 'ArrowDown');
+    ui.state({ state: 'locked', epoch: 2 });
+    expect(shadow.textContent).toContain('Unlock Boltwarden'); expect(request).toHaveBeenCalledTimes(1);
+    finish(ready); await settle();
+    expect(shadow.querySelectorAll('[role=option]')).toHaveLength(0);
+    expect(shadow.textContent).toContain('Unlock Boltwarden');
+  });
   it('does not replace a pending protected fill on MatchesChanged', async () => {
     const fields = form(); fields.username.focus();
     let finish!: (value: InlineValue) => void;
@@ -127,4 +164,98 @@ describe('isolated inline login picker', () => {
     ui.destroy(); const count = request.mock.calls.length; fields.password.focus(); trusted(fields.password, 'keydown', 'ArrowDown');
     expect(document.querySelector('[data-boltwarden-inline]')).toBeNull(); expect(request).toHaveBeenCalledTimes(count);
   });
+});
+
+describe('inline OTP preview', () => {
+  it('groups digits, refreshes expired codes, and clears on lock', async () => {
+    vi.useFakeTimers();
+    try {
+      const fields = form(); fields.username.focus();
+      const expiresAt = Math.floor(Date.now() / 1000) + 3;
+      let previews = 0;
+      const page: InlineValue = {...ready, frame: {...ready.frame!, kind: 'totp'}};
+      const request = vi.fn<InlineOptions['request']>().mockImplementation(async action => action === 'preview'
+        ? {...page, preview: {itemId: 'first', code: ++previews === 1 ? '012345' : '654321', expiresAt: previews === 1 ? expiresAt : expiresAt + 30}}
+        : page);
+      const {ui, menu} = setup(request);
+      trusted(fields.username, 'keydown', 'ArrowDown'); await settle(); await settle();
+      expect(menu.querySelector('.otp-code')?.textContent).toBe('012 345');
+      expect(menu.querySelector('.otp-expiry')?.textContent).toBe('3s');
+      expect(request.mock.calls.filter(([action]) => action === 'fill')).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(3100);
+      expect(menu.querySelector('.otp-code')?.textContent).toBe('654 321');
+      ui.state({state: 'locked', epoch: 2});
+      expect(menu.textContent).not.toContain('654 321');
+      expect(menu.textContent).toContain('Unlock Boltwarden');
+      const count = request.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(30000);
+      expect(request.mock.calls).toHaveLength(count);
+    } finally { for (const ui of controllers.splice(0)) ui.destroy(); vi.useRealTimers(); }
+  });
+  it('never requests previews for protected accounts', async () => {
+    const fields = form(); fields.username.focus();
+    const request = vi.fn<InlineOptions['request']>().mockResolvedValue({...ready, frame: {...ready.frame!, kind: 'totp', items: [ready.frame!.items[1]!]}});
+    const {menu} = setup(request);
+    trusted(fields.username, 'keydown', 'ArrowDown'); await settle(); await settle();
+    expect(menu.textContent).toContain('Locked');
+    expect(request.mock.calls.map(([action]) => action)).toEqual(['list']);
+  });
+});
+
+
+it('connects from a cold background without opening the toolbar', async () => {
+  const fields = form(); fields.username.focus();
+  let finish!: (value: InlineValue) => void;
+  const request = vi.fn<InlineOptions['request']>().mockImplementation(() => new Promise(resolve => {finish = resolve;}));
+  const {ui, menu} = setup(request);
+  ui.state({state: 'disconnected', epoch: 0});
+  trusted(fields.username, 'keydown', 'ArrowDown');
+  expect(request).toHaveBeenCalledWith('list', {token: expect.any(String)});
+  ui.state({state: 'connecting', epoch: 0});
+  ui.state(ready.connection);
+  finish(ready); await settle();
+  expect(menu.textContent).toContain('Personal');
+  expect(request).toHaveBeenCalledTimes(1);
+});
+
+describe('inline password suggestions', () => {
+  it('generates and fills both new-password fields without requesting vault access or saving', async () => {
+    vi.spyOn(document, 'location', 'get').mockReturnValue({protocol: 'https:'} as Location);
+    const fields = form(); fields.password.autocomplete = 'new-password';
+    const confirmation = fields.password.cloneNode() as HTMLInputElement;
+    confirmation.name = 'confirm-password'; fields.password.form!.append(confirmation);
+    confirmation.getBoundingClientRect = fields.password.getBoundingClientRect;
+    confirmation.getClientRects = fields.password.getClientRects;
+    fields.password.focus();
+    const {mark, menu, request, ui} = setup();
+    expect(mark.getAttribute('aria-label')).toBe('Suggest a password');
+    trusted(fields.password, 'keydown', 'ArrowDown');
+    expect(shadow.textContent).toContain('Use suggested password');
+    expect(shadow.textContent).toContain('after you submit');
+    const suggested = shadow.querySelector('code')!.textContent;
+    expect(suggested).toHaveLength(20);
+    ui.state({state: 'locked', epoch: 2});
+    trusted(fields.password, 'keydown', 'Enter'); await settle();
+    expect(fields.password.value).toBe(suggested); expect(confirmation.value).toBe(suggested);
+    expect(menu.hidden).toBe(true); expect(shadow.textContent).not.toContain(suggested);
+    expect(request).not.toHaveBeenCalled();
+  });
+});
+
+it('keeps generator controls open while editing and fills the selected PIN', async () => {
+  vi.spyOn(document, 'location', 'get').mockReturnValue({protocol: 'https:'} as Location);
+  const fields = form(); fields.password.autocomplete = 'new-password'; fields.password.focus();
+  const { menu, request } = setup();
+  trusted(fields.password, 'keydown', 'ArrowDown');
+  let type = shadow.querySelector<HTMLSelectElement>('select')!;
+  type.focus(); type.value = 'pin'; trusted(type, 'change'); await settle();
+  expect(menu.hidden).toBe(false);
+  expect(shadow.querySelector('code')!.textContent).toMatch(/^\d{6}$/);
+  const length = shadow.querySelector<HTMLInputElement>('[data-control="length"]')!;
+  length.focus(); length.value = '8'; trusted(length, 'input'); await settle();
+  const pin = shadow.querySelector('code')!.textContent;
+  expect(pin).toMatch(/^\d{8}$/);
+  const use = shadow.querySelector<HTMLButtonElement>('.suggested-password')!;
+  use.focus(); trusted(use, 'click'); await settle();
+  expect(fields.password.value).toBe(pin); expect(menu.hidden).toBe(true); expect(request).not.toHaveBeenCalled();
 });

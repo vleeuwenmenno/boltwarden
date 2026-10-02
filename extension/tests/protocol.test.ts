@@ -25,3 +25,14 @@ describe('wire contract', () => {
     expect(webUrl('https://example.com:8443/login')?.origin).toBe('https://example.com:8443');
   });
 });
+
+
+describe('verification code wire contract', () => {
+  it('validates code, expiry, and document metadata', () => {
+    const response = {version: 1, id: 'code', type: 'Totp', code: '012345', expires_at: 123456789, document_id: 'doc', epoch: 1};
+    expect(parseWire(response).type).toBe('Totp');
+    for (const invalid of [{code: 'secret'}, {code: '123'}, {expires_at: -1}, {expires_at: 1.5}, {document_id: null}]) {
+      expect(() => parseWire({...response, ...invalid})).toThrow();
+    }
+  });
+});

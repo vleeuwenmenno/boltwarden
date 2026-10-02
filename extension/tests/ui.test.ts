@@ -186,3 +186,18 @@ describe('popup invalidation', () => {
     expect(app.textContent).toContain('boltwarden install-browser');
   });
 });
+
+it('shows retained saves while locked and exposes retry and discard without a password', async () => {
+  connection = { state: 'locked', epoch: 2 };
+  const pending = { id: 'pending-one', origin: 'https://example.test', username: 'alice', message: 'Unlock to finish saving.', busy: false };
+  h.runtime.sendMessage.mockImplementation(async ({ type }) => response(type === 'state'
+    ? { connection, fingerprint: 'ABCD:1234' } : type === 'pending-saves' ? [pending] : null));
+  await open(true);
+  await vi.waitFor(() => expect(app.textContent).toContain('Password awaiting save'));
+  expect(app.textContent).toContain('browser session ends');
+  const buttons = [...app.querySelectorAll('button')];
+  await act(() => buttons.find(button => button.textContent === 'Retry save')!.click());
+  expect(h.runtime.sendMessage).toHaveBeenCalledWith({ type: 'retry-save', id: 'pending-one' });
+  await act(() => buttons.find(button => button.textContent === 'Discard')!.click());
+  expect(h.runtime.sendMessage).toHaveBeenCalledWith({ type: 'discard-save', id: 'pending-one' });
+});

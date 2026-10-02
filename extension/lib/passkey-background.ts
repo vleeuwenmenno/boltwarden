@@ -149,6 +149,7 @@ export function installPasskeyBroker(native: NativeClient) {
     }).catch(() => { /* frame was replaced while proving its identity */ });
   }
   browser.webNavigation.onCompleted.addListener(completed);
+  browser.webNavigation.onDOMContentLoaded.addListener(completed);
   for (const event of [browser.webNavigation.onHistoryStateUpdated, browser.webNavigation.onReferenceFragmentUpdated]) {
     event.addListener(details => {
       if (details.frameId !== 0) return;
@@ -234,11 +235,11 @@ export function installPasskeyBroker(native: NativeClient) {
       if (message.policy_allowed === undefined) await policyReady(document, pending);
       if (message.visible !== true || message.policy_allowed === false
         || (message.policy_allowed !== true && document.policy?.[message.kind] !== true)) {
-        reply({ type: 'fallback' }); return;
+        reply({ type: 'fallback', reason: 'document-policy-or-visibility' }); return;
       }
       await validate(document, generation, pending.controller.signal);
       await native.connect();
-      if (!['ready', 'locked'].includes(native.snapshot.state)) { reply({ type: 'fallback' }); return; }
+      if (!['ready', 'locked'].includes(native.snapshot.state)) { reply({ type: 'fallback', reason: `native-${native.snapshot.state}` }); return; }
       await unlock(document, pending);
       const context = await validate(document, generation, pending.controller.signal);
       const remaining = Math.floor(deadline - Date.now());
@@ -254,7 +255,7 @@ export function installPasskeyBroker(native: NativeClient) {
     } catch (error) {
       const reason = pending.controller.signal.aborted ? pending.controller.signal.reason : error;
       if (reason instanceof NativeError && (['FallbackRequested', 'Unsupported', 'Unavailable', 'NotSupportedError'].includes(reason.code)
-        || (pending.phase !== 'request' && ['Disconnected', 'Unpaired', 'Disabled'].includes(reason.code)))) reply({ type: 'fallback' });
+        || (pending.phase !== 'request' && ['Disconnected', 'Unpaired', 'Disabled'].includes(reason.code)))) reply({ type: 'fallback', reason: `native-${reason.code}` });
       else reply({ type: 'error', name: reason instanceof DOMException ? reason.name
         : reason instanceof NativeError ? ({ Cancelled: 'AbortError', Timeout: 'NotAllowedError', Locked: 'NotAllowedError', Busy: 'NotAllowedError' }[reason.code] ?? reason.code) : 'UnknownError',
       message: reason instanceof Error ? reason.message : 'The passkey request failed.' });

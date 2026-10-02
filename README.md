@@ -317,7 +317,7 @@ RSA items remain readable and copyable in the vault UI.
 
 Browser integration supports inline username/email/password suggestions, the toolbar
 popup, `Ctrl+Shift+L`, and passkey sign-in and creation on supported HTTPS pages.
-Browser TOTP and password save/update prompts are still planned. The desktop
+Browser TOTP filling is supported. Password save/update prompts are still planned. The desktop
 remains the vault owner; the extension has no independently unlocked or persisted
 vault.
 
@@ -339,8 +339,34 @@ Alternatively, register the native messaging host for the current user:
 boltwarden install-browser --browser all
 ```
 
-Supported installer choices are `firefox`, `chrome`, `chromium`, `vivaldi`,
-`vivaldi-snapshot`, `brave`, `edge`, and `all`.
+Supported Linux desktop registrations:
+
+| Browser | Installer choices |
+| --- | --- |
+| Firefox, Developer Edition, Zen, LibreWolf | `firefox`, `firefox-developer`, `zen`, `librewolf` |
+| Chrome, Chromium, Ungoogled Chromium | `chrome`, `chrome-beta`, `chrome-dev`, `chromium`, `ungoogled-chromium` |
+| Brave and Brave Origin | `brave`, `brave-beta`, `brave-nightly`, `brave-origin` |
+| Opera and Opera GX | `opera`, `opera-beta`, `opera-developer`, `opera-gx` |
+| Helium | `helium` |
+| Vivaldi | `vivaldi`, `vivaldi-snapshot` |
+| Microsoft Edge | `edge`, `edge-beta`, `edge-dev` |
+
+`all` installs the catalog's distinct native-host registrations. Discovery only lists
+executables found on PATH. Browsers sharing a native-host folder appear together on
+one toggle (for example, **Firefox / Zen**), because their registration cannot be
+turned off independently. Their extension profiles still pair separately.
+
+These entries cover native Linux installations. Flatpak/Snap builds and relocated
+profiles may require their own native-messaging bridge or custom registration;
+being in this catalog does not certify every browser's passkey behavior. Firefox
+and Chromium have automated end-to-end extension tests. The catalog has discovery,
+manifest, and registration tests for every entry.
+
+Path references: [Chromium native messaging](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging),
+[Helium Linux branding](https://github.com/imputnet/helium-linux/blob/main/patches/helium/linux/change-chromium-branding.patch),
+[Zen native messaging](https://github.com/zen-browser/desktop/issues/10622),
+[LibreWolf native messaging](https://librewolf.net/docs/faq/#how-do-i-get-native-messaging-to-work).
+
 Run this as your desktop user, without `sudo`. `--path /absolute/path/to/boltwarden`
 selects a stable binary location. The installer writes a launcher to
 `~/.local/libexec/boltwarden-native-host` and browser-specific host manifests.
@@ -353,6 +379,10 @@ Build the extension with Node.js 22.12 or newer:
 ```bash
 make extension-deps extension-build
 ```
+
+Brave Origin is discovered separately from Brave and uses
+`~/.config/BraveSoftware/Brave-Origin/NativeMessagingHosts`. Choosing a known browser
+executable in custom setup suggests its vendor-specific folder.
 
 In Chrome/Chromium or Vivaldi, open the browser's extensions page, enable developer mode, and load
 `extension/.output/chrome-mv3` as an unpacked extension. In Firefox, open
@@ -414,6 +444,15 @@ entry require confirmation; the shortcut cannot fill them. HTTP regex matches
 also require confirmation. A changed document or changed vault item invalidates
 the pending fill.
 
+Verification-code fields also support inline, toolbar, and shortcut filling. Select a matching
+account with a saved TOTP seed to fill its current code. The selected inline account
+shows grouped digits and an expiry countdown; protected accounts remain masked until
+verification. Previews clear when the picker closes or the vault locks. Single fields and six/eight-box
+forms are supported when their markup identifies them as OTP fields. Codes are generated
+in the desktop daemon; seeds are never sent to the extension. Item verification and URI
+matching still apply. Expired codes and changed forms are rejected. Boltwarden does not
+submit the form or copy codes automatically.
+
 Listing or filling logins follows the daemon's sync schedule: normally after 60
 seconds, with retries backing off to five minutes while offline. Connection
 failures leave the unlocked local copy available and show a warning in the
@@ -447,11 +486,92 @@ can be turned off in Browser setup. The shared launcher is retained for custom
 browser locations. Remove the extension separately and revoke its pairing from
 desktop Settings if that profile should no longer be trusted.
 
+### Local passkey playground
+
+Run `make playground`, then open **https://localhost:8443** in a browser paired
+with Boltwarden. Requires the extension's development dependencies (`make
+extension-deps`), Node 22.12 or newer, and OpenSSL. Accept the certificate warning
+for this local test page; the server generates a self-signed localhost certificate
+in the ignored `extension/.playground` directory. It listens on loopback only.
+
+1. Enter a disposable name such as `alice` and click **Create passkey**. Approve
+   in Boltwarden. The page independently validates the registration with
+   `@simplewebauthn/server`.
+2. Click **Sign in** to verify the stored credential's signature. **Choose account**
+   tests discoverable sign-in without specifying credential IDs. Add a second
+   account to exercise account selection.
+3. Keep the server running while restarting Boltwarden, reloading the extension,
+   or opening another paired browser, then sign in again. Test options include
+   required/preferred/discouraged user verification and 32-byte, 8 KiB, and
+   64 KiB challenges. **Cancel** exercises cancellation.
+4. **Reset test data** forgets server accounts and outstanding requests. Stopping
+   the server does the same. Neither action deletes vault items: remove the
+   `boltwarden-test-*` logins from your vault when finished.
+
+This is a disposable development relying party, not an account service. Anyone
+using the local page can reset its shared in-memory records. No email, external
+account, or mock authenticator is needed for manual use; Boltwarden creates real
+test vault items. Private keys remain with the authenticator. Do not expose this
+server to the network. To regenerate an expired local certificate, stop the server
+and remove `extension/.playground` before starting it again.
+
+Run `npm --prefix extension run test:playground` for verifier and HTTP boundary
+tests. The Chromium passkey suite also drives this page through the real extension
+with a synthetic native host and verifies creation, sign-in, and discovery using
+64 KiB challenges. Manual desktop approval and server sync still need the steps
+above; the automated browser test does not use your vault.
+
+### Password save and update
+
+New-password fields offer **Use suggested password** in the existing inline
+Boltwarden menu (icon or Down arrow). The extension generates a password locally
+with cryptographic randomness, fills new-password and confirmation fields in the
+same form, and leaves current-password fields alone. Suggestions default to 20
+characters. Choose random passwords (8–128 characters), memorable passwords
+(4–12 words, default 6), or PIN codes (4–128 digits, default 6), and configure
+numbers and symbols where applicable. Memorable passwords use the EFF Long
+Wordlist with unbiased random selection; symbols choose hyphens instead of spaces.
+Field length limits are checked without truncating a generated password. Tab opens
+the generator controls; Escape closes them. Suggestions are not saved or sent to
+the desktop until a form is submitted. **Generate another** replaces the suggestion;
+closing the menu discards an unused suggestion.
+
+Submitting a standard HTML password form on a top-level HTTPS page offers desktop
+approval to save its credentials. Choose **Create new login** or select a matching
+editable personal login, then **Save password**. Existing-item updates preserve
+passkeys, TOTP, URIs, notes, custom fields, and password history; a missing username
+on a password-only change form does not erase the saved username. Protected items
+require fresh master-password verification. An unchanged matching username/password
+is ignored without prompting. If the vault is locked, the extension retains the
+submitted credentials and requests unlock, then resumes the save approval. Failed
+or cancelled saves remain in the extension popup with **Retry save** and **Discard**.
+Pending credentials use extension-only `storage.session` memory so background-worker
+suspension does not lose them. They are removed after saving or explicit discard,
+and are lost when the browser session ends or the extension is reloaded/disabled.
+They are never written to `storage.local`, synced storage, or the page.
+
+Capture supports login, registration, and password-change forms with explicit new
+password fields; confirmation fields must agree. It requires a recent real click
+or key event and a browser submit event. HTTP, iframe, non-form JavaScript-only,
+and ambiguous password forms are not captured. The prompt describes submitted
+credentials, not a verified successful login: a website may still reject them.
+Locked/offline vaults must be unlocked/reconnected before resubmitting. Shared
+organization items are not offered for browser writes yet.
+
+In the playground's **Password save and update** section, register a made-up
+password and matching confirmation (or use a Boltwarden suggestion), then approve
+a new login after submission. Switch to **Change password**, provide the old
+and new values, and select that login in Boltwarden. Use **Sign in** to check the
+updated value. Then create a passkey for the same test name above and select the
+same login. Verify both password and passkey sign-in still work. Playground
+passwords are salted and hashed in memory; reset/stop forgets them along with
+server passkey records, without deleting vault items.
+
 ### Remaining browser work
 
 Pairing, username/password filling, and an initial passkey profile are implemented.
-Remaining work includes explicit TOTP filling/copying, password save/update
-prompts, wider WebAuthn compatibility, signed Firefox/Chrome distribution, and
+Remaining work includes wider password-form coverage, wider WebAuthn compatibility,
+signed Firefox/Chrome distribution, and
 sandboxed-browser packaging validation.
 
 ### Passkeys
@@ -481,20 +601,25 @@ the request. Reload tabs that were open before installing or updating the extens
 
 Sign-in supports Bitwarden-format ES256/P-256 credentials with a zero signature
 counter. Account selection is limited to the requesting relying party and any
-credential IDs requested by the site. New passkeys are saved as new personal login
-items; existing logins are not overwritten. Registration returns success only after
+credential IDs requested by the site. For new passkeys, desktop approval offers a new personal login or a matching
+editable personal login. Adding to an existing login preserves its password,
+URIs, fields, and previous passkeys. Protected items require fresh password
+verification, and a changed item revision invalidates the selection. Registration returns success only after
 the encrypted server save succeeds. Sign-in can use available offline vault data;
 creation requires a working server connection. If the site cancels after a save
 commits, the saved credential remains in the vault.
 
 The initial profile supports loaded top-level HTTPS pages, discoverable credentials,
-`none` attestation, and the `credProps` extension. Iframes, conditional/autofill
+`none` attestation, and the `credProps` extension. UI hints and optional legacy
+`appid` inputs do not exclude normal RP-scoped passkeys; Boltwarden ignores AppID
+and leaves legacy U2F credentials to the browser. Iframes, conditional/autofill
 mediation, other algorithms, nonzero counters, extra WebAuthn extensions (including
 PRF and large blobs), and unsupported attestation requests use the browser's
 native flow. New credentials use Bitwarden's syncable backup flags and zero-counter
 profile. Imported credentials with different backup semantics are not supported.
-Requests made before the document finishes loading can fall back to native
-WebAuthn after 1.5 seconds. The extension does not claim a platform authenticator through WebAuthn's static
+Requests wait within their timeout for verified DOM readiness; slow subresources
+do not force native fallback. Requests whose document cannot be verified fall back
+to native WebAuthn near their deadline. The extension does not claim a platform authenticator through WebAuthn's static
 capability checks. Sites that require browser-internal credential slots or gate
 all passkey use on those checks may need the native flow.
 
@@ -570,8 +695,8 @@ legacy session are not rewritten, and this does not protect a weak master passwo
 against offline guessing.
 
 The editor generates 24-character random passwords from an unbiased 64-character
-alphabet (144 bits of entropy). Passphrase generation and card/identity editors
-are not implemented. Vault sync runs approximately every 60 seconds while the
+alphabet (144 bits of entropy). Desktop passphrase generation and card/identity
+editors are not implemented; the browser inline generator supports passphrases. Vault sync runs approximately every 60 seconds while the
 search screen is active, or on browser listing/fill requests once the same interval
 has elapsed; a failed sync keeps cached results and shows a warning.
 A muted footer label shows sync state. Hover for the last-sync time; click it or

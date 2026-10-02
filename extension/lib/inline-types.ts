@@ -1,8 +1,8 @@
 import type { NativeSnapshot } from './native';
 import type { UiFrame } from './ui-types';
 
-export type InlineAction = 'list' | 'fill' | 'more' | 'unlock' | 'dismiss' | 'open-popup';
-export interface InlineValue { connection: NativeSnapshot; frame?: UiFrame; message?: string; warning?: string }
+export type InlineAction = 'list' | 'preview' | 'fill' | 'more' | 'unlock' | 'dismiss' | 'open-popup';
+export interface InlineValue { connection: NativeSnapshot; frame?: UiFrame; message?: string; warning?: string; preview?: { itemId: string; code: string; expiresAt: number } }
 export interface InlineRequest {
   type: 'inline-request'; id: string; generation: string; action: InlineAction;
   token?: string; targetId?: string; itemId?: string;

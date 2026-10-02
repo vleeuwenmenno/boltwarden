@@ -32,7 +32,7 @@ async function startInlineFixture(directory) {
   const server = createHttpsServer({ key: await readFile(key), cert: await readFile(cert) }, (request, response) => {
     const path = new URL(request.url, 'https://localhost').pathname;
     response.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
-    response.end(`<!doctype html><html><head><title>Inline Firefox fixture</title>${style}</head><body><h1>Synthetic login fixture</h1>${path === '/iframe' ? '<button id="outside" type="button">Outside frame</button><iframe src="/slow" style="width:600px;height:350px"></iframe>' : path === '/dynamic' ? '<div id="slot"></div>' : path === '/shadow' ? '<div id="shadow"></div>' : form(path === '/email')}<script>
+    response.end(`<!doctype html><html><head><title>Inline Firefox fixture</title>${style}</head><body><h1>Synthetic login fixture</h1>${path === '/iframe' ? '<button id="outside" type="button">Outside frame</button><iframe src="/slow" style="width:600px;height:350px"></iframe>' : path === '/dynamic' ? '<div id="slot"></div>' : path === '/shadow' ? '<div id="shadow"></div>' : path === '/otp' ? '<form><label>Zescijferige code<input id="otp" name="passcode" autocomplete="one-time-code" maxlength="6"></label></form>' : path === '/otp-split' ? '<form>' + Array.from({length:6}, (_, i) => `<input id="otp${i}" maxlength="1" autocomplete="one-time-code" style="width:42px;display:inline-block;padding:4px">`).join('') + '</form>' : form(path === '/email')}<script>
       ${path === '/shadow' ? `document.querySelector('#shadow').attachShadow({mode:'open'}).innerHTML=${JSON.stringify(style + form(false))};` : ''}
       window.addForm=()=>document.querySelector('#slot').innerHTML=${JSON.stringify(form(false))};
     </script></body></html>`);
@@ -166,6 +166,12 @@ try {
   for (const [path, selector] of [['/single', '#username'], ['/email', '#username'], ['/single', '#password'], ['/shadow', '#username'], ['/dynamic', '#username']]) {
     await navigate(path); if (path === '/dynamic') await evaluate('(addForm(), true)');
     await openInline(selector); await key('Enter'); await checkFilled();
+  }
+  for (const [path, selector] of [['/otp', '#otp'], ['/otp-split', '#otp0']]) {
+    await navigate(path); await clickField(selector); const before = await calls('ListTotpMatches'); await key('ArrowDown');
+    await until(async () => await calls('ListTotpMatches') > before, 'OTP matching account');
+    await delay(200); await key('Enter');
+    await until(async () => await evaluate(`[...document.querySelectorAll('input')].map(input => input.value).join('')`) === '012345', 'OTP fill');
   }
   await navigate('/slow'); await openInline(); const beforeSlow = await calls('FillLogin'); await key('Enter');
   await until(async () => await calls('FillLogin') > beforeSlow, 'Delayed native fill');
