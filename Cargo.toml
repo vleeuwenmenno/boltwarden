@@ -22,7 +22,7 @@ sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
-hmac = "0.12"
+hmac = "0.13"
 hkdf = "0.12"
 tokio = { version = "1", features = ["rt", "time", "macros"] }
 futures-lite = "2"

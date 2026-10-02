@@ -630,7 +630,7 @@ dependencies = [
  "egui",
  "futures-lite",
  "hkdf",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "image",
  "ksni",
  "libc",
