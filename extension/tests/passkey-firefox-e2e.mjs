@@ -94,7 +94,13 @@ try {
         script: `return window[${JSON.stringify(slot)}] || null;`, args: [], newSandbox: false, sandbox: null,
       });
       return result.value?.done ? result.value : null;
-    }, `Firefox page operation ${expression}`);
+    }, `Firefox page operation ${expression}`).catch(async error => {
+      const diagnostic = await send('WebDriver:ExecuteScript', {
+        script: 'return {url: location.href, focused: document.hasFocus(), visibility: document.visibilityState, logs: window.fixtureLogs, timing: performance.getEntriesByType("navigation")[0]?.toJSON()};',
+        args: [], newSandbox: false, sandbox: null,
+      });
+      throw new Error(`${error.message}: ${JSON.stringify(diagnostic.value)}`);
+    });
     await send('WebDriver:ExecuteScript', {
       script: `delete window[${JSON.stringify(slot)}];`, args: [], newSandbox: false, sandbox: null,
     });
@@ -136,7 +142,14 @@ try {
   assert.equal(await evaluate('document.querySelector("[autocomplete=cc-csc]").value'), '123');
   assert.equal(await evaluate('document.querySelector("[autocomplete=cc-exp-month]").value'), '3');
   assert.equal(await evaluate('!!window.cardSubmitted'), false);
+  // Closing the toolbar is a separate user action. Leaving it open can retain
+  // browser-chrome focus and suspend the following WebAuthn request on CI.
+  await send('Marionette:SetContext', {value:'chrome'});
+  await send('WebDriver:ExecuteScript', {script: 'document.querySelector(".webextension-popup-browser")?.closest("panel")?.hidePopup(); gBrowser.selectedBrowser.focus(); return true;', args:[], newSandbox:false, sandbox:null});
+  await until(async () => (await send('WebDriver:ExecuteScript', {script:'return !document.querySelector(".webextension-popup-browser")?.closest("panel") || document.querySelector(".webextension-popup-browser").closest("panel").state === "closed";', args:[], newSandbox:false, sandbox:null})).value, 'Closed Firefox toolbar popup');
+  await send('Marionette:SetContext', {value:'content'});
   await navigate('/');
+  await until(() => evaluate('document.hasFocus()'), 'Focused Firefox passkey page');
   const registration = await evaluate('passkeyFixture.create()');
   verifyRegistration(registration, fixture.origin);
   const assertion = await evaluate('passkeyFixture.get()');
