@@ -15,6 +15,7 @@ Requires: glibc >= 2.36
 Requires: libgcc, fontconfig, libglvnd-glx
 Requires: libX11, libXcursor, libXi, libXrandr, libxcb, libxkbcommon
 Requires: libwayland-client.so.0()(64bit)
+Requires: libEGL.so.1()(64bit), libwayland-egl.so.1()(64bit)
 
 %description
 Desktop vault, browser integration, and an optional systemd user service.

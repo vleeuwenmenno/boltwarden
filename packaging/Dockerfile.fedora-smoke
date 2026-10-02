@@ -8,9 +8,9 @@ RUN test -f /usr/lib/systemd/user/boltwarden.service && \
     rpm -V boltwarden
 RUN python3 - <<'PY'
 import ctypes, json, struct, subprocess
-for library in ['libfontconfig.so.1', 'libGL.so.1', 'libX11.so.6', 'libXcursor.so.1',
+for library in ['libfontconfig.so.1', 'libGL.so.1', 'libEGL.so.1', 'libX11.so.6', 'libXcursor.so.1',
                 'libXi.so.6', 'libXrandr.so.2', 'libxcb.so.1', 'libxkbcommon.so.0',
-                'libwayland-client.so.0']:
+                'libwayland-client.so.0', 'libwayland-egl.so.1']:
     ctypes.CDLL(library)
 result = subprocess.run(['/usr/bin/boltwarden', 'native-host'], input=b'', capture_output=True, check=True)
 messages, data = [], result.stdout
