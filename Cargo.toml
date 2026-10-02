@@ -21,7 +21,7 @@ pbkdf2 = "0.12"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 aes = "0.8"
-cbc = { version = "0.1", features = ["alloc"] }
+cbc = { version = "0.2", features = ["alloc"] }
 hmac = "0.12"
 hkdf = "0.12"
 tokio = { version = "1", features = ["rt", "time", "macros"] }
