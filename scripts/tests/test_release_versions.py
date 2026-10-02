@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -14,6 +15,13 @@ from release_versions import artifact_names, package_versions
 
 
 class ReleaseVersionsTests(unittest.TestCase):
+    def test_release_names_use_only_github_safe_characters(self):
+        names = artifact_names('1.0.0-rc.1', '0.5.6')
+        self.assertIn('boltwarden_1.0.0-rc.1_amd64.deb', names)
+        self.assertIn('boltwarden_1.0.0-rc.1_arm64.deb', names)
+        for name in names:
+            self.assertIsNotNone(re.fullmatch(r'[A-Za-z0-9_.-]+', name), name)
+
     def test_stable_and_rc_package_versions(self):
         self.assertEqual(package_versions('1.0.0'), ('1.0.0', '1.0.0'))
         self.assertEqual(package_versions('1.0.0-rc.1'), ('1.0.0~rc.1', '1.0.0rc1'))

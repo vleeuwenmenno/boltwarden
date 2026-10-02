@@ -118,7 +118,7 @@ Description: Unofficial Linux desktop client for Bitwarden and Vaultwarden
  Includes browser integration and an optional systemd user service.
  Run boltwarden-setup as your desktop user to enable autostart.
 ''')
-        target = output / f'boltwarden_{deb_version}_{deb_arch}.deb'
+        target = output / f'boltwarden_{version}_{deb_arch}.deb'
         subprocess.run(['dpkg-deb', '--root-owner-group', '--build', str(root), str(target)], check=True)
         artifacts.append(target)
         shutil.rmtree(debian)

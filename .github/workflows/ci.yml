@@ -142,3 +142,5 @@ jobs:
           gh release edit "$RELEASE_TAG" --prerelease="$prerelease" \
             --title "Boltwarden $version" --notes-file "docs/release-notes-${version}.md"
           gh release upload "$RELEASE_TAG" dist/* --clobber
+          gh release download "$RELEASE_TAG" --dir downloaded-release
+          python3 scripts/check-release-artifacts.py downloaded-release
