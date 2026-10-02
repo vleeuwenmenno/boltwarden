@@ -623,7 +623,7 @@ dependencies = [
  "aes 0.8.4",
  "anyhow",
  "argon2",
- "base64 0.22.1",
+ "base64 0.23.1",
  "cbc",
  "data-encoding",
  "eframe",
