@@ -3,7 +3,7 @@ FROM rust:1.98.1-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libfontconfig1-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
     libx11-dev libxcursor-dev libxi-dev libxrandr-dev libxcb1-dev \
-    dbus pkg-config python3 zstd && rm -rf /var/lib/apt/lists/*
+    dbus pkg-config python3 zstd rpm && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src

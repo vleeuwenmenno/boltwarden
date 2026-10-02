@@ -1,0 +1,27 @@
+FROM fedora:44
+COPY *.rpm /tmp/
+RUN dnf install -y /tmp/*.rpm python3 && dnf clean all
+RUN test -f /usr/lib/systemd/user/boltwarden.service && \
+    test -f /usr/share/licenses/boltwarden/LICENSE && \
+    test -x /usr/bin/boltwarden-setup && \
+    test -z "$(rpm -q --scripts boltwarden)" && \
+    rpm -V boltwarden
+RUN python3 - <<'PY'
+import ctypes, json, struct, subprocess
+for library in ['libfontconfig.so.1', 'libGL.so.1', 'libEGL.so.1', 'libX11.so.6', 'libXcursor.so.1',
+                'libXi.so.6', 'libXrandr.so.2', 'libxcb.so.1', 'libxkbcommon.so.0',
+                'libwayland-client.so.0', 'libwayland-egl.so.1']:
+    ctypes.CDLL(library)
+result = subprocess.run(['/usr/bin/boltwarden', 'native-host'], input=b'', capture_output=True, check=True)
+messages, data = [], result.stdout
+while data:
+    length = struct.unpack('=I', data[:4])[0]
+    messages.append(json.loads(data[4:4+length]))
+    data = data[4+length:]
+assert messages[0]['type'] == 'HostContext', messages
+assert messages[1]['code'] == 'DaemonUnavailable', messages
+assert subprocess.check_output(['rpm', '--eval', '%{lua:print(rpm.vercmp("1.0.0~rc.1", "1.0.0"))}'], text=True).strip() == '-1'
+print('Fedora dependency resolution, installed native host, and RC version ordering passed')
+PY
+RUN dnf remove -y boltwarden && test ! -e /usr/bin/boltwarden && \
+    test ! -e /usr/lib/systemd/user/boltwarden.service

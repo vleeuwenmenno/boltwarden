@@ -57,6 +57,8 @@ jobs:
             --output type=local,dest=dist .
       - name: Test Debian installation, native-host startup, and removal
         run: docker buildx build --file packaging/Dockerfile.smoke dist
+      - name: Test Fedora installation, native-host startup, and removal
+        run: docker buildx build --file packaging/Dockerfile.fedora-smoke dist
       - name: Validate package contents and checksums
         run: |
           cd dist

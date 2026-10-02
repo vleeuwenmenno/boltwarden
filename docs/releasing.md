@@ -10,12 +10,20 @@ matching `v*`, and manual dispatches.
 
 The native `ubuntu-24.04` and `ubuntu-24.04-arm` jobs build in a Debian 12 container
 with Rust 1.98.1. Each runs Rust tests, then produces a release tarball, `.deb`,
-and `.pkg.tar.zst` with SHA-256 checksums. Each CPU job then installs the Debian
-package in a clean container, checks native-host startup, and removes the package.
+`.pkg.tar.zst`, and `.rpm` with SHA-256 checksums. Each CPU job then installs the
+Debian and Fedora packages in clean Debian 12 and Fedora 44 containers, checks
+native-host startup, and removes each package. Fedora also checks RPM integrity,
+RC version ordering, dynamically loaded desktop libraries, and the absence of
+package scripts that could enable services. Full graphical-session testing is
+still a separate manual check.
 These are dynamically linked Linux binaries. They require glibc 2.36+
 and the desktop libraries listed in package metadata (Debian 12+ or Ubuntu 24.04+
 are suitable baselines). ARM64 package architecture is `arm64` on Debian and
-`aarch64` on Arch Linux ARM. Arch Linux itself targets x86_64.
+`aarch64` on Arch Linux ARM and Fedora. Arch Linux itself targets x86_64.
+RPM support was added after the published RC1. New builds attach both RPMs and
+their checksums; the existing RC1 release remains unchanged. Fedora 44 is the
+tested RPM baseline. Other RPM distributions, including older RHEL/CentOS
+systems, are not covered by these tests and may not meet the glibc requirement.
 
 A separate container checks npm dependencies, types, unit tests, playground tests,
 and real Chromium/Firefox integration fixtures, then exports Chrome/Firefox ZIPs
@@ -42,6 +50,8 @@ Supported desktop versions are `X.Y.Z` and `X.Y.Z-rc.N`, with N starting at 1.
 Tarballs retain the desktop version; Debian maps RCs to `X.Y.Z~rc.N` and Arch to
 `X.Y.ZrcN-1` so final releases sort newer. Package-order regression tests exercise
 `dpkg` and `vercmp` when those tools are installed.
+RPM also uses `X.Y.Z~rc.N` internally, with Release `1`; its download filename is
+`boltwarden-X.Y.Z-rc.N-1.x86_64.rpm` (or `aarch64`) to avoid GitHub rewriting `~`.
 Debian download filenames retain the desktop version (for example,
 `boltwarden_1.0.0-rc.1_amd64.deb`), while their internal Version field uses
 `1.0.0~rc.1`. GitHub rewrites `~` in asset names, so it must not appear in filenames.
@@ -56,7 +66,7 @@ would restore the old names; use this corrected packaging workflow for later tag
 A release tag must equal `v` plus Cargo.toml's version. Chrome extension versions
 remain numeric; do not copy the desktop RC suffix into the extension manifest.
 Release notes must exist at `docs/release-notes-VERSION.md`. The release job checks
-all nine expected artifacts and their checksums, rejecting missing or extra files.
+all eleven expected artifacts and their checksums, rejecting missing or extra files.
 RC tags create drafts marked as prereleases; stable tags create ordinary drafts.
 Only after every job succeeds does the workflow create a **draft** GitHub release
 and attach both architectures’ binaries/packages, Chrome and Firefox ZIPs, the
@@ -73,18 +83,21 @@ make extension-check extension-test extension-zip extension-release-check
 python3 -m unittest discover -s scripts/tests
 # Same build as native CI; exports artifacts under dist/.
 make package
+# Installation checks for the native packages just built.
+docker buildx build -f packaging/Dockerfile.smoke dist
+docker buildx build -f packaging/Dockerfile.fedora-smoke dist
 # Full extension build and browser fixtures in the CI image.
 docker buildx build -f packaging/Dockerfile.extension --output type=local,dest=dist .
 ```
 
 Cargo-audit 0.22.2 must be installed for `make security`; it needs network access to
 RustSec/crates.io. npm audit needs its registry. Docker builds need access to image
-registries, Debian repositories, crates.io, and npm. Local tests require D-Bus and
+registries, Debian/Fedora repositories, crates.io, and npm. Local tests require D-Bus and
 permission to open local sockets. Test fixtures run with one Rust test thread.
 
 For a native distro-built ELF binary, `python3 scripts/package-release.py --binary
 /path/to/boltwarden` packages without recompiling. It requires Python 3.11+, readelf,
-dpkg-deb and zstd. It detects architecture from the ELF header and refuses binaries
+dpkg-deb, rpmbuild, and zstd. It detects architecture from the ELF header and refuses binaries
 linked to Nix store paths. Use Docker for release binaries to enforce the ABI baseline.
 Checksums use basenames: run `sha256sum --check ./*.sha256` from inside `dist`.
 
@@ -92,6 +105,11 @@ Checksums use basenames: run `sha256sum --check ./*.sha256` from inside `dist`.
 
 On a clean Debian/Ubuntu machine, install the matching `.deb` with `sudo apt install
 ./boltwarden_*.deb`. On Arch/Arch Linux ARM, use `sudo pacman -U ./boltwarden-*.pkg.tar.zst`.
+On Fedora, use `sudo dnf install ./boltwarden-*.rpm` with the matching CPU package.
+DNF resolves dependencies from Fedora's repositories. RPMs are currently unsigned
+and distributed with SHA-256 checksums; there is no Boltwarden DNF/YUM repository
+or automatic package update channel. Installing a newer downloaded RPM uses the
+same command. Remove it with `sudo dnf remove boltwarden`.
 Package installation installs the user unit but does not start the app or ask root
 which user's session to modify. As the desktop user, run `boltwarden-setup` to get
 an explicit yes/no prompt for graphical-login autostart. For automated opt-in use
