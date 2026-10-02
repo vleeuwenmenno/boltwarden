@@ -184,12 +184,39 @@ try {
   verifyAssertion(legacyOptionsAssertion, registration, fixture.origin);
   assert.deepEqual(legacyOptionsAssertion.extensions, {}, 'RP-scoped passkeys must not claim use of the legacy AppID');
   verifyAssertion(await evaluate('passkeyFixture.getCrossRealm()'), registration, fixture.origin);
-  // Repeated same-URL navigation catches Firefox's independently rounded clocks.
+  // Firefox may report a request before navigationStart (even negative timing
+  // offsets). Keep the production fail-closed binding: an uncertain document
+  // must use native WebAuthn without contacting the vault. Cancel that native
+  // prompt in this headless fixture rather than waiting for a hardware key.
+  const assertionRequests = async () => (await readFile(join(directory, 'pairing.json.log'), 'utf8'))
+    .split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(entry => entry.type === 'PasskeyGet').length;
+  let handledDenials = 0, safeFallbacks = 0;
   for (let attempt = 0; attempt < navigationRepeats; attempt++) {
     await navigate('/deny');
-    const denial = await evaluate('passkeyFixture.get().then(() => ({name:"unexpected"}), error => ({name:error.name, message:error.message, logs:window.fixtureLogs, timing:performance.getEntriesByType("navigation")[0].toJSON()}))');
-    assert.equal(denial.name, 'NotAllowedError', JSON.stringify(denial));
+    const before = await assertionRequests();
+    const denial = await evaluate(`(async () => {
+      const controller = new AbortController();
+      const fellBack = () => window.fixtureLogs.some(line => line[0] === '[Boltwarden] Passkey fallback:' && line[1] === 'document-policy-or-visibility');
+      const timer = setInterval(() => { if (fellBack()) controller.abort(); }, 10);
+      try {
+        await passkeyFixture.get({}, controller.signal);
+        return {name:'unexpected'};
+      } catch (error) {
+        return {name:error.name, fallback:fellBack(), logs:window.fixtureLogs};
+      } finally { clearInterval(timer); }
+    })()`);
+    if (denial.fallback) {
+      assert.equal(denial.name, 'AbortError', JSON.stringify(denial));
+      assert.equal(await assertionRequests(), before, 'Uncertain document policy must never request a vault assertion');
+      safeFallbacks++;
+    } else {
+      assert.equal(denial.name, 'NotAllowedError', JSON.stringify(denial));
+      assert.equal(await assertionRequests(), before + 1, 'Known policy must reach the synthetic denial');
+      handledDenials++;
+    }
   }
+  assert(handledDenials > 0, 'Same-URL navigation must still exercise native-host denial, not only fallbacks');
+  console.log(`Firefox navigation: ${handledDenials} explicit denials, ${safeFallbacks} safe browser fallbacks without vault requests.`);
   await navigate('/slow');
   await evaluate('(passkeyFixture.startGet(), true)');
   await until(async () => (await readFile(join(directory, 'pairing.json.log'), 'utf8')).split('\n')
