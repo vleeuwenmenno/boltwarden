@@ -87,26 +87,24 @@ pub fn draw_auth(root: &mut egui::Ui, state: &mut AuthState) -> Option<AuthActio
     if state.has_saved_session {
         draw_unlock_header(root, state, &mut action);
     } else {
-        egui::Panel::top("header")
-            .frame(widgets::header_frame())
-            .show(root, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(t.icon("\u{f023}", "🔐"))
-                            .size(t.title())
-                            .color(t.accent),
-                    );
-                    ui.add_space(6.0);
-                    ui.label(
-                        RichText::new("Bitwarden")
-                            .size(t.title())
-                            .color(t.text_strong),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new("Log in to your vault").color(t.text_faint));
-                    });
+        widgets::header(root, "header", |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(t.icon("\u{f023}", "🔐"))
+                        .size(t.title())
+                        .color(t.accent),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("Bitwarden")
+                        .size(t.title())
+                        .color(t.text_strong),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new("Log in to your vault").color(t.text_faint));
                 });
             });
+        });
     }
 
     egui::CentralPanel::default()
@@ -132,47 +130,45 @@ pub fn draw_auth(root: &mut egui::Ui, state: &mut AuthState) -> Option<AuthActio
 
 fn draw_unlock_header(root: &mut egui::Ui, state: &mut AuthState, action: &mut Option<AuthAction>) {
     let t = theme();
-    egui::Panel::top("header")
-        .frame(widgets::header_frame())
-        .show(root, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(t.icon("\u{f023}", "🔐"))
-                        .size(t.input())
-                        .color(t.accent),
-                );
-                ui.add_space(6.0);
-                let trailing = 96.0;
-                let id = egui::Id::new("saved-session-password");
-                let hint = if state.email.trim().is_empty() {
-                    "Master password".to_string()
-                } else {
-                    format!("Master password for {}", state.email.trim())
-                };
-                let response = ui.add_sized(
-                    [(ui.available_width() - trailing).max(120.0), 32.0],
-                    egui::TextEdit::singleline(&mut state.password)
-                        .id(id)
-                        .font(t.font(t.input()))
-                        .text_color(t.text_strong)
-                        .hint_text(RichText::new(hint).color(t.text_faint))
-                        .password(true)
-                        .frame(egui::Frame::NONE)
-                        .vertical_align(egui::Align::Center),
-                );
-                if state.focus_password {
-                    response.request_focus();
-                    state.focus_password = false;
+    widgets::header(root, "header", |ui| {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(t.icon("\u{f023}", "🔐"))
+                    .size(t.input())
+                    .color(t.accent),
+            );
+            ui.add_space(6.0);
+            let trailing = 96.0;
+            let id = egui::Id::new("saved-session-password");
+            let hint = if state.email.trim().is_empty() {
+                "Master password".to_string()
+            } else {
+                format!("Master password for {}", state.email.trim())
+            };
+            let response = ui.add_sized(
+                [(ui.available_width() - trailing).max(120.0), 32.0],
+                egui::TextEdit::singleline(&mut state.password)
+                    .id(id)
+                    .font(t.font(t.input()))
+                    .text_color(t.text_strong)
+                    .hint_text(RichText::new(hint).color(t.text_faint))
+                    .password(true)
+                    .frame(egui::Frame::NONE)
+                    .vertical_align(egui::Align::Center),
+            );
+            if state.focus_password {
+                response.request_focus();
+                state.focus_password = false;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if state.in_flight {
+                    ui.add(egui::Spinner::new().color(t.text_muted));
+                } else if widgets::button(ui, "Unlock", true, state.can_submit()).clicked() {
+                    *action = Some(AuthAction::Login);
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if state.in_flight {
-                        ui.add(egui::Spinner::new().color(t.text_muted));
-                    } else if widgets::button(ui, "Unlock", true, state.can_submit()).clicked() {
-                        *action = Some(AuthAction::Login);
-                    }
-                });
             });
         });
+    });
 }
 
 fn draw_unlock_body(ui: &mut egui::Ui, state: &mut AuthState) {

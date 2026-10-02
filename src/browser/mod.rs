@@ -1,4 +1,5 @@
 //! Bounded, independently authenticated browser transport.
+#[cfg_attr(windows, path = "install_windows.rs")]
 pub mod install;
 pub mod native_host;
 pub mod pairing;
@@ -15,8 +16,8 @@ use protocol::{EventEnvelope, RequestEnvelope, ResponseEnvelope, VERSION};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::Shutdown;
-use std::os::fd::AsRawFd;
-use std::os::unix::net::UnixStream;
+
+use crate::platform::ipc::Stream as UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -177,7 +178,10 @@ impl BrowserHub {
         handler: Arc<dyn BrowserHandler>,
         directory: &std::path::Path,
     ) -> io::Result<(Self, UnixStream)> {
+        #[cfg(unix)]
         std::fs::create_dir_all(directory)?;
+        #[cfg(windows)]
+        crate::platform::windows::private_dir(directory)?;
         let (client, server) = UnixStream::pair()?;
         client.set_read_timeout(Some(Duration::from_secs(2)))?;
         let inner = Arc::new(Inner {
@@ -202,7 +206,7 @@ impl BrowserHub {
                 "Browser socket is already active",
             ));
         }
-        let listener = crate::unix_socket::bind_private(&path)?;
+        let listener = crate::platform::ipc::bind_private(&path)?;
         listener.set_nonblocking(true)?;
         let inner = Arc::new(Inner {
             path,
@@ -299,7 +303,7 @@ impl BrowserHub {
         for connection in self.connections() {
             connection.close();
         }
-        let _ = crate::unix_socket::remove_stale_socket(&self.inner.path);
+        let _ = crate::platform::ipc::remove_stale_socket(&self.inner.path);
     }
     fn connections(&self) -> Vec<Arc<Connection>> {
         self.inner
@@ -311,35 +315,11 @@ impl BrowserHub {
 }
 
 pub fn socket_path() -> io::Result<PathBuf> {
-    Ok(crate::unix_socket::runtime_dir()?.join(SOCKET_NAME))
+    Ok(crate::platform::ipc::runtime_dir()?.join(SOCKET_NAME))
 }
 
 fn peer_pid(socket: &UnixStream) -> io::Result<u32> {
-    let mut credentials = libc::ucred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    let rc = unsafe {
-        libc::getsockopt(
-            socket.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&mut credentials as *mut libc::ucred).cast(),
-            &mut length,
-        )
-    };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if credentials.uid != crate::unix_socket::current_uid() || credentials.pid <= 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Browser peer is not allowed",
-        ));
-    }
-    Ok(credentials.pid as u32)
+    crate::platform::ipc::peer_pid(socket)
 }
 
 fn accept(inner: &Arc<Inner>, socket: UnixStream) -> io::Result<()> {
@@ -942,10 +922,10 @@ fn acquire_job(inner: &Arc<Inner>, connection: &Arc<Connection>, id: &str) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::ipc::Listener as UnixListener;
     use p256::ecdsa::{Signature, SigningKey};
     use p256::pkcs8::EncodePublicKey;
     use signature::Signer;
-    use std::os::unix::net::UnixListener;
 
     struct Handler {
         approvals: AtomicUsize,
@@ -975,7 +955,10 @@ mod tests {
         fn new() -> Self {
             let directory = std::env::temp_dir()
                 .join(format!("boltwarden-browser-test-{}", uuid::Uuid::new_v4()));
+            #[cfg(unix)]
             std::fs::create_dir(&directory).unwrap();
+            #[cfg(windows)]
+            crate::platform::windows::private_dir(&directory).unwrap();
             let path = directory.join("browser.sock");
             let listener = UnixListener::bind(&path).unwrap();
             let client = UnixStream::connect(&path).unwrap();

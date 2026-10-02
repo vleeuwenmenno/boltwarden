@@ -94,6 +94,12 @@ fn passkey_verification(
 
 /// Process metadata helps identify an unexpected pairing prompt, but only the
 /// approved public key authenticates the extension profile.
+#[cfg(windows)]
+fn browser_process_description(host_pid: u32) -> String {
+    crate::platform::windows::browser_description(host_pid)
+}
+
+#[cfg(unix)]
 fn browser_process_description(host_pid: u32) -> String {
     let parent = std::fs::read_to_string(format!("/proc/{host_pid}/status"))
         .ok()

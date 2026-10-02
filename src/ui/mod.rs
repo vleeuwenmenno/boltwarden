@@ -11,3 +11,5 @@ pub mod theme;
 pub mod two_factor;
 pub mod vault;
 pub mod widgets;
+
+pub mod shortcut_setup;

@@ -37,6 +37,41 @@ pub struct SearchResult {
 }
 
 impl AppBackend {
+    pub fn shortcut_status(&self) -> Result<crate::shortcut::Status, String> {
+        match self {
+            Self::Remote(client) => match client.call(&RpcRequest::GetShortcut)? {
+                RpcResponse::Shortcut(result) => result,
+                _ => Err("Unexpected shortcut response".into()),
+            },
+            _ => Ok(crate::shortcut::Status::unavailable(
+                "Demo: shortcut changes are not applied",
+            )),
+        }
+    }
+
+    pub fn set_shortcut(
+        &self,
+        value: Option<crate::shortcut::Shortcut>,
+    ) -> Result<crate::shortcut::Status, String> {
+        match self {
+            Self::Remote(client) => match client.call(&RpcRequest::SetShortcut(value))? {
+                RpcResponse::Shortcut(result) => result,
+                _ => Err("Unexpected shortcut response".into()),
+            },
+            _ => Err("Shortcut changes require the running daemon".into()),
+        }
+    }
+
+    pub fn shortcut_binding(&self, value: crate::shortcut::Shortcut) -> Result<String, String> {
+        match self {
+            Self::Remote(client) => match client.call(&RpcRequest::ShortcutBinding(value))? {
+                RpcResponse::ShortcutBinding(result) => result,
+                _ => Err("Unexpected shortcut response".into()),
+            },
+            _ => crate::shortcut::binding(&value),
+        }
+    }
+
     pub fn browser_approval(&self) -> Option<crate::browser_approval::BrowserApprovalRequest> {
         match self {
             Self::Remote(client) => match client.call(&RpcRequest::GetBrowserApproval) {
@@ -784,8 +819,8 @@ impl std::error::Error for BackendError {}
 #[cfg(test)]
 mod browser_management_tests {
     use super::*;
+    use crate::platform::ipc::Listener as UnixListener;
     use std::io::{Read, Write};
-    use std::os::unix::net::UnixListener;
 
     #[test]
     fn paired_browser_list_preserves_daemon_errors_and_rejects_unexpected_responses() {
@@ -798,13 +833,28 @@ mod browser_management_tests {
                 RpcResponse::HasSession(true),
             ] {
                 let (mut stream, _) = listener.accept().unwrap();
+                #[cfg(unix)]
                 let mut request = String::new();
+                #[cfg(unix)]
                 stream.read_to_string(&mut request).unwrap();
+                #[cfg(windows)]
+                let request = {
+                    let mut length = [0; 4];
+                    stream.read_exact(&mut length).unwrap();
+                    let mut bytes = vec![0; u32::from_be_bytes(length) as usize];
+                    stream.read_exact(&mut bytes).unwrap();
+                    String::from_utf8(bytes).unwrap()
+                };
                 let request: crate::rpc::RpcEnvelope = serde_json::from_str(&request).unwrap();
                 assert!(matches!(request.request, RpcRequest::ListPairedBrowsers));
+                let payload = serde_json::to_vec(&response).unwrap();
+                #[cfg(windows)]
                 stream
-                    .write_all(&serde_json::to_vec(&response).unwrap())
+                    .write_all(&(payload.len() as u32).to_be_bytes())
                     .unwrap();
+                stream.write_all(&payload).unwrap();
+                #[cfg(windows)]
+                stream.read_exact(&mut [0; 1]).unwrap();
             }
         });
         let backend = AppBackend::remote(RpcClient::new(path.clone(), "test-token".into()));
@@ -818,6 +868,7 @@ mod browser_management_tests {
             "Unexpected paired browsers response"
         );
         server.join().unwrap();
+        #[cfg(unix)]
         std::fs::remove_file(path).unwrap();
         assert!(
             backend

@@ -5,7 +5,8 @@
 [![Linux x86_64 and ARM64](https://img.shields.io/badge/Linux-x86__64%20%7C%20ARM64-1793d1?logo=linux&logoColor=white)](#install)
 [![License: MIT with Commons Clause](https://img.shields.io/badge/license-MIT%20%2B%20Commons%20Clause-f59e0b)](LICENSE)
 
-An unofficial Linux desktop app for Vaultwarden and Bitwarden vaults: a quick
+An unofficial desktop app for Vaultwarden and Bitwarden vaults, with Linux support
+and an unsigned Windows 11 x64 preview: a quick
 access popup plus a full vault window. It is not affiliated with Bitwarden or the
 Vaultwarden project.
 
@@ -62,7 +63,9 @@ and [release notes](docs/release-notes-1.0.0-rc.1.md) before installing.
 
 Choose your platform and browser from the assets on the
 [Releases page](https://github.com/vleeuwenmenno/boltwarden/releases).
-Desktop packages support Linux x86_64 and ARM64. Browser extensions are separate
+Desktop packages support Linux x86_64 and ARM64. Windows 11 x64 preview builds
+provide an installer and ZIP containing both required executables; see
+[Windows setup](docs/windows.md). Browser extensions are separate
 downloads and require the Boltwarden desktop app:
 
 | Browser | Release asset |
@@ -224,8 +227,34 @@ Layout is stored separately from shared preferences in
 `$XDG_CONFIG_HOME/boltwarden/window-layout.json` (normally
 `~/.config/boltwarden/window-layout.json`).
 
-Wayland apps can't grab global shortcuts, so bind the commands in your compositor.
-For Hyprland:
+Drag the logo or empty header space to move quick access. Search fields and header
+buttons keep their normal text-selection and click behavior.
+
+Open **Settings → General → Quick access shortcut** to record a shortcut or choose
+its modifiers and key, then select **Apply shortcut**. **Clear shortcut** removes
+the saved binding. No global shortcut is enabled by default.
+
+On Windows, the shortcut works while Boltwarden is running, including when the
+vault is locked. The installer offers optional start at sign-in. Conflicting or
+reserved shortcuts are rejected without removing the previous active shortcut.
+
+On Hyprland, Apply creates `boltwarden-shortcut.lua` (or `.conf`) beside the
+standard user configuration, backs up the main file, and adds an include. It checks
+existing bindings before reloading and restores the files if validation fails.
+Existing bindings are preserved, including manually configured Boltwarden bindings;
+remove those yourself before assigning the same shortcut in Settings. Clear leaves
+the include and an empty managed file. Custom config paths and symlinked configs
+require manual setup. **Copy binding** provides a snippet for manual configuration.
+Other desktops can bind `boltwarden toggle` through their own shortcut settings.
+
+For manual setup with Hyprland's Lua configuration:
+
+```lua
+hl.bind("SUPER + P", hl.dsp.exec_cmd("boltwarden toggle"))
+hl.bind("SUPER + SHIFT + P", hl.dsp.exec_cmd("boltwarden window"))
+```
+
+For Hyprland versions using the `.conf` configuration format:
 
 ```ini
 bind = SUPER, P, exec, boltwarden toggle

@@ -21,8 +21,10 @@ against root or malware that can read or control that account. A compromised
 paired extension can request credentials from an unlocked vault. A website receives
 credentials intentionally filled into it, so locking cannot erase those values.
 
-The daemon uses private Unix sockets, peer credentials, a separate desktop RPC
-token, and browser pairing proofs bound to a nonce and native-host PID. Browser
+On Linux, the daemon uses private Unix sockets and peer credentials. The Windows
+preview uses local-only named pipes with private ACLs, user/session identity
+checks, and kernel-reported peer PIDs. Both platforms use a separate desktop RPC
+token and browser pairing proofs bound to a nonce and native-host PID. Browser
 requests are bounded, and lock/revoke/navigation races invalidate pending work.
 Item reprompts and risky fills require explicit approval. Passkey origin and RP-ID
 validation, user verification, and cancellation are enforced separately from the
@@ -60,3 +62,18 @@ Run `make security` to check current dependency advisories. The configured CI al
 runs Rust tests and both browsers' integration fixtures before creating release
 artifacts. See [release preparation](docs/releasing.md) for verification and manual
 store/desktop checks still required before publishing.
+
+## Windows preview
+
+Windows storage uses user/LocalSystem-only DACLs under Local AppData and rejects reparse-point
+storage paths. Encryption formats and browser pairing policy are shared with
+Linux. Windows copies opt out of OS clipboard history and cloud synchronization;
+expiry clears only the clipboard contents still owned by Boltwarden. This does
+not prevent other software running as the same user from reading copied data.
+
+Windows session monitoring fails closed when configured automatic locking cannot
+be enforced. Capture exclusion is best effort through Windows display-affinity
+APIs. Linux's process/core-dump restrictions have no equivalent guarantee in this
+preview: Windows administrators, debugging tools, and system crash-dump policies
+remain part of the trusted operating-system boundary. Windows SSH agent support
+is deliberately unavailable. Windows preview binaries and installers are unsigned.

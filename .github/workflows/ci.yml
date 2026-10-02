@@ -70,6 +70,56 @@ jobs:
           name: linux-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
+  windows:
+    name: windows-x86_64
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+      CARGO_TERM_COLOR: always
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust tools
+        run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Test Windows platform and shared vault behavior
+        run: cargo +1.98.1 test --locked --target x86_64-pc-windows-msvc --lib -- --test-threads=1
+      - name: Generate notices and build both executables
+        shell: pwsh
+        run: |
+          rustup default 1.98.1
+          python scripts/third-party-notices.py rust THIRD_PARTY_NOTICES.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release --target x86_64-pc-windows-msvc --bins
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install pinned installer compiler
+        shell: pwsh
+        run: |
+          $compiler = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
+          Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' -OutFile $compiler
+          $expected = '9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732'
+          if ((Get-FileHash $compiler -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+            throw 'Inno Setup compiler checksum mismatch'
+          }
+          $destination = Join-Path $env:RUNNER_TEMP 'InnoSetup'
+          $process = Start-Process -FilePath $compiler -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', "/DIR=`"$destination`"") -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Inno Setup installation failed: $($process.ExitCode)" }
+          "BOLTWARDEN_ISCC=$destination\ISCC.exe" >> $env:GITHUB_ENV
+      - name: Package unsigned preview and check PE runtime dependencies
+        shell: pwsh
+        run: |
+          $env:SOURCE_DATE_EPOCH = git log -1 --format=%ct
+          python scripts/package-windows.py --binary-dir target/x86_64-pc-windows-msvc/release --iscc "$env:BOLTWARDEN_ISCC" --output dist
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test ZIP, installer, upgrade, registration, and uninstall
+        run: python scripts/windows-smoke.py dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-x86_64
+          path: dist/*
+          if-no-files-found: error
   extensions:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -105,7 +155,7 @@ jobs:
           if-no-files-found: error
   release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [security, linux, extensions]
+    needs: [security, linux, windows, extensions]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

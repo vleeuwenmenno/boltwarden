@@ -1311,6 +1311,10 @@ impl eframe::App for App {
             self.hide_quick_access(ctx);
         }
 
+        if self.search_state.shortcut_setup.open {
+            self.search_state.shortcut_setup.show(root, &self.backend);
+            return;
+        }
         self.icons.poll(ctx);
         if let Some(warning) = &self.security_warning {
             egui::Panel::top("security-warning").show(root, |ui| {
@@ -1688,6 +1692,7 @@ impl App {
                 self.settings.keep_offline_copy = keep;
                 self.save_and_apply_settings();
             }
+            SearchAction::OpenShortcutSetup => self.search_state.shortcut_setup.open(),
             SearchAction::SetKeyboardShortcuts(show) => {
                 self.settings.show_keyboard_shortcuts = show;
                 self.save_and_apply_settings();

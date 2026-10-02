@@ -49,7 +49,7 @@ class ReleaseVersionsTests(unittest.TestCase):
         version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['package']['version']
         extension = json.loads((ROOT / 'extension/package.json').read_text())['version']
         names = artifact_names(version, extension)
-        self.assertEqual(len(names), 11)
+        self.assertEqual(len(names), 13)
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             for name in names:

@@ -1,8 +1,8 @@
 //! Stdio reframer. HostContext is local transport evidence, never a daemon message.
 use super::{protocol, session};
+use crate::platform::ipc::Stream as UnixStream;
 use std::io::{self, Write};
 use std::net::Shutdown;
-use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 pub fn run_native_host() -> io::Result<()> {
@@ -18,7 +18,7 @@ pub fn run_native_host() -> io::Result<()> {
             return Ok(());
         }
     };
-    if crate::unix_socket::peer_uid(&socket)? != crate::unix_socket::current_uid() {
+    if crate::platform::ipc::peer_uid(&socket)? != crate::platform::ipc::current_uid() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "Daemon peer is not allowed",

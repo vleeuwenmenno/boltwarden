@@ -29,11 +29,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('ecosystem', choices=['rust', 'npm'])
     parser.add_argument('output', type=Path)
+    parser.add_argument('--target', help='Rust target triple when cross-compiling (defaults to the host)')
     args = parser.parse_args()
     entries = []
     if args.ecosystem == 'rust':
-        host = next(line.split(': ', 1)[1] for line in subprocess.check_output(['rustc', '-vV'], text=True).splitlines() if line.startswith('host: '))
-        metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--locked', '--format-version=1', '--filter-platform', host], cwd=ROOT))
+        target = args.target or next(line.split(': ', 1)[1] for line in subprocess.check_output(['rustc', '-vV'], text=True).splitlines() if line.startswith('host: '))
+        metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--locked', '--format-version=1', '--filter-platform', target], cwd=ROOT))
         for package in metadata['packages']:
             if package['source'] is None:
                 continue
@@ -55,11 +56,11 @@ def main():
         texts.append(f'\n{"=" * 72}\n{name} {version}\nDeclared license: {declared}\nSource: {repository}\n')
         files = list(license_files(directory))
         for file in files:
-            texts.append(f'\n--- {file.relative_to(directory)} ---\n{file.read_text(errors="replace")}\n')
+            texts.append(f'\n--- {file.relative_to(directory)} ---\n{file.read_text(encoding="utf-8", errors="replace")}\n')
         if not files:
             texts.append('\nNo separate license text supplied in this dependency package; consult its source.\n')
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(''.join(texts))
+    args.output.write_text(''.join(texts), encoding='utf-8')
     print(f'Collected notices for {len(entries)} {args.ecosystem} dependencies')
 
 

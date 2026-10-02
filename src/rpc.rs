@@ -4,16 +4,20 @@ use crate::model::{
     BwItem, BwItemDetail, Folder, HealthReport, ItemAction, ItemDraft, ItemState, SshAgentStatus,
     SshApprovalDecision, SshApprovalRequest, SshApprovalStatus, SyncStatus, TotpCode,
 };
-use crate::unix_socket;
+use crate::platform::ipc as unix_socket;
+use crate::platform::ipc::{Listener as UnixListener, Stream as UnixStream};
 use std::io::{self, Read, Write};
+#[cfg(unix)]
 use std::net::Shutdown;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 
 const SOCKET_NAME: &str = "boltwarden-rpc.sock";
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum RpcRequest {
+    GetShortcut,
+    SetShortcut(Option<crate::shortcut::Shortcut>),
+    ShortcutBinding(crate::shortcut::Shortcut),
     HasSession,
     SecurityWarning,
     Sync,
@@ -99,6 +103,8 @@ pub enum RpcRequest {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum RpcResponse {
+    Shortcut(Result<crate::shortcut::Status, String>),
+    ShortcutBinding(Result<String, String>),
     HasSession(bool),
     SecurityWarning(Option<String>),
     Synced(Result<SyncStatus, RpcError>),
@@ -184,6 +190,20 @@ impl RpcClient {
     pub fn call(&self, request: &RpcRequest) -> Result<RpcResponse, String> {
         let mut stream = self.write_request(request)?;
         let mut response = zeroize::Zeroizing::new(String::new());
+        #[cfg(windows)]
+        {
+            let mut length = [0u8; 4];
+            stream.read_exact(&mut length).map_err(|e| e.to_string())?;
+            let length = u32::from_be_bytes(length) as usize;
+            if length > 64 * 1024 * 1024 {
+                return Err("Daemon response is too large".into());
+            }
+            let mut bytes = zeroize::Zeroizing::new(vec![0u8; length]);
+            stream.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+            stream.write_all(&[1]).map_err(|e| e.to_string())?;
+            response.push_str(std::str::from_utf8(&bytes).map_err(|e| e.to_string())?);
+        }
+        #[cfg(not(windows))]
         stream
             .read_to_string(&mut response)
             .map_err(|e| format!("could not read daemon response: {e}"))?;
@@ -216,9 +236,14 @@ impl RpcClient {
             serde_json::to_vec(&envelope)
                 .map_err(|e| format!("could not encode daemon request: {e}"))?,
         );
+        #[cfg(windows)]
+        stream
+            .write_all(&(payload.len() as u32).to_be_bytes())
+            .map_err(|e| e.to_string())?;
         stream
             .write_all(&payload)
             .map_err(|e| format!("could not send daemon request: {e}"))?;
+        #[cfg(not(windows))]
         let _ = stream.shutdown(Shutdown::Write);
         Ok(stream)
     }
@@ -281,5 +306,42 @@ mod tests {
 
         assert_eq!(envelope.token, "secret");
         assert!(matches!(envelope.request, RpcRequest::GetItem { id } if id == "item"));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_transport_tests {
+    use super::*;
+    use std::time::Duration;
+    #[test]
+    fn windows_request_framing_authenticates_before_dispatch() {
+        for valid in [true, false] {
+            let (mut client, mut server) = UnixStream::pair().unwrap();
+            let request = serde_json::to_vec(&RpcEnvelope {
+                token: if valid { "expected" } else { "wrong" }.into(),
+                request: RpcRequest::HasSession,
+            })
+            .unwrap();
+            client
+                .write_all(&(request.len() as u32).to_be_bytes())
+                .unwrap();
+            client.write_all(&request).unwrap();
+            let result = crate::read_authenticated_request(&mut server, "expected");
+            assert_eq!(result.is_ok(), valid);
+        }
+    }
+    #[test]
+    fn windows_rejects_oversized_request_without_reading_its_body() {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        client
+            .write_all(&((MAX_REQUEST_BYTES + 1) as u32).to_be_bytes())
+            .unwrap();
+        let started = std::time::Instant::now();
+        assert!(
+            crate::read_authenticated_request(&mut server, "token")
+                .unwrap_err()
+                .contains("too large")
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

@@ -15,6 +15,39 @@ pub fn header_frame() -> egui::Frame {
         .inner_margin(egui::Margin::symmetric(16, 12))
 }
 
+/// Header background acts as a native window drag area. Child widgets keep their
+/// own input, so dragging search text or clicking header buttons still works.
+pub fn header<R>(
+    root: &mut Ui,
+    id: &'static str,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> egui::InnerResponse<R> {
+    egui::Panel::top(id)
+        .frame(egui::Frame::NONE)
+        .show(root, |ui| {
+            let contents =
+                ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::drag()), |ui| {
+                    header_frame()
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            add_contents(ui)
+                        })
+                        .inner
+                });
+            if contents
+                .response
+                .drag_started_by(egui::PointerButton::Primary)
+            {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+            contents
+                .response
+                .on_hover_cursor(egui::CursorIcon::Grab)
+                .on_hover_text("Drag to move");
+            contents.inner
+        })
+}
+
 pub fn body_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(theme().bg)

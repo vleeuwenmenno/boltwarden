@@ -53,7 +53,7 @@ pub fn options() -> eframe::NativeOptions {
                 "boltwarden-window"
             })
             .with_active(true),
-        ..Default::default()
+        ..crate::platform::native_options()
     }
 }
 
@@ -219,13 +219,16 @@ impl WindowApp {
         if crate::demo::enabled() {
             settings.obscure_screen_capture = false;
         }
-        if crate::screen_capture::available() && settings.obscure_screen_capture {
-            // Same protection as the popup; a failure only shows as a warning there.
-            std::thread::spawn(|| {
-                let _ = crate::screen_capture::apply(true);
+        let apply_capture = crate::screen_capture::available() && settings.obscure_screen_capture;
+        let mut app = Self::with_settings(backend, commands, settings);
+        if apply_capture {
+            app.settings_state.capture_pending = true;
+            app.spawn(|_| Reply::CapturePreference {
+                obscure: true,
+                result: crate::screen_capture::apply(true),
             });
         }
-        Self::with_settings(backend, commands, settings)
+        app
     }
 
     fn with_settings(
@@ -303,10 +306,13 @@ impl WindowApp {
             folder_edit: None,
         };
         if let Ok(mode) = std::env::var("BOLTWARDEN_DEMO") {
-            if mode == "settings" || mode == "licenses" {
+            if mode == "settings" || mode == "licenses" || mode == "shortcut" {
                 app.section = Section::Settings;
                 app.settings_licenses = mode == "licenses";
                 app.focus_search = false;
+                if mode == "shortcut" {
+                    app.settings_state.shortcut_setup.open();
+                }
             }
         }
         if crate::demo::starts_on_action_center() {
@@ -620,6 +626,10 @@ impl WindowApp {
                 if value != config::StartList::RecentlyUsed && !crate::demo::enabled() {
                     let _ = config::clear_item_usage();
                 }
+            }
+            SearchAction::OpenShortcutSetup => {
+                self.settings_state.shortcut_setup.open();
+                return;
             }
             SearchAction::SetKeepOfflineCopy(value) => self.settings.keep_offline_copy = value,
             SearchAction::SetKeyboardShortcuts(value) => {
@@ -1251,6 +1261,10 @@ impl eframe::App for WindowApp {
             if self.closing {
                 return;
             }
+        }
+        if self.settings_state.shortcut_setup.open {
+            self.settings_state.shortcut_setup.show(root, &self.backend);
+            return;
         }
         self.icons.poll(ctx);
         if let Some(warning) = &self.security_warning {
@@ -2452,7 +2466,19 @@ mod tests {
 
     #[test]
     fn splitter_drag_saves_on_release_and_restores_without_saving_viewport_clamps() {
-        use std::os::unix::fs::MetadataExt;
+        fn file_identity(path: &std::path::Path) -> u64 {
+            let metadata = std::fs::metadata(path).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                metadata.ino()
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                metadata.last_write_time()
+            }
+        }
 
         fn frame(app: &mut WindowApp, ctx: &Context, width: f32, events: Vec<egui::Event>) {
             let input = egui::RawInput {
@@ -2502,12 +2528,12 @@ mod tests {
             frame(&mut app, &ctx, 1180.0, vec![pointer(end, false)]);
             let saved = config::load_window_layout();
             assert!((saved.sidebar_width - 275.0).abs() < 1.0, "{saved:?}");
-            let inode = std::fs::metadata(&path).unwrap().ino();
+            let inode = file_identity(&path);
             frame(&mut app, &ctx, 1180.0, vec![]);
             frame(&mut app, &ctx, 1180.0, vec![pointer(end, true)]);
             frame(&mut app, &ctx, 1180.0, vec![pointer(end, false)]);
             assert_eq!(
-                std::fs::metadata(&path).unwrap().ino(),
+                file_identity(&path),
                 inode,
                 "unchanged widths are not rewritten"
             );
@@ -2548,7 +2574,7 @@ mod tests {
             frame(&mut reopened, &fresh_ctx, 1180.0, vec![pointer(end, false)]);
             let saved = config::load_window_layout();
             assert!((saved.list_width - 430.0).abs() < 1.0, "{saved:?}");
-            let inode = std::fs::metadata(&path).unwrap().ino();
+            let inode = file_identity(&path);
             frame(&mut reopened, &fresh_ctx, MIN_WINDOW_SIZE.x, vec![]);
             let list =
                 egui::containers::panel::PanelState::load(&fresh_ctx, "vault-list".into()).unwrap();
@@ -2560,7 +2586,7 @@ mod tests {
                 saved,
                 "close must not save viewport clamps"
             );
-            assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+            assert_eq!(file_identity(&path), inode);
         });
     }
 

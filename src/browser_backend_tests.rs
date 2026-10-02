@@ -6,6 +6,7 @@ use crate::browser::{BrowserHub, session};
 use crate::browser_approval::{BrowserApprovalDecision, BrowserApprovalRequest, BrowserApprovals};
 use crate::browser_backend::DaemonBrowserBackend;
 use crate::bw::{BwClient, BwError};
+use crate::platform::ipc::Stream as UnixStream;
 use crate::rpc::{RpcRequest, RpcResponse};
 use crate::ssh_agent::{SshApprovalService, SshKeyStore};
 use crate::{DaemonCommand, VaultState, interaction, uri_match};
@@ -16,7 +17,6 @@ use p256::pkcs8::EncodePublicKey;
 use serde_json::Value;
 use signature::Signer;
 use std::net::Shutdown;
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -464,6 +464,7 @@ fn browser_fill_revoke_and_disconnect_cancel_desktop_approval() {
 
 #[test]
 fn disabled_browser_integration_lists_and_revokes_durable_pairings_and_reports_store_errors() {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     let _serial = TEST_LOCK.lock().unwrap();
     crate::config::with_test_config(|root| {
@@ -475,8 +476,11 @@ fn disabled_browser_integration_lists_and_revokes_durable_pairings_and_reports_s
             state.browser_enabled = false;
         }
         let path = root.join("boltwarden/browsers.json");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::copy(h.directory.join("browsers.json"), &path).unwrap();
+        crate::config::write_private(
+            "browsers.json",
+            &std::fs::read(h.directory.join("browsers.json")).unwrap(),
+        )
+        .unwrap();
         let list = || {
             crate::handle_rpc_request(
                 RpcRequest::ListPairedBrowsers,
@@ -508,6 +512,7 @@ fn disabled_browser_integration_lists_and_revokes_durable_pairings_and_reports_s
         );
         assert!(matches!(list(), RpcResponse::PairedBrowsers(Ok(records)) if records.is_empty()));
         std::fs::write(&path, b"invalid JSON").unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(
             matches!(list(), RpcResponse::PairedBrowsers(Err(message)) if message.contains("Could not load paired browsers"))

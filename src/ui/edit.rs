@@ -141,48 +141,46 @@ pub fn draw_edit(
             .show(root, |ui| widgets::footer(ui, hints, status));
     }
 
-    egui::Panel::top("header")
-        .frame(widgets::header_frame())
-        .show(root, |ui| {
-            ui.horizontal(|ui| {
-                let back = ui.add_enabled(
-                    !state.saving,
-                    egui::Button::new(
-                        RichText::new(t.icon("\u{f060}", "←"))
-                            .size(t.title())
-                            .color(t.text_muted),
-                    )
-                    .frame(false),
-                );
-                if back.clicked() {
+    widgets::header(root, "header", |ui| {
+        ui.horizontal(|ui| {
+            let back = ui.add_enabled(
+                !state.saving,
+                egui::Button::new(
+                    RichText::new(t.icon("\u{f060}", "←"))
+                        .size(t.title())
+                        .color(t.text_muted),
+                )
+                .frame(false),
+            );
+            if back.clicked() {
+                action = cancel_action(state);
+            }
+            ui.label(
+                RichText::new(t.icon("\u{f044}", "✎"))
+                    .size(t.title())
+                    .color(t.accent),
+            );
+            ui.add_space(6.0);
+            let title = if state.creating {
+                "New item"
+            } else {
+                "Edit item"
+            };
+            ui.label(RichText::new(title).size(t.title()).color(t.text_strong));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let can_save = state.draft.is_some() && !state.saving;
+                if widgets::button(ui, "Save", true, can_save).clicked() {
+                    action = save_action(state);
+                }
+                if widgets::button(ui, "Cancel", false, !state.saving).clicked() {
                     action = cancel_action(state);
                 }
-                ui.label(
-                    RichText::new(t.icon("\u{f044}", "✎"))
-                        .size(t.title())
-                        .color(t.accent),
-                );
-                ui.add_space(6.0);
-                let title = if state.creating {
-                    "New item"
-                } else {
-                    "Edit item"
-                };
-                ui.label(RichText::new(title).size(t.title()).color(t.text_strong));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let can_save = state.draft.is_some() && !state.saving;
-                    if widgets::button(ui, "Save", true, can_save).clicked() {
-                        action = save_action(state);
-                    }
-                    if widgets::button(ui, "Cancel", false, !state.saving).clicked() {
-                        action = cancel_action(state);
-                    }
-                    if state.saving {
-                        ui.add(egui::Spinner::new().color(t.text_muted));
-                    }
-                });
+                if state.saving {
+                    ui.add(egui::Spinner::new().color(t.text_muted));
+                }
             });
         });
+    });
 
     egui::CentralPanel::default()
         .frame(widgets::body_frame())

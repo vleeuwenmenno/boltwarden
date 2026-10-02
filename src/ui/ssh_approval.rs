@@ -66,31 +66,28 @@ pub fn draw_ssh_approval(
             .show(root, |ui| widgets::footer(ui, hints, None));
     }
 
-    egui::Panel::top("header")
-        .frame(widgets::header_frame())
-        .show(root, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(t.icon("\u{f084}", "🔑"))
-                        .size(t.title())
-                        .color(t.warning),
-                );
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new("Allow SSH key use?")
-                        .size(t.title())
-                        .color(t.text_strong),
-                );
-                if let Some(request) = &request {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(format!("{}s", seconds_remaining(request)))
-                                .color(t.warning),
-                        );
-                    });
-                }
-            });
+    widgets::header(root, "header", |ui| {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(t.icon("\u{f084}", "🔑"))
+                    .size(t.title())
+                    .color(t.warning),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("Allow SSH key use?")
+                    .size(t.title())
+                    .color(t.text_strong),
+            );
+            if let Some(request) = &request {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(format!("{}s", seconds_remaining(request))).color(t.warning),
+                    );
+                });
+            }
         });
+    });
 
     egui::CentralPanel::default()
         .frame(widgets::body_frame().inner_margin(egui::Margin::symmetric(16, 10)))
