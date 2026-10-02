@@ -1,5 +1,5 @@
 # Build on Debian 12 so releases do not depend on the build host's newer glibc.
-FROM rust:1.95.0-bookworm AS build
+FROM rust:1.98.1-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libfontconfig1-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
     libx11-dev libxcursor-dev libxi-dev libxrandr-dev libxcb1-dev \
