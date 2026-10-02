@@ -9,9 +9,9 @@ use crate::uri_match::{self, LoginUri, UriMatchType};
 use aes::Aes256;
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
-use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
+use cbc::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
 use data_encoding::{BASE32, BASE32_NOPAD};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use pbkdf2::pbkdf2_hmac;
 use reqwest::Method;
 use reqwest::blocking::{Client, Response};
@@ -4105,7 +4105,7 @@ fn encrypt_bytes_with_iv(plaintext: &[u8], key: &[u8], iv: [u8; 16]) -> Result<S
     }
     let ciphertext = Aes256CbcEnc::new_from_slices(&key[..32], &iv)
         .map_err(|e| BwError::Parse(format!("invalid AES-CBC key/iv: {e}")))?
-        .encrypt_padded_vec_mut::<Pkcs7>(plaintext);
+        .encrypt_padded_vec::<Pkcs7>(plaintext);
     let mut mac = HmacSha256::new_from_slice(&key[32..64])
         .map_err(|e| BwError::Parse(format!("invalid HMAC key: {e}")))?;
     mac.update(&iv);
@@ -4196,7 +4196,7 @@ fn hkdf_expand(input_key_material: &[u8], info: &[u8]) -> Result<Vec<u8>, BwErro
 fn decrypt_aes_cbc(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>, BwError> {
     Aes256CbcDec::new_from_slices(key, iv)
         .map_err(|e| BwError::Parse(format!("invalid AES-CBC key/iv: {e}")))?
-        .decrypt_padded_vec_mut::<Pkcs7>(data)
+        .decrypt_padded_vec::<Pkcs7>(data)
         .map_err(|e| BwError::Parse(format!("AES-CBC decrypt failed: {e}")))
 }
 
@@ -4393,13 +4393,39 @@ mod tests {
     }
 
     #[test]
+    fn crypto_upgrade_preserves_independent_vault_and_login_vectors() {
+        // AES-CBC generated with OpenSSL; HMAC and PBKDF2 generated with Python
+        // hashlib using these synthetic inputs, independently of RustCrypto.
+        let encrypted = "2.AwMDAwMDAwMDAwMDAwMDAw==|oDN7t8ZYJUcsf/oP4gDwjg==|txuT+b+yqaxRdgj4ZRbnJV0irr6SvvPL+8HNpUU7eA0=";
+        assert_eq!(
+            decrypt_string(encrypted, &[7u8; 64]).unwrap().as_deref(),
+            Some("hello vault")
+        );
+        assert_eq!(
+            encrypt_bytes_with_iv(b"hello vault", &[7u8; 64], [3u8; 16]).unwrap(),
+            encrypted
+        );
+        let master =
+            derive_master_key("test-password", "alice@example.com", 0, 600_000, None, None)
+                .unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD.encode(&master),
+            "XT+zSHoH1i/NWBgaFlx/aDjzz7QFyDjU2zFkkVqxJpg="
+        );
+        assert_eq!(
+            password_hash("test-password", &master),
+            "/u2G6Z0FDvLsioyQifLiz3dBmtiypPfcwggN9xRdKkI="
+        );
+    }
+
+    #[test]
     fn decrypts_aes_cbc_hmac_enc_string() {
         let key = [7u8; 64];
         let iv = [3u8; 16];
         let plaintext = b"hello vault";
         let ciphertext = Aes256CbcEnc::new_from_slices(&key[..32], &iv)
             .unwrap()
-            .encrypt_padded_vec_mut::<Pkcs7>(plaintext);
+            .encrypt_padded_vec::<Pkcs7>(plaintext);
         let mut mac = HmacSha256::new_from_slice(&key[32..64]).unwrap();
         mac.update(&iv);
         mac.update(&ciphertext);
@@ -4448,7 +4474,7 @@ mod tests {
         let iv = [4u8; 16];
         let ciphertext = Aes256CbcEnc::new_from_slices(&key[..32], &iv)
             .unwrap()
-            .encrypt_padded_vec_mut::<Pkcs7>(b"secret");
+            .encrypt_padded_vec::<Pkcs7>(b"secret");
         let enc = format!(
             "2.{}|{}|{}",
             base64::engine::general_purpose::STANDARD.encode(iv),

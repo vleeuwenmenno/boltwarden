@@ -9,7 +9,7 @@ change its Git remote. CI runs on pull requests, pushes to `main`/`master`, tags
 matching `v*`, and manual dispatches.
 
 The native `ubuntu-24.04` and `ubuntu-24.04-arm` jobs build in a Debian 12 container
-with Rust 1.95.0. Each runs Rust tests, then produces a release tarball, `.deb`,
+with Rust 1.98.1. Each runs Rust tests, then produces a release tarball, `.deb`,
 and `.pkg.tar.zst` with SHA-256 checksums. Each CPU job then installs the Debian
 package in a clean container, checks native-host startup, and removes the package.
 These are regular dynamically linked

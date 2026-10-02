@@ -4,14 +4,27 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      rustcrypto:
+        patterns: [aes, cbc, hmac, hkdf, pbkdf2, sha1, sha2]
+      compatible-rust:
+        patterns: ['*']
+        update-types: [minor, patch]
   - package-ecosystem: npm
     directory: /extension
     schedule:
       interval: weekly
+    groups:
+      compatible-extension:
+        patterns: ['*']
+        update-types: [minor, patch]
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
   - package-ecosystem: docker
     directory: /packaging
     schedule:
