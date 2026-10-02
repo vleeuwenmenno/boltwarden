@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the exact Windows artifacts on a disposable CI account."""
 import argparse
+from contextlib import ExitStack
 import ctypes
 from ctypes import wintypes
 import json
@@ -129,30 +130,41 @@ def shortcut_registered():
     return True
 
 
+def wait_for_shortcut(daemon):
+    deadline = time.monotonic() + 20
+    while True:
+        assert daemon.poll() is None, 'Daemon exited before restoring the shortcut'
+        if shortcut_registered():
+            return
+        assert time.monotonic() < deadline, 'Daemon did not restore the saved shortcut'
+        time.sleep(0.1)
+
+
 def save_shortcut_fixture(data):
     path = data / 'quick-access-shortcut.json'
     path.write_text(json.dumps({
         'ctrl': True, 'alt': True, 'shift': True, 'key': 'F23',
     }), encoding='utf-8')
-    # Match the application's private parent DACL explicitly. Wine can add an
-    # Everyone ACE to files created through Python despite parent inheritance.
+    # Match the application's user owner and private DACL explicitly. Elevated
+    # Windows processes can create administrator-owned files, while Wine can add
+    # an Everyone ACE despite parent inheritance. The app rejects both cases.
     advapi = ctypes.WinDLL('advapi32', use_last_error=True)
     pointer = ctypes.c_void_p
     advapi.GetNamedSecurityInfoW.argtypes = (
-        wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD, pointer, pointer,
+        wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD, ctypes.POINTER(pointer), pointer,
         ctypes.POINTER(pointer), pointer, ctypes.POINTER(pointer))
     advapi.SetNamedSecurityInfoW.argtypes = (
         wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD, pointer, pointer, pointer, pointer)
     kernel = ctypes.WinDLL('kernel32', use_last_error=True)
     kernel.LocalFree.argtypes = (pointer,)
     kernel.LocalFree.restype = pointer
-    acl, descriptor = pointer(), pointer()
-    assert advapi.GetNamedSecurityInfoW(str(data), 1, 4, None, None,
+    owner, acl, descriptor = pointer(), pointer(), pointer()
+    assert advapi.GetNamedSecurityInfoW(str(data), 1, 5, ctypes.byref(owner), None,
                                        ctypes.byref(acl), None, ctypes.byref(descriptor)) == 0
     try:
-        assert acl.value
-        assert advapi.SetNamedSecurityInfoW(str(path), 1, 0x80000004,
-                                           None, None, acl, None) == 0
+        assert owner.value and acl.value
+        assert advapi.SetNamedSecurityInfoW(str(path), 1, 0x80000005,
+                                           owner, None, acl, None) == 0
     finally:
         kernel.LocalFree(descriptor)
 
@@ -178,8 +190,17 @@ def main():
     installers = list(args.artifacts.glob('boltwarden-*-x86_64-windows-setup.exe'))
     assert len(archives) == len(installers) == 1
     daemon = None
+
+    def stop_daemon():
+        if daemon is not None and daemon.poll() is None:
+            daemon.terminate()
+            daemon.wait(timeout=10)
+
     try:
-        with tempfile.TemporaryDirectory(prefix='Boltwarden smoke é ') as temporary:
+        with tempfile.TemporaryDirectory(prefix='Boltwarden smoke é ') as temporary, ExitStack() as cleanup:
+            # Stop the process before TemporaryDirectory removes its executable,
+            # including when an assertion fails during startup or upgrade.
+            cleanup.callback(stop_daemon)
             root = Path(temporary)
             bundle = root / 'Extracted ZIP'
             with zipfile.ZipFile(archives[0]) as archive:
@@ -207,9 +228,7 @@ def main():
             data.mkdir(exist_ok=True)
             save_shortcut_fixture(data)
             daemon = subprocess.Popen([str(app), '--daemon'])
-            time.sleep(2)
-            assert daemon.poll() is None
-            assert shortcut_registered(), 'Daemon did not restore the saved shortcut'
+            wait_for_shortcut(daemon)
             # A second daemon command must activate the existing process and exit.
             run(app, '--daemon')
             data.mkdir(exist_ok=True)
@@ -221,9 +240,7 @@ def main():
             daemon = None
             assert not shortcut_registered(), 'Shortcut was not released on shutdown'
             daemon = subprocess.Popen([str(app), '--daemon'])
-            time.sleep(2)
-            assert daemon.poll() is None
-            assert shortcut_registered(), 'Shortcut was not restored after upgrade'
+            wait_for_shortcut(daemon)
             run(app, 'quit')
             daemon.wait(timeout=15)
             daemon = None
@@ -245,9 +262,7 @@ def main():
             assert sentinel.exists()
             print('ZIP, visible GUI windows, native host, registration, saved shortcut restoration, singleton activation, running upgrade, optional tasks, and uninstall passed.')
     finally:
-        if daemon is not None:
-            daemon.terminate()
-            daemon.wait(timeout=10)
+        stop_daemon()
         if data.exists():
             shutil.rmtree(data)
 
