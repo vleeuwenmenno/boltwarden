@@ -5,10 +5,32 @@ export type CardField = 'cc-name' | 'cc-given-name' | 'cc-family-name' | 'cc-num
 export type CardControl = HTMLInputElement | HTMLSelectElement;
 export type CardForm = Partial<Record<CardField, CardControl>>;
 const purposes: CardField[] = ['cc-name', 'cc-given-name', 'cc-family-name', 'cc-number', 'cc-exp', 'cc-exp-month', 'cc-exp-year', 'cc-csc', 'cc-type'];
-export function cardPurpose(field: CardControl): CardField | undefined {
-  // Payment fields require an explicit standard autocomplete purpose. Guessing
-  // from generic "number" or "security code" labels can fill unrelated forms.
+function explicitPurpose(field: CardControl): CardField | undefined {
   return purposes.find(value => (field.getAttribute('autocomplete') ?? '').toLowerCase().split(/\s+/).includes(value));
+}
+/** Recognize specific payment names and associated labels, never generic numbers/codes. */
+export function cardPurpose(field: CardControl): CardField | undefined {
+  const explicit = explicitPurpose(field);
+  if (explicit) return explicit;
+  const tokens = (field.getAttribute('autocomplete') ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+  if (tokens.some(token => token !== 'off' && token !== 'on')) return undefined;
+  const labels = Array.from(field.labels ?? []).map(label => label.textContent ?? '');
+  const labelled = (field.getAttribute('aria-labelledby') ?? '').split(/\s+/).filter(Boolean).map(id => (field.getRootNode() as Document | ShadowRoot).getElementById?.(id)?.textContent ?? '');
+  const hints = [field.name, field.id, field.getAttribute('aria-label') ?? '', ...labels, ...labelled]
+    .map(value => value.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim());
+  const matches = (expression: RegExp) => hints.some(value => expression.test(value));
+  if (matches(/\b(?:card ?number|credit ?card ?number|debit ?card ?number|cc ?number)\b/)) return 'cc-number';
+  if (matches(/\b(?:cvv2?|cvc2?|cid|card ?security ?code|card ?verification ?(?:code|value))\b/)) return 'cc-csc';
+  if (matches(/\b(?:card ?holder(?: ?name)?|name ?on ?card)\b/)) return 'cc-name';
+  if (matches(/\b(?:exp(?:iry|iration)?|card ?exp(?:iry|iration)?) ?month\b/)) return 'cc-exp-month';
+  if (matches(/\b(?:exp(?:iry|iration)?|card ?exp(?:iry|iration)?) ?year\b/)) return 'cc-exp-year';
+  if (matches(/\b(?:exp(?:iry|iration)(?: ?date)?|card ?exp)\b/)) {
+    if (field.tagName !== 'SELECT') return 'cc-exp';
+    const values = Array.from((field as HTMLSelectElement).options).map(option => option.value.trim()).filter(value => /^\d+$/.test(value));
+    if (values.length >= 2 && values.every(value => /^\d{4}$/.test(value) && +value >= 2000 && +value <= 2200)) return 'cc-exp-year';
+    if (values.length === 12 && new Set(values.map(Number)).size === 12 && values.every(value => +value >= 1 && +value <= 12)) return 'cc-exp-month';
+  }
+  return undefined;
 }
 function controls(root: Document | ShadowRoot): CardControl[] {
   const found = Array.from(root.querySelectorAll<CardControl>('input,select'));
@@ -29,7 +51,11 @@ export function cardForms(document: Document, visible = visibleInput): CardForm[
       if (form[purpose]) return []; // Ambiguous payment forms require a focused, distinct form.
       form[purpose] = field;
     }
-    return [form];
+    const inferred = fields.some(field => !explicitPurpose(field));
+    if (inferred && (!form['cc-number'] || !(form['cc-exp'] || form['cc-exp-month'] || form['cc-exp-year'] || form['cc-csc']))) {
+      for (const field of fields) if (!explicitPurpose(field)) delete form[cardPurpose(field)!];
+    }
+    return Object.keys(form).length ? [form] : [];
   });
 }
 export function sameCard(left: CardForm | undefined, right: CardForm | undefined): boolean {

@@ -51,13 +51,20 @@
               copyDesktopItems
               makeWrapper
               pkg-config
+              python3
             ];
 
             buildInputs = runtimeLibs;
             nativeCheckInputs = [ pkgs.dbus ];
             RUST_TEST_THREADS = "1";
 
+            preBuild = ''
+              python3 scripts/third-party-notices.py rust THIRD_PARTY_NOTICES.txt
+            '';
+
             postInstall = ''
+              install -Dm644 LICENSE "$out/share/doc/boltwarden/LICENSE"
+              install -Dm644 THIRD_PARTY_NOTICES.txt "$out/share/doc/boltwarden/THIRD_PARTY_NOTICES.txt"
               wrapProgram "$out/bin/boltwarden" \
                 --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath runtimeLibs}"
 

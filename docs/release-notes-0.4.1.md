@@ -14,11 +14,21 @@ Store listings and Firefox signing are separate from these unsigned build artifa
 - Document pending-save credentials held in browser session storage. Locking does
   not discard these credentials; use the extension's Discard action when needed.
 
+## Desktop settings and acknowledgements
+
+The full vault window now groups settings into General, Browser integration, and
+SSH integration tabs, with the same preferences as quick access. Both provide
+licenses and acknowledgements, including searchable dependency and font license
+texts embedded in release binaries for offline viewing. Toolbar buttons now show
+hover and pressed feedback. Closing the full window gracefully shuts down its
+clipboard worker, fixing a Wayland shutdown crash.
+
 ## Credit card autofill
 
 Select a saved credit card in the toolbar popup on an HTTPS payment form. Listings
-show only names, brands, and last four digits; standard `cc-*` input and select
-fields receive the selected details. Protected cards require a fresh password,
+show only names, brands, and last four digits. Detection supports standard `cc-*`
+fields and clearly labeled payment forms without autocomplete attributes. An
+inline card button opens the toolbar picker for explicit selection. Protected cards require a fresh password,
 embedded frames require destination confirmation, and navigation or locking cancels
 pending fills. Payment forms are never submitted automatically. Firefox data consent
 and privacy disclosures now include financial/payment information.

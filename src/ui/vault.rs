@@ -25,6 +25,7 @@ pub enum Section {
     NoFolder,
     ActionCenter,
     PairedBrowsers,
+    Settings,
     /// The items one action center check found.
     Health(HealthCheck),
     Archived,
@@ -48,6 +49,7 @@ impl Section {
             Self::NoFolder => "No folder".into(),
             Self::ActionCenter => "Action center".into(),
             Self::PairedBrowsers => "Paired browsers".into(),
+            Self::Settings => "Settings".into(),
             Self::Health(check) => check.title().into(),
             Self::Archived => "Archived".into(),
             Self::Trash => "Recently deleted".into(),
@@ -66,7 +68,7 @@ impl Section {
             Self::Favorites => item.favorite,
             Self::Folder(path) => item_path(item, paths).is_some_and(|p| in_folder(p, path)),
             Self::NoFolder => item_path(item, paths).is_none(),
-            Self::ActionCenter | Self::PairedBrowsers => false,
+            Self::ActionCenter | Self::PairedBrowsers | Self::Settings => false,
             Self::Health(check) => {
                 report.is_some_and(|report| report.items(*check).contains(&item.id))
             }
@@ -294,6 +296,17 @@ pub fn draw_sidebar(
             }
 
             heading(ui, "MORE", None);
+            if let Some(picked) = section_entry(
+                ui,
+                section,
+                Section::Settings,
+                t.icon("\u{f013}", "⚙"),
+                None,
+                None,
+            ) {
+                action = Some(picked);
+            }
+
             if let Some(picked) = section_entry(
                 ui,
                 section,

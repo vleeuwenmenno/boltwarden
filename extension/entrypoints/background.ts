@@ -352,8 +352,7 @@ export default defineBackground(() => {
     const reply = await ask(document, { type: 'inspect', requestedToken: state.token });
     assertInline(document, state);
     if (reply.type !== 'inspected' || reply.token !== state.token || reply.focused !== true) throw changed();
-    if (reply.kind === 'card') throw new Error('Use the toolbar popup to select a card.');
-    const kind = reply.kind === 'totp' ? 'totp' : 'login';
+    const kind = reply.kind === 'card' ? 'card' : reply.kind === 'totp' ? 'totp' : 'login';
     if (state.kind && state.kind !== kind) throw changed();
     state.kind = kind;
     return validateInline(document, state);
@@ -394,6 +393,11 @@ export default defineBackground(() => {
     current.busy = true; inlineWork++;
     try {
       const tab = await inspectInline(document, current);
+      if (current.kind === 'card') {
+        if (new URL(tab.url).protocol !== 'https:' || new URL(document.url).protocol !== 'https:') throw changed();
+        if (data.action === 'list') return { connection: { ...native.snapshot }, message: 'Choose a credit card in the toolbar popup.' };
+        if (data.action !== 'open-popup') throw new Error('Select a card in the toolbar popup.');
+      }
       if (data.action === 'list') {
         await native.connect();
         await inspectInline(document, current);

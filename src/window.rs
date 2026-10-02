@@ -102,6 +102,10 @@ enum Reply {
     },
     Folders(Result<Vec<Folder>, BackendError>),
     Health(Result<HealthReport, BackendError>),
+    CapturePreference {
+        obscure: bool,
+        result: Result<(), String>,
+    },
     PairedBrowsers {
         generation: u64,
         result: Result<Vec<crate::browser::pairing::PairingRecord>, String>,
@@ -152,6 +156,10 @@ pub struct WindowApp {
     tx: mpsc::Sender<Reply>,
     rx: mpsc::Receiver<Reply>,
     settings: AppSettings,
+    settings_state: crate::ui::search::SearchState,
+    settings_licenses: bool,
+    settings_checked_at: Instant,
+    settings_ssh_status: crate::model::SshAgentStatus,
     icons: IconCache,
     screen: Screen,
     auth_state: AuthState,
@@ -199,6 +207,7 @@ pub struct WindowApp {
     error: Option<String>,
     warning: Option<String>,
     confirm_close: bool,
+    closing: bool,
     focus_search: bool,
     folder_edit: Option<FolderEdit>,
 }
@@ -228,11 +237,15 @@ impl WindowApp {
         let unlocked = backend.has_session();
         let mut app = Self {
             security_warning: backend.security_warning(),
-            backend,
+            backend: backend.clone(),
             commands,
             tx,
             rx,
             icons: IconCache::new(settings.show_website_icons),
+            settings_ssh_status: backend.ssh_agent_status(&settings),
+            settings_state: Default::default(),
+            settings_licenses: false,
+            settings_checked_at: Instant::now(),
             settings,
             screen: if unlocked {
                 Screen::Vault
@@ -279,9 +292,17 @@ impl WindowApp {
             error: None,
             warning: None,
             confirm_close: false,
+            closing: false,
             focus_search: true,
             folder_edit: None,
         };
+        if let Ok(mode) = std::env::var("BOLTWARDEN_DEMO") {
+            if mode == "settings" || mode == "licenses" {
+                app.section = Section::Settings;
+                app.settings_licenses = mode == "licenses";
+                app.focus_search = false;
+            }
+        }
         if crate::demo::starts_on_action_center() {
             app.section = Section::ActionCenter;
         }
@@ -428,6 +449,8 @@ impl WindowApp {
     }
 
     fn reset_locked(&mut self) {
+        self.settings_state.capture_pending = false;
+        self.settings_licenses = false;
         let (tx, rx) = mpsc::channel();
         self.tx = tx;
         self.rx = rx;
@@ -523,6 +546,10 @@ impl WindowApp {
         self.selection = ItemSelection::default();
         self.pending_menu = None;
         self.section = section;
+        if self.section == Section::Settings {
+            self.focus_search = false;
+            self.settings_ssh_status = self.backend.ssh_agent_status(&self.settings);
+        }
         if self.section == Section::PairedBrowsers {
             self.focus_search = false;
             self.refresh_paired_browsers();
@@ -548,6 +575,117 @@ impl WindowApp {
         }
     }
 
+    fn refresh_settings(&mut self, force: bool) {
+        if crate::demo::enabled()
+            || (!force && self.settings_checked_at.elapsed() < Duration::from_secs(1))
+        {
+            return;
+        }
+        self.settings_checked_at = Instant::now();
+        let latest = config::load_settings();
+        if latest != self.settings {
+            self.icons.set_enabled(latest.show_website_icons);
+            if self.settings_state.ssh_agent_path_input.as_ref()
+                == Some(&self.settings.ssh_agent_socket_path)
+            {
+                self.settings_state.ssh_agent_path_input = None;
+            }
+            self.settings = latest;
+            self.settings_ssh_status = self.backend.ssh_agent_status(&self.settings);
+        }
+    }
+
+    fn save_settings(&mut self) {
+        match self.backend.apply_settings(&self.settings) {
+            Ok(status) => {
+                self.settings_ssh_status = status;
+                self.error = None;
+            }
+            Err(error) => self.error = Some(format!("Could not save settings: {error}")),
+        }
+    }
+
+    fn settings_action(&mut self, action: crate::ui::search::SearchAction) {
+        use crate::ui::search::SearchAction;
+        self.refresh_settings(true);
+        match action {
+            SearchAction::SetStartList(value) => {
+                self.settings.start_list = value;
+                if value != config::StartList::RecentlyUsed && !crate::demo::enabled() {
+                    let _ = config::clear_item_usage();
+                }
+            }
+            SearchAction::SetKeepOfflineCopy(value) => self.settings.keep_offline_copy = value,
+            SearchAction::SetKeyboardShortcuts(value) => {
+                self.settings.show_keyboard_shortcuts = value
+            }
+            SearchAction::SetCloseAfterCopy(value) => self.settings.close_after_copy = value,
+            SearchAction::SetRestoreRecentItem(value) => {
+                self.settings.restore_recent_item = value;
+                if !value && !crate::demo::enabled() {
+                    let _ = config::clear_recent_item();
+                }
+            }
+            SearchAction::SetShowWebsiteIcons(value) => {
+                self.settings.show_website_icons = value;
+                self.icons.set_enabled(value);
+                if !value {
+                    std::thread::spawn(|| {
+                        let _ = crate::icons::clear_disk_cache();
+                    });
+                }
+            }
+            SearchAction::SetObscureScreenCapture(obscure) => {
+                if crate::demo::enabled() {
+                    self.settings.obscure_screen_capture = obscure;
+                    return;
+                }
+                if !self.settings_state.capture_pending {
+                    self.settings_state.capture_pending = true;
+                    self.spawn(move |_| Reply::CapturePreference {
+                        obscure,
+                        result: crate::screen_capture::apply(obscure),
+                    });
+                }
+                return;
+            }
+            SearchAction::SetLockOnSystemLock(value) => self.settings.lock_on_system_lock = value,
+            SearchAction::SetLockAfterIdleTimeout(value) => {
+                self.settings.lock_after_idle_timeout = value
+            }
+            SearchAction::SetIdleLockTimeoutMinutes(value) => {
+                self.settings.idle_lock_timeout_minutes = value.clamp(1, 1440)
+            }
+            SearchAction::SetSshAgentEnabled(value) => self.settings.ssh_agent_enabled = value,
+            SearchAction::SetSshAgentSocketPath(value) => {
+                self.settings.ssh_agent_socket_path = value
+            }
+            SearchAction::SetBrowserIntegrationEnabled(value) => {
+                self.settings.browser_integration_enabled = value
+            }
+            SearchAction::SetDefaultUriMatch(value) => self.settings.default_uri_match = value,
+            SearchAction::SetPasskeyVerification(value) => {
+                self.settings.passkey_verification = value
+            }
+            SearchAction::OpenAcknowledgements => {
+                self.settings_licenses = true;
+                return;
+            }
+            SearchAction::OpenPairedBrowsers => {
+                self.set_section(Section::PairedBrowsers);
+                return;
+            }
+            SearchAction::OpenBrowserSetup => {
+                self.set_section(Section::PairedBrowsers);
+                self.browser_setup_open = true;
+                self.browser_setup.refresh();
+                return;
+            }
+            _ => return,
+        }
+        self.save_settings();
+    }
+
     fn offline(&self) -> bool {
         self.sync_status.as_ref().is_some_and(|s| s.offline)
     }
@@ -556,7 +694,7 @@ impl WindowApp {
         if self.offline() {
             return;
         }
-        if self.section == Section::PairedBrowsers {
+        if matches!(self.section, Section::PairedBrowsers | Section::Settings) {
             self.set_section(Section::All);
         }
         self.backend.revoke_item_grants();
@@ -614,25 +752,35 @@ impl WindowApp {
             .is_some_and(|edit| edit.saving || edit.is_dirty())
         {
             self.confirm_close = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             return;
         }
-        self.exit_now();
+        self.exit_now(ctx);
     }
 
-    fn exit_now(&mut self) -> ! {
-        // process::exit skips Drop; wipe UI-owned plaintext first.
+    fn exit_now(&mut self, ctx: &Context) {
+        // Let eframe drop its clipboard worker before the Wayland display. Calling
+        // process::exit from a frame races native teardown with that live worker.
+        // Stop UI work and discard queued replies before requesting the close.
+        self.closing = true;
+        let (tx, rx) = mpsc::channel();
+        self.tx = tx;
+        self.rx = rx;
         self.auth_state.password.zeroize();
         self.two_factor_state.token.zeroize();
         self.reprompt_password.zeroize();
         self.summary_state = SummaryState::default();
         self.edit_state = None;
         self.backend.revoke_item_grants();
-        std::process::exit(0);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     // Runs every frame, also while eframe skips drawing a minimized window.
     fn process_background(&mut self, ctx: &Context) {
+        if self.closing {
+            return;
+        }
         while let Ok(command) = self.commands.try_recv() {
             match command {
                 PopupCommand::VaultLocked => self.reset_locked(),
@@ -645,11 +793,14 @@ impl WindowApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
                 PopupCommand::Hide | PopupCommand::Toggle => self.close_window(ctx),
-                PopupCommand::Quit => self.exit_now(),
+                PopupCommand::Quit => self.exit_now(ctx),
                 // Integration prompts belong to the popup.
                 PopupCommand::SshApproval { .. }
                 | PopupCommand::BrowserApproval { .. }
                 | PopupCommand::Unlock { .. } => {}
+            }
+            if self.closing {
+                return;
             }
         }
         self.poll_replies(ctx);
@@ -677,7 +828,7 @@ impl WindowApp {
                 self.refresh_paired_browsers();
             }
             let wanted = (self.query.trim().to_string(), self.section.item_state());
-            if self.section != Section::PairedBrowsers
+            if !matches!(self.section, Section::PairedBrowsers | Section::Settings)
                 && self.searched.as_ref() != Some(&wanted)
                 && !self.search_in_flight
                 && self.query_changed_at.elapsed() >= SEARCH_DEBOUNCE
@@ -732,6 +883,19 @@ impl WindowApp {
                             self.two_factor_state.error = Some(error.to_string());
                             self.two_factor_state.token.zeroize();
                             self.two_factor_state.focus_token = true;
+                        }
+                    }
+                }
+                Reply::CapturePreference { obscure, result } => {
+                    self.settings_state.capture_pending = false;
+                    match result {
+                        Ok(()) => {
+                            self.refresh_settings(true);
+                            self.settings.obscure_screen_capture = obscure;
+                            self.save_settings();
+                        }
+                        Err(error) => {
+                            self.error = Some(format!("Capture protection not confirmed: {error}"))
                         }
                     }
                 }
@@ -1032,9 +1196,15 @@ impl eframe::App for WindowApp {
 
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &root.ctx().clone();
+        if self.closing {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
         if ctx.input(|i| i.viewport().close_requested()) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_window(ctx);
+            if self.closing {
+                return;
+            }
         }
         self.icons.poll(ctx);
         if let Some(warning) = &self.security_warning {
@@ -1044,6 +1214,9 @@ impl eframe::App for WindowApp {
         }
         if self.confirm_close {
             self.draw_confirm_close(ctx);
+            if self.closing {
+                return;
+            }
         }
         match self.screen {
             Screen::Auth => self.update_auth(root),
@@ -1073,7 +1246,7 @@ impl WindowApp {
         match widgets::confirm_dialog(ctx, &dialog) {
             Some(true) => {
                 self.edit_state = None;
-                self.exit_now();
+                self.exit_now(ctx);
             }
             Some(false) => self.confirm_close = false,
             None => {}
@@ -1156,6 +1329,7 @@ impl WindowApp {
     }
 
     fn update_vault(&mut self, root: &mut egui::Ui) {
+        self.refresh_settings(false);
         let ctx = &root.ctx().clone();
         let editing = self.edit_state.is_some()
             || self.move_in_flight
@@ -1212,6 +1386,59 @@ impl WindowApp {
                     }
                 });
             });
+
+        if self.section == Section::Settings {
+            self.settings_state
+                .settings_group
+                .get_or_insert(crate::ui::search::SettingsGroup::General);
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::new()
+                        .fill(t.bg)
+                        .inner_margin(egui::Margin::symmetric(20, 12)),
+                )
+                .show(root, |ui| {
+                    ui.heading("Settings");
+                    ui.horizontal_wrapped(|ui| {
+                        for (group, label) in [
+                            (crate::ui::search::SettingsGroup::General, "General"),
+                            (
+                                crate::ui::search::SettingsGroup::Browser,
+                                "Browser integration",
+                            ),
+                            (crate::ui::search::SettingsGroup::Ssh, "SSH integration"),
+                        ] {
+                            let selected = !self.settings_licenses
+                                && self
+                                    .settings_state
+                                    .settings_group
+                                    .unwrap_or(crate::ui::search::SettingsGroup::General)
+                                    == group;
+                            if ui.selectable_label(selected, label).clicked() {
+                                self.settings_licenses = false;
+                                self.settings_state.settings_group = Some(group);
+                            }
+                        }
+                        ui.selectable_value(
+                            &mut self.settings_licenses,
+                            true,
+                            "Licenses and acknowledgements",
+                        );
+                    });
+                    ui.separator();
+                    if self.settings_licenses {
+                        crate::ui::acknowledgements::draw(ui);
+                    } else if let Some(action) = crate::ui::search::draw_settings(
+                        ui,
+                        &mut self.settings_state,
+                        &self.settings,
+                        &self.settings_ssh_status,
+                    ) {
+                        self.settings_action(action);
+                    }
+                });
+            return;
+        }
 
         if self.section == Section::PairedBrowsers {
             egui::CentralPanel::default()
@@ -1562,7 +1789,7 @@ impl WindowApp {
             if focused.is_none() {
                 select_all = input.consume_key(egui::Modifiers::COMMAND, egui::Key::A);
             }
-            if navigable && self.section != Section::PairedBrowsers {
+            if navigable && !matches!(self.section, Section::PairedBrowsers | Section::Settings) {
                 if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
                     moves += 1;
                 }
@@ -1578,6 +1805,27 @@ impl WindowApp {
                 self.query_changed_at = Instant::now();
             }
         });
+        if self.section == Section::Settings
+            && self.settings_licenses
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            self.settings_licenses = false;
+        } else if self.section == Section::Settings && !self.settings_licenses {
+            self.settings_state.view = crate::ui::search::SearchView::Settings;
+            let mut action = None;
+            crate::ui::search::handle_keys(
+                ctx,
+                &mut self.settings_state,
+                &self.settings,
+                &mut action,
+            );
+            if let Some(action) = action {
+                self.settings_action(action);
+            }
+            if self.settings_state.view != crate::ui::search::SearchView::Settings {
+                self.set_section(Section::All);
+            }
+        }
         if select_all {
             self.selection.ids = self
                 .visible_items()
@@ -1609,7 +1857,7 @@ impl WindowApp {
         if moves != 0
             && !matches!(
                 self.section,
-                Section::ActionCenter | Section::PairedBrowsers
+                Section::ActionCenter | Section::PairedBrowsers | Section::Settings
             )
         {
             self.move_selection(moves);
@@ -1622,22 +1870,15 @@ impl WindowApp {
         let t = theme();
         let mut new_item = false;
         let mut lock = false;
+        let mut settings = false;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .add(
-                    egui::Button::new(
-                        RichText::new(t.icon("\u{f023}", "🔒"))
-                            .size(t.body())
-                            .color(t.text_muted),
-                    )
-                    .frame(false)
-                    .min_size(egui::vec2(32.0, 32.0)),
-                )
+            if widgets::icon_button(ui, t.icon("\u{f023}", "🔒"), true)
                 .on_hover_text("Lock vault (Ctrl+L)")
                 .clicked()
             {
                 lock = true;
             }
+            settings = widgets::button(ui, "Settings", false, !editing).clicked();
             let label = format!("{}  New item", t.icon("\u{f067}", "+"));
             new_item = widgets::button(ui, &label, true, !editing && !self.offline())
                 .on_hover_text("Ctrl+N")
@@ -1676,7 +1917,7 @@ impl WindowApp {
                     // Searching lists items, so leave a management section.
                     if matches!(
                         self.section,
-                        Section::ActionCenter | Section::PairedBrowsers
+                        Section::ActionCenter | Section::PairedBrowsers | Section::Settings
                     ) {
                         self.set_section(Section::All);
                     }
@@ -1687,6 +1928,9 @@ impl WindowApp {
                 }
             });
         });
+        if settings {
+            self.set_section(Section::Settings);
+        }
         if new_item {
             self.start_new_item();
         }
@@ -1741,7 +1985,18 @@ impl WindowApp {
                     .filter(|_| !self.offline())
                     .map(|warning| (warning, t.warning))
             });
-        let hints: &[(&str, &str)] = if self.settings.show_keyboard_shortcuts {
+        let hints: &[(&str, &str)] = if !self.settings.show_keyboard_shortcuts {
+            &[]
+        } else if self.section == Section::Settings && self.settings_licenses {
+            &[("Esc", "Settings"), ("Ctrl+L", "Lock")]
+        } else if self.section == Section::Settings {
+            &[
+                ("↑↓", "Settings"),
+                ("Space", "Change"),
+                ("Esc", "Back"),
+                ("Ctrl+L", "Lock"),
+            ]
+        } else {
             &[
                 ("↑↓", "Items"),
                 ("Ctrl+F", "Search"),
@@ -1749,8 +2004,6 @@ impl WindowApp {
                 ("Ctrl+R", "Sync"),
                 ("Ctrl+L", "Lock"),
             ]
-        } else {
-            &[]
         };
         let sync_label = if self.sync_in_flight {
             "Syncing…".to_string()
@@ -2124,6 +2377,136 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graceful_close_wipes_secrets_disconnects_workers_and_requests_native_close() {
+        let backend = AppBackend::demo();
+        let item = backend
+            .list_items(ItemState::Active, "")
+            .unwrap()
+            .items
+            .remove(0);
+        let detail = backend.get_item(&item.id).unwrap();
+        backend.lock_vault().unwrap();
+        let (_, commands) = mpsc::channel();
+        let mut app = WindowApp::with_settings(backend, commands, AppSettings::default());
+        app.auth_state.password = "master secret".into();
+        app.two_factor_state.token = "123456".into();
+        app.reprompt_password = "verification secret".into();
+        app.summary_state.detail = Some(detail);
+        let old_worker = app.tx.clone();
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.close_window(ui.ctx()));
+        assert!(app.closing);
+        assert!(app.auth_state.password.is_empty());
+        assert!(app.two_factor_state.token.is_empty());
+        assert!(app.reprompt_password.is_empty());
+        assert!(app.summary_state.detail.is_none());
+        assert!(
+            old_worker
+                .send(Reply::Synced(Ok(SyncStatus::default())))
+                .is_err()
+        );
+        let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(commands.contains(&egui::ViewportCommand::Close));
+        assert!(!commands.contains(&egui::ViewportCommand::CancelClose));
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn settings_refresh_preserves_another_windows_preferences_and_dirty_socket_draft() {
+        let previous = std::env::var_os("XDG_CONFIG_HOME");
+        let directory =
+            std::env::temp_dir().join(format!("boltwarden-settings-{}", std::process::id()));
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &directory);
+        }
+        let backend = AppBackend::demo();
+        backend.lock_vault().unwrap();
+        let (_, commands) = mpsc::channel();
+        let mut app = WindowApp::with_settings(backend, commands, AppSettings::default());
+        let latest = AppSettings {
+            browser_integration_enabled: false,
+            ..AppSettings::default()
+        };
+        config::save_settings(&latest).unwrap();
+        app.settings_state.ssh_agent_path_input = Some("$HOME/draft.sock".into());
+        app.settings_action(crate::ui::search::SearchAction::SetIdleLockTimeoutMinutes(
+            42,
+        ));
+        assert!(!app.settings.browser_integration_enabled);
+        assert_eq!(app.settings.idle_lock_timeout_minutes, 42);
+        assert_eq!(
+            app.settings_state.ssh_agent_path_input.as_deref(),
+            Some("$HOME/draft.sock")
+        );
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn settings_navigation_clears_item_secrets_and_routes_keyboard() {
+        let backend = AppBackend::demo();
+        let item = backend
+            .list_items(ItemState::Active, "")
+            .unwrap()
+            .items
+            .remove(0);
+        let detail = backend.get_item(&item.id).unwrap();
+        backend.lock_vault().unwrap();
+        let (_, commands) = mpsc::channel();
+        let mut app = WindowApp::with_settings(backend, commands, AppSettings::default());
+        app.screen = Screen::Vault;
+        app.selected = Some(item.id.clone());
+        app.summary_state.detail_id = Some(item.id);
+        app.summary_state.detail = Some(detail);
+        app.set_section(Section::Settings);
+        assert!(app.selected.is_none());
+        assert!(app.summary_state.detail.is_none());
+        assert!(app.visible_items().is_empty());
+        assert!(!app.focus_search);
+        let ctx = Context::default();
+        let mut input = egui::RawInput::default();
+        input.events.push(egui::Event::Key {
+            key: egui::Key::ArrowDown,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        ctx.run_ui(input, |ui| app.handle_keys(ui.ctx(), false))
+            .textures_delta
+            .clear();
+        assert_eq!(app.settings_state.settings_selected, 1);
+        assert!(app.selected.is_none());
+        app.settings_action(crate::ui::search::SearchAction::OpenAcknowledgements);
+        assert!(app.settings_licenses);
+        assert_eq!(app.section, Section::Settings);
+    }
+
+    #[test]
+    fn settings_use_backend_and_clamp_idle_timeout() {
+        let backend = AppBackend::demo();
+        backend.lock_vault().unwrap();
+        let (_, commands) = mpsc::channel();
+        let mut app = WindowApp::with_settings(backend, commands, AppSettings::default());
+        app.settings_action(crate::ui::search::SearchAction::SetIdleLockTimeoutMinutes(
+            0,
+        ));
+        assert_eq!(app.settings.idle_lock_timeout_minutes, 1);
+        assert!(app.error.is_none());
+        app.settings_action(crate::ui::search::SearchAction::SetIdleLockTimeoutMinutes(
+            u64::MAX,
+        ));
+        assert_eq!(app.settings.idle_lock_timeout_minutes, 1440);
+        app.settings_action(crate::ui::search::SearchAction::SetBrowserIntegrationEnabled(false));
+        assert!(!app.settings.browser_integration_enabled);
+    }
 
     #[test]
     fn browser_setup_keeps_navigation_keys_and_refresh_separate_from_paired_browsers() {

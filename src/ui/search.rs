@@ -8,7 +8,8 @@ use egui::{Context, RichText, Ui};
 
 const SEARCH_INPUT_ID: &str = "vault-search-input";
 const SSH_PATH_INPUT_ID: &str = "settings-ssh-socket-path";
-const SETTINGS_ROWS: usize = 15;
+const SETTINGS_ROWS: usize = 16;
+const ACKNOWLEDGEMENTS_ROW: usize = 15;
 const BROWSER_SETUP_ROW: usize = 14;
 const PASSKEY_VERIFICATION_ROW: usize = 13;
 const PAIRED_BROWSERS_ROW: usize = 12;
@@ -16,6 +17,24 @@ const DEFAULT_URI_MATCH_ROW: usize = 11;
 const SCREEN_CAPTURE_ROW: usize = 5;
 const START_LIST_ROW: usize = 3;
 const IDLE_TIMEOUT_ROW: usize = 7;
+/// Sections used by the full-window settings view. Quick access keeps its compact list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsGroup {
+    General,
+    Browser,
+    Ssh,
+}
+
+impl SettingsGroup {
+    fn contains(self, row: usize) -> bool {
+        match self {
+            Self::General => matches!(row, 0..=7 | 9),
+            Self::Browser => matches!(row, 10..=14),
+            Self::Ssh => row == 8,
+        }
+    }
+}
+
 /// Items shown in the "Recently edited/created" start lists.
 const START_LIST_LIMIT: usize = 20;
 const NOTICE_DURATION: std::time::Duration = std::time::Duration::from_secs(3);
@@ -149,6 +168,7 @@ pub struct SearchState {
     /// Draft of the SSH socket path; `None` until the settings panel loads the saved value.
     pub ssh_agent_path_input: Option<String>,
     pub settings_selected: usize,
+    pub settings_group: Option<SettingsGroup>,
     pub capture_pending: bool,
     pub paired_browsers: PairedBrowsersState,
     pub browser_setup: crate::ui::browser_setup::BrowserSetupState,
@@ -181,6 +201,7 @@ impl Default for SearchState {
             view: SearchView::Results,
             ssh_agent_path_input: None,
             settings_selected: 0,
+            settings_group: None,
             capture_pending: false,
             paired_browsers: PairedBrowsersState::default(),
             browser_setup: Default::default(),
@@ -729,7 +750,7 @@ pub fn draw_search(
     action
 }
 
-fn handle_keys(
+pub fn handle_keys(
     ctx: &Context,
     state: &mut SearchState,
     settings: &AppSettings,
@@ -755,13 +776,24 @@ fn handle_keys(
             if path_focused {
                 return;
             }
+            let visible: Vec<usize> = (0..SETTINGS_ROWS)
+                .filter(|row| {
+                    state
+                        .settings_group
+                        .is_none_or(|group| group.contains(*row))
+                })
+                .collect();
+            let mut selected = visible
+                .iter()
+                .position(|row| *row == state.settings_selected)
+                .unwrap_or(0);
             if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
-                state.settings_selected = (state.settings_selected + 1) % SETTINGS_ROWS;
+                selected = (selected + 1) % visible.len();
             }
             if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
-                state.settings_selected =
-                    (state.settings_selected + SETTINGS_ROWS - 1) % SETTINGS_ROWS;
+                selected = (selected + visible.len() - 1) % visible.len();
             }
+            state.settings_selected = visible[selected];
             if (input.consume_key(egui::Modifiers::NONE, egui::Key::Space)
                 || input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
                 && (state.settings_selected != SCREEN_CAPTURE_ROW || !state.capture_pending)
@@ -1169,6 +1201,7 @@ fn toggle_setting(row: usize, settings: &AppSettings) -> Option<SearchAction> {
         }
         PAIRED_BROWSERS_ROW => SearchAction::OpenPairedBrowsers,
         BROWSER_SETUP_ROW => SearchAction::OpenBrowserSetup,
+        ACKNOWLEDGEMENTS_ROW => SearchAction::OpenAcknowledgements,
         PASSKEY_VERIFICATION_ROW => {
             SearchAction::SetPasskeyVerification(settings.passkey_verification.next())
         }
@@ -1176,7 +1209,7 @@ fn toggle_setting(row: usize, settings: &AppSettings) -> Option<SearchAction> {
     })
 }
 
-fn draw_settings(
+pub fn draw_settings(
     ui: &mut Ui,
     state: &mut SearchState,
     settings: &AppSettings,
@@ -1184,8 +1217,13 @@ fn draw_settings(
 ) -> Option<SearchAction> {
     let t = theme();
     let mut action = None;
+    let visible = |row| state.settings_group.is_none_or(|group| group.contains(row));
+    if !visible(state.settings_selected) {
+        state.settings_selected = (0..SETTINGS_ROWS).find(|row| visible(*row)).unwrap_or(0);
+        state.settings_scrolled_to = None;
+    }
     // The start list row (a choice, not a toggle) is drawn separately at START_LIST_ROW.
-    let rows: [(bool, &str, &str); SETTINGS_ROWS - 5] = [
+    let rows: [(bool, &str, &str); SETTINGS_ROWS - 6] = [
         (
             settings.show_keyboard_shortcuts,
             "Show keyboard shortcuts",
@@ -1255,6 +1293,9 @@ fn draw_settings(
                 } else {
                     row_idx
                 };
+                if !visible(idx) {
+                    continue;
+                }
                 if idx == START_LIST_ROW + 1 {
                     let response = widgets::choice_row(
                         ui,
@@ -1315,89 +1356,113 @@ fn draw_settings(
                 }
             }
 
-            let match_label = match settings.default_uri_match {
-                crate::uri_match::UriMatchType::Host => "Exact host and port",
-                crate::uri_match::UriMatchType::Domain => "Base domain",
-                crate::uri_match::UriMatchType::Exact => "Exact URL",
-                crate::uri_match::UriMatchType::Never => "Never",
-                _ => "Custom",
-            };
-            let response = widgets::choice_row(
-                ui,
-                state.settings_selected == DEFAULT_URI_MATCH_ROW,
-                "Default URI matching",
-                "Applies only when an item has no explicit match rule",
-                match_label,
-            );
-            if state.settings_selected == DEFAULT_URI_MATCH_ROW
-                && state.settings_scrolled_to != Some(DEFAULT_URI_MATCH_ROW)
-            {
-                response.scroll_to_me(None);
-                state.settings_scrolled_to = Some(DEFAULT_URI_MATCH_ROW);
+            if visible(DEFAULT_URI_MATCH_ROW) {
+                let match_label = match settings.default_uri_match {
+                    crate::uri_match::UriMatchType::Host => "Exact host and port",
+                    crate::uri_match::UriMatchType::Domain => "Base domain",
+                    crate::uri_match::UriMatchType::Exact => "Exact URL",
+                    crate::uri_match::UriMatchType::Never => "Never",
+                    _ => "Custom",
+                };
+                let response = widgets::choice_row(
+                    ui,
+                    state.settings_selected == DEFAULT_URI_MATCH_ROW,
+                    "Default URI matching",
+                    "Applies only when an item has no explicit match rule",
+                    match_label,
+                );
+                if state.settings_selected == DEFAULT_URI_MATCH_ROW
+                    && state.settings_scrolled_to != Some(DEFAULT_URI_MATCH_ROW)
+                {
+                    response.scroll_to_me(None);
+                    state.settings_scrolled_to = Some(DEFAULT_URI_MATCH_ROW);
+                }
+                if response.clicked() {
+                    state.settings_selected = DEFAULT_URI_MATCH_ROW;
+                    action = toggle_setting(DEFAULT_URI_MATCH_ROW, settings);
+                }
             }
-            if response.clicked() {
-                state.settings_selected = DEFAULT_URI_MATCH_ROW;
-                action = toggle_setting(DEFAULT_URI_MATCH_ROW, settings);
+            if visible(PAIRED_BROWSERS_ROW) {
+                let response = widgets::choice_row(
+                    ui,
+                    state.settings_selected == PAIRED_BROWSERS_ROW,
+                    "Paired browsers",
+                    "View paired extensions and revoke access",
+                    "Manage",
+                );
+                if state.settings_selected == PAIRED_BROWSERS_ROW
+                    && state.settings_scrolled_to != Some(PAIRED_BROWSERS_ROW)
+                {
+                    response.scroll_to_me(None);
+                    state.settings_scrolled_to = Some(PAIRED_BROWSERS_ROW);
+                }
+                if response.clicked() {
+                    state.settings_selected = PAIRED_BROWSERS_ROW;
+                    action = Some(SearchAction::OpenPairedBrowsers);
+                }
             }
-            let response = widgets::choice_row(
-                ui,
-                state.settings_selected == PAIRED_BROWSERS_ROW,
-                "Paired browsers",
-                "View paired extensions and revoke access",
-                "Manage",
-            );
-            if state.settings_selected == PAIRED_BROWSERS_ROW
-                && state.settings_scrolled_to != Some(PAIRED_BROWSERS_ROW)
-            {
-                response.scroll_to_me(None);
-                state.settings_scrolled_to = Some(PAIRED_BROWSERS_ROW);
+            if visible(PASSKEY_VERIFICATION_ROW) {
+                let response = widgets::choice_row(
+                    ui,
+                    state.settings_selected == PASSKEY_VERIFICATION_ROW,
+                    "Passkey verification",
+                    if settings.passkey_verification == PasskeyVerification::VaultUnlock {
+                        "Reuse vault unlock; protected items still require a password"
+                    } else {
+                        "Sites and protected items can still require verification"
+                    },
+                    settings.passkey_verification.label(),
+                );
+                if state.settings_selected == PASSKEY_VERIFICATION_ROW
+                    && state.settings_scrolled_to != Some(PASSKEY_VERIFICATION_ROW)
+                {
+                    response.scroll_to_me(None);
+                    state.settings_scrolled_to = Some(PASSKEY_VERIFICATION_ROW);
+                }
+                if response.clicked() {
+                    state.settings_selected = PASSKEY_VERIFICATION_ROW;
+                    action = toggle_setting(PASSKEY_VERIFICATION_ROW, settings);
+                }
             }
-            if response.clicked() {
-                state.settings_selected = PAIRED_BROWSERS_ROW;
-                action = Some(SearchAction::OpenPairedBrowsers);
+            if visible(BROWSER_SETUP_ROW) {
+                let response = widgets::choice_row(
+                    ui,
+                    state.settings_selected == BROWSER_SETUP_ROW,
+                    "Browser setup",
+                    "Choose installed or custom browsers for the extension",
+                    "Manage",
+                );
+                if state.settings_selected == BROWSER_SETUP_ROW
+                    && state.settings_scrolled_to != Some(BROWSER_SETUP_ROW)
+                {
+                    response.scroll_to_me(None);
+                    state.settings_scrolled_to = Some(BROWSER_SETUP_ROW);
+                }
+                if response.clicked() {
+                    state.settings_selected = BROWSER_SETUP_ROW;
+                    action = Some(SearchAction::OpenBrowserSetup);
+                }
             }
-
-            let response = widgets::choice_row(
-                ui,
-                state.settings_selected == PASSKEY_VERIFICATION_ROW,
-                "Passkey verification",
-                if settings.passkey_verification == PasskeyVerification::VaultUnlock {
-                    "Reuse vault unlock; protected items still require a password"
-                } else {
-                    "Sites and protected items can still require verification"
-                },
-                settings.passkey_verification.label(),
-            );
-            if state.settings_selected == PASSKEY_VERIFICATION_ROW
-                && state.settings_scrolled_to != Some(PASSKEY_VERIFICATION_ROW)
-            {
-                response.scroll_to_me(None);
-                state.settings_scrolled_to = Some(PASSKEY_VERIFICATION_ROW);
+            if visible(ACKNOWLEDGEMENTS_ROW) {
+                let response = widgets::choice_row(
+                    ui,
+                    state.settings_selected == ACKNOWLEDGEMENTS_ROW,
+                    "Licenses and acknowledgements",
+                    "Project license and third-party software",
+                    "View",
+                );
+                if state.settings_selected == ACKNOWLEDGEMENTS_ROW
+                    && state.settings_scrolled_to != Some(ACKNOWLEDGEMENTS_ROW)
+                {
+                    response.scroll_to_me(None);
+                    state.settings_scrolled_to = Some(ACKNOWLEDGEMENTS_ROW);
+                }
+                if response.clicked() {
+                    state.settings_selected = ACKNOWLEDGEMENTS_ROW;
+                    action = Some(SearchAction::OpenAcknowledgements);
+                }
             }
-            if response.clicked() {
-                state.settings_selected = PASSKEY_VERIFICATION_ROW;
-                action = toggle_setting(PASSKEY_VERIFICATION_ROW, settings);
-            }
-
-            let response = widgets::choice_row(
-                ui,
-                state.settings_selected == BROWSER_SETUP_ROW,
-                "Browser setup",
-                "Choose installed or custom browsers for the extension",
-                "Manage",
-            );
-            if state.settings_selected == BROWSER_SETUP_ROW
-                && state.settings_scrolled_to != Some(BROWSER_SETUP_ROW)
-            {
-                response.scroll_to_me(None);
-                state.settings_scrolled_to = Some(BROWSER_SETUP_ROW);
-            }
-            if response.clicked() {
-                state.settings_selected = BROWSER_SETUP_ROW;
-                action = Some(SearchAction::OpenBrowserSetup);
-            }
-
-            if settings.ssh_agent_enabled {
+            if visible(8) && settings.ssh_agent_enabled {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.add_space(54.0);
@@ -1451,6 +1516,7 @@ pub enum SearchAction {
     QuickCopy(usize),
     OpenResult(usize),
     OpenWindow,
+    OpenAcknowledgements,
     SetKeepOfflineCopy(bool),
     SetKeyboardShortcuts(bool),
     SetCloseAfterCopy(bool),
@@ -1489,6 +1555,54 @@ mod tests {
             icon_host: None,
             state: Default::default(),
             dates: Default::default(),
+        }
+    }
+
+    #[test]
+    fn settings_tabs_keep_keyboard_actions_within_visible_rows() {
+        for (group, first, last) in [
+            (SettingsGroup::General, 0, 9),
+            (SettingsGroup::Browser, 10, 14),
+            (SettingsGroup::Ssh, 8, 8),
+        ] {
+            let ctx = Context::default();
+            let mut state = SearchState {
+                view: SearchView::Settings,
+                settings_group: Some(group),
+                settings_selected: first,
+                ..Default::default()
+            };
+            let mut input = egui::RawInput::default();
+            input.events.push(egui::Event::Key {
+                key: egui::Key::ArrowUp,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            ctx.run_ui(input, |root| {
+                handle_keys(root.ctx(), &mut state, &AppSettings::default(), &mut None);
+            })
+            .textures_delta
+            .clear();
+            assert_eq!(state.settings_selected, last);
+            // Switching tabs cannot activate a previously selected, now-hidden setting.
+            state.settings_group = Some(SettingsGroup::Ssh);
+            let mut input = egui::RawInput::default();
+            input.events.push(egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            let mut action = None;
+            ctx.run_ui(input, |root| {
+                handle_keys(root.ctx(), &mut state, &AppSettings::default(), &mut action);
+            })
+            .textures_delta
+            .clear();
+            assert!(matches!(action, Some(SearchAction::SetSshAgentEnabled(_))));
         }
     }
 
@@ -1677,7 +1791,11 @@ mod tests {
     fn passkey_verification_setting_cycles_after_existing_browser_rows() {
         let mut settings = AppSettings::default();
         assert_eq!(PASSKEY_VERIFICATION_ROW, PAIRED_BROWSERS_ROW + 1);
-        assert_eq!(BROWSER_SETUP_ROW, SETTINGS_ROWS - 1);
+        assert_eq!(ACKNOWLEDGEMENTS_ROW, SETTINGS_ROWS - 1);
+        assert!(matches!(
+            toggle_setting(ACKNOWLEDGEMENTS_ROW, &settings),
+            Some(SearchAction::OpenAcknowledgements)
+        ));
         assert!(matches!(
             toggle_setting(BROWSER_SETUP_ROW, &settings),
             Some(SearchAction::OpenBrowserSetup)

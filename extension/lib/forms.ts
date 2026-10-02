@@ -1,4 +1,4 @@
-import { cardForms, sameCard, type CardForm } from './cards';
+import { cardPurpose, cardForms, sameCard, type CardForm } from './cards';
 export interface LoginForm { card?: CardForm; username?: HTMLInputElement; password?: HTMLInputElement; otp?: HTMLInputElement[] }
 const LOGIN_NAME = /user(?:[-_ ]?name)?|e-?mail|login|identifier/i;
 const NEW_PASSWORD = /new[-_ ]?password|confirm|repeat|retype/i;
@@ -27,12 +27,12 @@ export function visibleInput(input: HTMLInputElement | HTMLSelectElement): boole
 
 function autocomplete(input: HTMLInputElement): string[] { return input.autocomplete.toLowerCase().split(/\s+/); }
 function isUsername(input: HTMLInputElement): boolean {
-  return ['text', 'email', 'tel'].includes(input.type) && !autocomplete(input).some(value => value.startsWith('cc-') || value === 'one-time-code' || value === 'new-password');
+  return ['text', 'email', 'tel'].includes(input.type) && !cardPurpose(input) && !autocomplete(input).some(value => value.startsWith('cc-') || value === 'one-time-code' || value === 'new-password');
 }
 
 /** OTP fields need an explicit purpose; arbitrary short or numeric fields are not codes. */
 function otpHint(input: HTMLInputElement): boolean {
-  if (autocomplete(input).some(value => value.startsWith('cc-'))) return false;
+  if (cardPurpose(input)) return false;
   const hint = `${input.name} ${input.id} ${input.getAttribute('aria-label') ?? ''} ${Array.from(input.labels ?? []).map(label => label.textContent ?? '').join(' ')}`;
   if (/recovery|backup|herstel/i.test(hint)) return false;
   return autocomplete(input).includes('one-time-code') || /(?:^|[\s_-])(?:totp|otp|2fa|mfa|passcode)(?:$|[\s_\d-])|(?:verification|security|auth(?:entication)?|two[-_ ]?factor|one[-_ ]?time)[-_ ]?code|zescijferige\s*code/i.test(hint);
@@ -60,7 +60,7 @@ export function loginForms(document: Document, visible: (input: HTMLInputElement
   for (const fields of groups.values()) {
     const otp = otpFields(fields);
     if (otp) forms.push({ otp });
-    const passwords = fields.filter(input => input.type === 'password' && !otpHint(input) && !autocomplete(input).some(value => value.startsWith('cc-')));
+    const passwords = fields.filter(input => input.type === 'password' && !cardPurpose(input) && !otpHint(input) && !autocomplete(input).some(value => value.startsWith('cc-')));
     // A change form may offer the saved password only in one explicitly marked
     // current-password field. Never fill its new password, confirmation, or username.
     const isNew = (input: HTMLInputElement) => autocomplete(input).includes('new-password') || NEW_PASSWORD.test(`${input.name} ${input.id}`);

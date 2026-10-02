@@ -123,14 +123,14 @@ try {
   const logs = async () => (await readFile(join(directory, 'pairing.json.log'), 'utf8')).trim().split('\n').map(JSON.parse);
   const calls = async type => (await logs()).filter(message => message.type === type).length;
   await navigate('/cards');
-  await evaluate(websiteSession, 'document.querySelector("[autocomplete=cc-number]").focus()');
+  await evaluate(websiteSession, 'document.querySelector("[name=card_number]").focus()');
   const cardPanel = await popup();
   await until(async () => (await text(cardPanel.session)).includes('Test Visa'), 'Masked card picker');
   assert(!(await text(cardPanel.session)).includes('4111111111111111'));
   await click(cardPanel.session, 'Test Visa');
-  await until(() => evaluate(websiteSession, 'document.querySelector("[autocomplete=cc-number]").value === "4111111111111111"'), 'Card number filled');
-  assert.equal(await evaluate(websiteSession, 'document.querySelector("[autocomplete=cc-csc]").value'), '123');
-  assert.equal(await evaluate(websiteSession, 'document.querySelector("[autocomplete=cc-exp-month]").value'), '3');
+  await until(() => evaluate(websiteSession, 'document.querySelector("[name=card_number]").value === "4111111111111111"'), 'Card number filled');
+  assert.equal(await evaluate(websiteSession, 'document.querySelector("[name=cvv]").value'), '123');
+  assert.equal(await evaluate(websiteSession, 'document.querySelector("[name=expiration_month]").value'), '3');
   assert.equal(await evaluate(websiteSession, '!!window.cardSubmitted'), false);
   await send('Target.closeTarget', {targetId:cardPanel.target.targetId});
   await navigate('/');

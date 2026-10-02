@@ -144,15 +144,26 @@ The extension uses [MIT with Commons Clause v1.0](public/LICENSE).
 
 ## Credit card autofill
 
-Focus a payment field on an HTTPS checkout, open the Boltwarden toolbar popup,
-and select a saved card. The list shows the card name, brand, and last four digits.
+Focus the card-number field on an HTTPS checkout. Click the Boltwarden icon in the
+field and choose **Choose credit card**, or open the toolbar popup directly, then
+select a saved card. Existing Bitwarden/Vaultwarden **Card** items with a stored
+card number need no special tags or website URLs. The picker shows the card name,
+brand, and last four digits; it never lists full numbers or CVVs.
+
 The shortcut opens the picker rather than silently choosing a card. Protected cards
 still require a fresh master-password check in the desktop app. Embedded payment
 frames require destination confirmation and are filled separately.
 
-Supported fields use standard `autocomplete` purposes: `cc-name`, `cc-given-name`,
-`cc-family-name`, `cc-number`, `cc-csc`, `cc-exp`, `cc-exp-month`, `cc-exp-year`, and
-`cc-type`. Inputs, expiry dropdowns, and open shadow roots are supported. Generic
-unmarked fields, duplicate ambiguous fields, hidden/disabled fields, and closed
-shadow roots are not filled. Card fills never submit a form or save card details
-in extension storage. Cards are offered independently of login URL matching.
+Detection supports standard `cc-*` autocomplete fields and clearly named or labeled
+payment fields such as **Card Number**, **Expiration Month/Year**, and **CVV**.
+Fields without autocomplete must have a card number plus expiry or CVV in the same
+form; arbitrary number/code fields are not enough. Inputs, expiry dropdowns, and
+open shadow roots are supported. Ambiguous duplicate fields, hidden/disabled
+fields, and closed shadow roots are not filled. Card fills never submit a form
+or save card details in extension storage. Cards are offered independently of
+login URL matching.
+
+After updating the desktop app and extension, reload existing checkout tabs. If no
+card appears, check that browser integration is paired and the desktop vault is
+unlocked. Payment forms with unusual labels or inaccessible embedded controls may
+still require manual filling.

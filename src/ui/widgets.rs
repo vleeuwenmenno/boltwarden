@@ -212,20 +212,39 @@ pub fn field_label(ui: &mut Ui, text: &str) {
 }
 
 pub fn button(ui: &mut Ui, text: &str, primary: bool, enabled: bool) -> Response {
+    sized_button(ui, text, primary, enabled, 96.0)
+}
+
+pub fn icon_button(ui: &mut Ui, text: &str, enabled: bool) -> Response {
+    sized_button(ui, text, false, enabled, 32.0)
+}
+
+fn sized_button(ui: &mut Ui, text: &str, primary: bool, enabled: bool, width: f32) -> Response {
     let t = theme();
     let (fill, stroke, color) = if primary {
         (t.selected_bg, t.accent, t.selected_text)
     } else {
         (t.surface, t.border, t.text)
     };
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(RichText::new(text).color(color))
-            .fill(fill)
-            .stroke(egui::Stroke::new(1.0_f32, stroke))
-            .corner_radius(t.rounding)
-            .min_size(egui::vec2(96.0, 32.0)),
-    )
+    ui.scope(|ui| {
+        let widgets = &mut ui.visuals_mut().widgets;
+        widgets.inactive.weak_bg_fill = fill;
+        widgets.inactive.bg_fill = fill;
+        widgets.inactive.bg_stroke = egui::Stroke::new(1.0, stroke);
+        widgets.hovered.weak_bg_fill = t.hover;
+        widgets.hovered.bg_fill = t.hover;
+        widgets.hovered.bg_stroke = egui::Stroke::new(1.0, t.accent);
+        widgets.active.weak_bg_fill = t.selected_bg;
+        widgets.active.bg_fill = t.selected_bg;
+        widgets.active.bg_stroke = egui::Stroke::new(1.5, t.accent);
+        ui.add_enabled(
+            enabled,
+            egui::Button::new(RichText::new(text).color(color))
+                .corner_radius(t.rounding)
+                .min_size(egui::vec2(width, 32.0)),
+        )
+    })
+    .inner
 }
 
 /// Secondary button in the danger color, for destructive confirmations.

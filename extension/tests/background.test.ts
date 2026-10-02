@@ -562,6 +562,26 @@ describe('credit card document routing', () => {
       ? {type:'Matches',items:[{...one,name:'Visa',username:'Visa •••• 1111'}],epoch:1,next_offset:null}
       : {type:'Card',card:card(),epoch:1,document_id:request.document_id});
   }
+  it('routes inline card affordances to the popup without listing or releasing card data', async () => {
+    nativeCards(); const document = documentPort(0, tab.url, undefined, {kind:'card'});
+    expect((await inline(document, 'list')).ok).toBe(true);
+    expect(h.native.request).not.toHaveBeenCalled();
+    expect((await inline(document, 'fill', { itemId: 'card-one' })).ok).toBe(false);
+    expect(h.native.request).not.toHaveBeenCalled();
+    expect((await inline(document, 'open-popup')).ok).toBe(true);
+    expect(h.browser.action.openPopup).toHaveBeenCalled();
+  });
+  it('rejects an inline card handoff inside an HTTP top page or frame', async () => {
+    nativeCards();
+    const top = documentPort(0, tab.url, undefined, {kind:'card'});
+    tab.url = 'http://example.com/pay';
+    expect((await inline(top, 'list')).ok).toBe(false);
+    tab.url = 'https://example.com/pay';
+    const child = documentPort(2, 'http://example.com/card', undefined, {kind:'card'});
+    expect((await inline(child, 'open-popup')).ok).toBe(false);
+    expect(h.native.request).not.toHaveBeenCalled();
+    expect(h.browser.action.openPopup).not.toHaveBeenCalled();
+  });
   it('requires explicit popup selection even for one card and wipes returned card values', async () => {
     nativeCards(); const {messages} = documentPort(0,tab.url,undefined,{kind:'card'});
     await shortcut(); await vi.waitFor(() => expect(h.browser.action.openPopup).toHaveBeenCalled());

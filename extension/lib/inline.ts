@@ -1,4 +1,4 @@
-import { activeInput, formContains, loginForms, visibleInput } from './forms';
+import { activeInput, formContains, autofillForms, visibleInput } from './forms';
 import { newPasswordFields, generatePassword, fillGeneratedPassword, defaultGeneratorOptions, type GeneratorOptions } from './password-generator';
 import type { NativeSnapshot } from './native';
 import type { InlineAction, InlineValue, InlineState } from './inline-types';
@@ -42,7 +42,8 @@ export function createInlineController(doc: Document, options: InlineOptions) {
   const listen = (target: EventTarget, type: string, handler: EventListener, capture = false) => target.addEventListener(type, handler, { capture, signal: controller.signal });
   const generatorFields = (input: HTMLInputElement) => doc.location.protocol === 'https:' && doc.defaultView?.top === doc.defaultView ? newPasswordFields(input) : undefined;
   const eligible = (input: Element | null): input is HTMLInputElement => input instanceof HTMLInputElement && visibleInput(input)
-    && (!!generatorFields(input) || loginForms(doc).some(form => formContains(form, input)));
+    && (!!generatorFields(input) || autofillForms(doc).some(form => (!form.card || doc.location.protocol === 'https:') && formContains(form, input)));
+  const cardField = () => !!field && autofillForms(doc).some(form => !!form.card && formContains(form, field!));
   function close(notify = true) {
     const previous = token;
     revision++; open = false; busy = false; activeAction = undefined; token = undefined; value = undefined; menu.hidden = true; menu.replaceChildren(); mark.setAttribute('aria-expanded', 'false');
@@ -65,8 +66,8 @@ export function createInlineController(doc: Document, options: InlineOptions) {
   }
   function observeRoots() {
     const scan = (node: Document | ShadowRoot) => {
-      if (!observed.has(node)) { observer.observe(node, { subtree: true, childList: true, attributes: true,
-        attributeFilter: ['disabled', 'readonly', 'hidden', 'inert', 'type', 'autocomplete', 'name', 'id', 'style', 'class', 'aria-hidden', 'aria-disabled'] }); observed.add(node); }
+      if (!observed.has(node)) { observer.observe(node, { subtree: true, childList: true, characterData: true, attributes: true,
+        attributeFilter: ['disabled', 'readonly', 'hidden', 'inert', 'type', 'autocomplete', 'name', 'id', 'style', 'class', 'aria-hidden', 'aria-disabled', 'aria-label', 'aria-labelledby', 'form'] }); observed.add(node); }
       for (const element of node.querySelectorAll('*')) if (element.shadowRoot) scan(element.shadowRoot);
     };
     scan(doc);
@@ -79,7 +80,7 @@ export function createInlineController(doc: Document, options: InlineOptions) {
     if ((token && !options.current(token)) || (generatedFields && !current())) close();
     if (field && (!eligible(field) || doc.visibilityState === 'hidden')) { close(); field = undefined; }
     mark.hidden = !field;
-    mark.setAttribute('aria-label', field && generatorFields(field) ? 'Suggest a password' : 'Show Boltwarden logins');
+    mark.setAttribute('aria-label', field && generatorFields(field) ? 'Suggest a password' : cardField() ? 'Choose a credit card with Boltwarden' : 'Show Boltwarden logins');
     if (field) position();
   }
   function schedule() {
@@ -171,6 +172,12 @@ export function createInlineController(doc: Document, options: InlineOptions) {
       const another = doc.createElement('button'); another.type = 'button'; another.tabIndex = 0; another.className = 'action'; another.textContent = 'Generate another';
       another.addEventListener('click', event => { if (event.isTrusted) regenerate(); }); menu.append(another);
       menu.setAttribute('role', 'group'); menu.setAttribute('aria-label', 'Suggested password'); position(); return;
+    }
+    if (cardField()) {
+      menu.setAttribute('role', 'group'); menu.setAttribute('aria-label', 'Credit cards');
+      text('Choose a credit card in the Boltwarden toolbar popup.');
+      action('Choose credit card', 'open-popup');
+      position(); return;
     }
     menu.setAttribute('role', 'listbox'); menu.setAttribute('aria-label', 'Logins for this page');
     const heading = doc.createElement('div'); heading.className = 'heading'; heading.textContent = value?.frame?.kind === 'totp' ? 'Boltwarden · Verification codes' : 'Boltwarden · Logins for this page'; menu.append(heading);
@@ -294,7 +301,7 @@ export function createInlineController(doc: Document, options: InlineOptions) {
       render(); menu.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
     } else if (key.key === 'Enter') {
       key.preventDefault(); key.stopPropagation();
-      if (value?.frame?.crossOrigin || items.some(item => item.requires_confirmation)) void perform('open-popup');
+      if (cardField() || value?.frame?.crossOrigin || items.some(item => item.requires_confirmation)) void perform('open-popup');
       else if (value?.connection.state === 'locked') void perform('unlock');
       else if (items[index]) void perform('fill', items[index]!.id);
     }

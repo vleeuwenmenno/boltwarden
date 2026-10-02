@@ -233,6 +233,18 @@ focused, the item view keeps its keys (`Enter` copies, `E` edits, `Del` trashes)
 Closing the window with unsaved edits asks first. It runs as its own process next to
 the popup and locks together with it.
 
+### Settings and licenses
+
+Open **Settings** from the full window's toolbar or sidebar. **General**, **Browser integration**, and **SSH integration** tabs
+contain the same controls as the quick-access `settings` command, including
+locking, browser integration, passkey verification, SSH agent, and offline storage.
+Changes apply to both views.
+
+The **Licenses and acknowledgements** tab shows the project license, author,
+and searchable third-party license texts, including bundled fonts. Release binaries
+include these notices for offline viewing. Quick access also provides a
+**Settings → Licenses and acknowledgements** entry.
+
 ### Action center
 
 The action center checks active logins for reused passwords, weak passwords (zxcvbn

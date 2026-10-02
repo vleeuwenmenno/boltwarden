@@ -43,6 +43,29 @@ beforeEach(() => {
 afterEach(() => { for (const ui of controllers.splice(0)) ui.destroy(); vi.restoreAllMocks(); });
 
 describe('isolated inline login picker', () => {
+  it('offers a card picker handoff without exposing cards or filling inline', async () => {
+    vi.spyOn(document, 'location', 'get').mockReturnValue({protocol: 'https:'} as Location);
+    {
+      const fields = form(); fields.username.autocomplete = 'cc-number'; fields.password.autocomplete = 'cc-csc'; fields.username.focus();
+      const { mark, request } = setup();
+      expect(mark.hidden).toBe(false);
+      expect(mark.getAttribute('aria-label')).toBe('Choose a credit card with Boltwarden');
+      trusted(mark, 'click'); await settle();
+      expect(shadow.querySelector('[role=option]')).toBeNull();
+      expect(shadow.textContent).toContain('Choose a credit card');
+      trusted(shadow.querySelector<HTMLButtonElement>('.action')!, 'click'); await settle();
+      expect(request).toHaveBeenLastCalledWith('open-popup', { token: expect.any(String), targetId: 'target-one' });
+      expect(request.mock.calls.some(([action]) => action === 'fill')).toBe(false);
+    }
+  });
+  it('opens the card toolbar picker with trusted ArrowDown and Enter', async () => {
+    vi.spyOn(document, 'location', 'get').mockReturnValue({protocol: 'https:'} as Location);
+    const fields = form(); fields.username.autocomplete = 'cc-number'; fields.password.autocomplete = 'cc-csc'; fields.username.focus();
+    const { request } = setup(vi.fn<InlineOptions['request']>().mockResolvedValue({ connection: { state: 'ready', epoch: 1 } }));
+    trusted(fields.username, 'keydown', 'ArrowDown'); await settle();
+    trusted(fields.username, 'keydown', 'Enter'); await settle();
+    expect(request).toHaveBeenLastCalledWith('open-popup', { token: expect.any(String) });
+  });
   it('keeps styling and trusted filling isolated when Firefox rejects constructed sheets', async () => {
     vi.spyOn(CSSStyleSheet.prototype, 'replaceSync').mockImplementation(() => { throw new Error('Accessing from Xray wrapper is not supported.'); });
     const fields = form(); fields.username.focus();

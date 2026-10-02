@@ -2,7 +2,7 @@ import { fillCard } from '../lib/cards';
 import { isCard, clearCard } from '../lib/protocol';
 import { defineContentScript } from 'wxt/utils/define-content-script';
 import { browser } from 'wxt/browser';
-import { activeInput, autofillForms, fillForm, fillOtp, formContains, formKind, loginForms, sameForm, selectForm, visibleInput, type LoginForm } from '../lib/forms';
+import { activeInput, autofillForms, fillForm, fillOtp, formContains, formKind, sameForm, selectForm, visibleInput, type LoginForm } from '../lib/forms';
 import { installPasswordCapture, saveNotice } from '../lib/password-capture';
 import { createInlineController } from '../lib/inline';
 import type { InlineAction, InlineValue } from '../lib/inline-types';
@@ -27,7 +27,7 @@ export default defineContentScript({
     };
     const currentInline = (token: string) => !!inlinePin && token === inlinePin.token && inlinePin.url === location.href
       && activeInput(document) === inlinePin.input && visibleInput(inlinePin.input)
-      && loginForms(document).some(form => sameForm(form, inlinePin!.form));
+      && autofillForms(document).some(form => sameForm(form, inlinePin!.form));
     const request = (action: InlineAction, fields: { token: string; targetId?: string; itemId?: string }) => new Promise<InlineValue>((resolve, reject) => {
       if (!port || !generation || (action !== 'dismiss' && !currentInline(fields.token))) { reject(new Error('Boltwarden is not connected to this page.')); return; }
       const id = crypto.randomUUID();
@@ -40,7 +40,7 @@ export default defineContentScript({
       if (inline || ctx.isInvalid || suspended) return;
       inline = createInlineController(document, {
         pin(input) {
-          const form = loginForms(document).find(form => formContains(form, input));
+          const form = autofillForms(document).find(form => formContains(form, input));
           if (!form || activeInput(document) !== input || !visibleInput(input)) return undefined;
           inlinePin = { token: crypto.randomUUID(), form, url: location.href, input };
           return inlinePin.token;

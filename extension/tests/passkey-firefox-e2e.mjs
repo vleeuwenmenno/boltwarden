@@ -125,9 +125,35 @@ try {
     await evaluate('(() => { window.fixtureLogs = []; const info = console.info; console.info = (...args) => { window.fixtureLogs.push(args); info.apply(console, args); }; return true; })()');
   };
   await navigate('/cards');
-  await evaluate('document.querySelector("[autocomplete=cc-number]").focus()');
+  await evaluate('document.querySelector("[name=card_number]").focus()');
+  // Read closed-shadow geometry only from the disposable browser's privileged
+  // test context, then click through WebDriver so production receives isTrusted.
+  const clickCardInline = async selector => {
+    await send('Marionette:SetContext', {value:'chrome'});
+    await send('WebDriver:ExecuteScript', {script: `window.cardInlineGeometry = null;
+      const manager = gBrowser.selectedBrowser.messageManager;
+      const receive = message => { window.cardInlineGeometry = message.data; manager.removeMessageListener("BoltwardenCardGeometry", receive); };
+      manager.addMessageListener("BoltwardenCardGeometry", receive);
+      manager.loadFrameScript("data:application/javascript," + encodeURIComponent(\`const {setInterval, clearInterval} = ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs"); let attempts = 0; const timer = setInterval(() => {
+        const root = content.document.querySelector("[data-boltwarden-inline]")?.openOrClosedShadowRoot;
+        const button = root?.querySelector(${JSON.stringify(selector)});
+        if (button && !button.hidden && !button.disabled && button.getClientRects().length) {
+          clearInterval(timer); const rect = button.getBoundingClientRect();
+          sendAsyncMessage("BoltwardenCardGeometry", { x: Math.floor(rect.x + rect.width / 2), y: Math.floor(rect.y + rect.height / 2), label: button.getAttribute("aria-label") || button.textContent });
+        } else if (++attempts > 200) { clearInterval(timer); sendAsyncMessage("BoltwardenCardGeometry", {error:"Visible inline card button unavailable"}); }
+      }, 50);\`), false); return true;`, args:[], newSandbox:false, sandbox:null});
+    const point = await until(async () => (await send('WebDriver:ExecuteScript', {script:'return window.cardInlineGeometry;', args:[], newSandbox:false, sandbox:null})).value, 'Visible Firefox inline card affordance');
+    assert(!point.error, point.error);
+    assert.match(point.label, /credit card/i);
+    await send('Marionette:SetContext', {value:'content'});
+    await send('WebDriver:PerformActions', {actions:[{type:'pointer', id:'card-pointer', parameters:{pointerType:'mouse'}, actions:[
+      {type:'pointerMove', origin:'viewport', x:point.x, y:point.y}, {type:'pointerDown', button:0}, {type:'pointerUp', button:0},
+    ]}]});
+    await send('WebDriver:ReleaseActions');
+  };
+  await clickCardInline('.mark');
+  await clickCardInline('.action');
   await send('Marionette:SetContext', {value:'chrome'});
-  await send('WebDriver:ExecuteScript', {script: `const {ExtensionParent} = ChromeUtils.importESModule("resource://gre/modules/ExtensionParent.sys.mjs"); ExtensionParent.apiManager.global.browserActionFor(WebExtensionPolicy.getByID(${JSON.stringify(identities.firefox_id)}).extension).triggerAction(window); return true;`, args:[], newSandbox:false, sandbox:null});
   await until(async () => (await send('WebDriver:ExecuteScript', {script:'return !!document.querySelector(".webextension-popup-browser")?.messageManager;', args:[], newSandbox:false, sandbox:null})).value, 'Firefox toolbar popup');
   // Marionette cannot enter a remote XUL popup. Drive its real DOM through the
   // disposable test browser's privileged frame-script bridge.
@@ -138,9 +164,9 @@ try {
       else if (++attempts > 200) { clearInterval(timer); throw new Error("Card picker unavailable"); }
     }, 50);\`), false); return true;`, args:[], newSandbox:false, sandbox:null});
   await send('Marionette:SetContext', {value:'content'});
-  await until(() => evaluate('document.querySelector("[autocomplete=cc-number]").value === "4111111111111111"'), 'Firefox card fill');
-  assert.equal(await evaluate('document.querySelector("[autocomplete=cc-csc]").value'), '123');
-  assert.equal(await evaluate('document.querySelector("[autocomplete=cc-exp-month]").value'), '3');
+  await until(() => evaluate('document.querySelector("[name=card_number]").value === "4111111111111111"'), 'Firefox card fill');
+  assert.equal(await evaluate('document.querySelector("[name=cvv]").value'), '123');
+  assert.equal(await evaluate('document.querySelector("[name=expiration_month]").value'), '3');
   assert.equal(await evaluate('!!window.cardSubmitted'), false);
   // Closing the toolbar is a separate user action. Leaving it open can retain
   // browser-chrome focus and suspend the following WebAuthn request on CI.
@@ -207,7 +233,7 @@ try {
   await send('WebDriver:PerformActions', {actions: [{type:'key', id:'keyboard', actions:[{type:'keyDown', value:'\uE007'}, {type:'keyUp', value:'\uE007'}]}]});
   await until(() => evaluate("document.getElementById('old-password').value === 'test-password-only'"), 'Current password fill');
   assert.equal(await evaluate("document.getElementById('test-password').value === 'new-sentinel' && document.getElementById('confirm-password').value === 'new-sentinel' && document.getElementById('test-username').value === 'boltwarden-test-alice'"), true);
-  console.log(`Firefox ${session.capabilities.browserVersion}: credit card filling, passkey creation, assertion, credential methods, denial, abort, password registration and change capture passed.`);
+  console.log(`Firefox ${session.capabilities.browserVersion}: trusted inline card picker handoff, credit card filling, passkey creation, assertion, credential methods, denial, abort, password registration and change capture passed.`);
 } catch (error) {
   console.error(error);
   if (existsSync(join(directory, 'pairing.json.log'))) console.error(await readFile(join(directory, 'pairing.json.log'), 'utf8'));

@@ -138,6 +138,8 @@ pub struct App {
     auth_auto_hide: bool,
     auth_inhibit_focus_hide: bool,
     settings: AppSettings,
+    acknowledgements_open: bool,
+    settings_checked_at: Instant,
     capture_rx: Option<mpsc::Receiver<CaptureUpdate>>,
     ssh_agent_status: SshAgentStatus,
     window_visible: bool,
@@ -242,6 +244,8 @@ impl App {
             auth_inhibit_focus_hide: false,
             icons: IconCache::new(settings.show_website_icons),
             settings,
+            acknowledgements_open: false,
+            settings_checked_at: Instant::now(),
             capture_rx: None,
             ssh_agent_status,
             window_visible: true,
@@ -284,6 +288,7 @@ impl App {
     }
 
     fn reset_locked(&mut self) {
+        self.acknowledgements_open = false;
         // Replacing the channel also discards any response still held by an old worker.
         let (tx, rx) = mpsc::channel();
         self.tx = tx;
@@ -1235,6 +1240,7 @@ impl App {
             self.search_state.capture_pending = false;
             match result {
                 Ok(()) => {
+                    self.refresh_settings(true);
                     self.settings.obscure_screen_capture = obscure;
                     if persist {
                         self.save_and_apply_settings();
@@ -1248,6 +1254,30 @@ impl App {
         } else {
             self.search_state.capture_pending = true;
             ctx.request_repaint_after(Duration::from_millis(50));
+        }
+    }
+
+    fn refresh_settings(&mut self, force: bool) {
+        if crate::demo::enabled()
+            || (!force && self.settings_checked_at.elapsed() < Duration::from_secs(1))
+        {
+            return;
+        }
+        self.settings_checked_at = Instant::now();
+        let latest = config::load_settings();
+        if latest != self.settings {
+            self.icons.set_enabled(latest.show_website_icons);
+            if self.search_state.start_list != latest.start_list {
+                self.search_state.start_list = latest.start_list;
+                self.search_state.force_refresh();
+            }
+            if self.search_state.ssh_agent_path_input.as_ref()
+                == Some(&self.settings.ssh_agent_socket_path)
+            {
+                self.search_state.ssh_agent_path_input = None;
+            }
+            self.settings = latest;
+            self.ssh_agent_status = self.backend.ssh_agent_status(&self.settings);
         }
     }
 
@@ -1276,7 +1306,6 @@ impl eframe::App for App {
 
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &root.ctx().clone();
-
         if ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.hide_quick_access(ctx);
@@ -1562,6 +1591,21 @@ impl App {
     }
 
     fn update_search(&mut self, root: &mut egui::Ui) {
+        self.refresh_settings(false);
+        if self.acknowledgements_open {
+            egui::CentralPanel::default().show(root, |ui| {
+                if crate::ui::widgets::button(ui, "Back to settings", false, true).clicked()
+                    || ui.input_mut(|input| {
+                        input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                    })
+                {
+                    self.acknowledgements_open = false;
+                }
+                crate::ui::acknowledgements::draw(ui);
+            });
+            return;
+        }
+
         if self.search_state.view == SearchView::PairedBrowsers
             && ((!self.search_state.paired_browsers.loaded
                 && self.search_state.paired_browsers.error.is_none())
@@ -1595,6 +1639,7 @@ impl App {
         ) else {
             return;
         };
+        self.refresh_settings(true);
         match action {
             SearchAction::QuickCopy(idx) => {
                 if let Some(item) = self.search_state.results.get(idx) {
@@ -1613,6 +1658,7 @@ impl App {
                 }
                 self.save_and_apply_settings();
             }
+            SearchAction::OpenAcknowledgements => self.acknowledgements_open = true,
             SearchAction::OpenWindow => match self.backend.open_window() {
                 Ok(()) => self.hide_quick_access(ctx),
                 Err(e) => self.search_state.warning = Some(e),

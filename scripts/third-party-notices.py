@@ -15,6 +15,14 @@ def license_files(directory):
         for file in sorted(base.iterdir()):
             if file.is_file() and file.name.lower().startswith(('license', 'licence', 'copying', 'copyright', 'notice')):
                 yield file
+    # epaint_default_fonts ships the font authors' licenses beside the fonts,
+    # including Hack-Regular.txt, OFL.txt, UFL.txt and the emoji font license.
+    # Keep these texts even though they do not use a LICENSE filename.
+    fonts = directory / 'fonts'
+    if fonts.is_dir():
+        for file in sorted(fonts.glob('*.txt')):
+            if file.is_file():
+                yield file
 
 
 def main():

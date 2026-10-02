@@ -3,7 +3,8 @@
 //! (the master password "2fa" leads to the two-step screen) and `BOLTWARDEN_DEMO=ssh` opens an
 //! SSH approval prompt. The vault window runs with `BOLTWARDEN_DEMO=1 boltwarden
 //! --vault-window`; `BOLTWARDEN_DEMO=action` opens it on the action center. Nothing is read
-//! from or written to disk except the icon cache.
+//! from or written to disk except the icon cache. `BOLTWARDEN_DEMO=settings` and
+//! `BOLTWARDEN_DEMO=licenses` open the corresponding full-window settings pages.
 
 use crate::backend::{BackendError, SearchResult};
 use crate::bw::TwoFactorProvider;

@@ -40,6 +40,7 @@ build: ## Build the debug binary
 	$(CARGO) build
 
 release: ## Build the release binary
+	python3 scripts/third-party-notices.py rust THIRD_PARTY_NOTICES.txt
 	$(CARGO) build --release
 
 check: ## Check Rust code

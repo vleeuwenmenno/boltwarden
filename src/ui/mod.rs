@@ -1,3 +1,4 @@
+pub mod acknowledgements;
 pub mod auth;
 pub mod browser_approval;
 pub mod browser_setup;
