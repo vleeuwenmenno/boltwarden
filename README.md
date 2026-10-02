@@ -12,34 +12,18 @@ Vaultwarden project.
 Open quick access from a keyboard shortcut or tray icon, search your vault,
 and copy the field you need. Use the full vault window to browse and edit entries.
 
-This project talks to the Bitwarden/Vaultwarden HTTP API directly. It does not
-shell out to the `bw` CLI.
-
 ## Features
 
-- Native Rust desktop GUI using `egui`/`eframe`
-- Bitwarden and Vaultwarden login
-- Two-factor login with authenticator codes or YubiKey OTP; other methods are shown as unsupported
-- Saved refresh session for restart-friendly unlock
-- Long-running daemon with a tray icon
-- Popup window that can be opened, hidden, or toggled by command
-- Search-first workflow with keyboard navigation
-- Title-prioritized search results
-- Entry detail view with username, password, URI, notes, custom fields, and TOTP
-- Copy selected fields from the keyboard or mouse
-- Optional SSH agent socket for official Bitwarden/Vaultwarden SSH key items
-- Chrome/Chromium and Firefox extensions for login, TOTP, and credit card filling
-- Experimental passkey registration and sign-in through the desktop vault
-- Auto-hide on Escape and focus loss, with confirmation before discarding edits
-- Random password generation, masked TOTP seeds, and timed secret reveal
-- Manual and periodic vault synchronization
-- A full vault window with a folder tree, favorites and an action center
-- Passkeys shown on items; the editor can remove them after a confirmation
-
-Credit cards can be selected from the extension toolbar on HTTPS payment forms
-with standard `cc-*` autocomplete fields. The popup displays masked card numbers;
-fills require explicit selection and never submit payments. See the
-[browser extension guide](extension/README.md#credit-card-autofill).
+- **Quick access and full vault** — reach credentials from a keyboard shortcut,
+  or browse and edit your vault in a dedicated desktop window.
+- **Browser autofill** — fill logins, verification codes, and credit cards in
+  Chrome/Chromium and Firefox using your desktop vault.
+- **Passkeys (experimental)** — create and use passkeys on supported websites,
+  stored in your Bitwarden or Vaultwarden vault.
+- **SSH agent** — authenticate with SSH keys from your vault, with desktop approval
+  before signing.
+- **Offline access** — unlock an encrypted local vault cache when your server
+  is unavailable.
 
 ## Downloads
 
