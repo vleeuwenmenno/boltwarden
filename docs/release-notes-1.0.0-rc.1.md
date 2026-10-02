@@ -12,7 +12,8 @@ First 1.0 release candidate for testing, not the final stable 1.0 release.
 - API: browser integration protocol v1. Extension version remains 0.5.6 independently
   of the desktop RC version.
 - Package versions: Debian `1.0.0~rc.1`, Arch `1.0.0rc1-1`; both upgrade to final 1.0.0.
-- Passkeys remain experimental. The maintainer reports successful Vaultwarden login/2FA,
+- Passkeys remain experimental. Firefox can fall back to its own authenticator when
+  navigation timing cannot securely identify the current document. The maintainer reports successful Vaultwarden login/2FA,
   offline unlock, filling, and revocation on the pre-RC build. Exact tagged artifacts,
   Bitwarden, and the remaining desktop/session checks still need manual validation.
 

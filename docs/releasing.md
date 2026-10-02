@@ -25,7 +25,9 @@ and its checksum. Releases attach the ZIPs and checksums individually. All brows
 credentials. They do not use a real vault. The source ZIP contains the license,
 source code, lockfile, tests, and reviewer build instructions.
 The Firefox passkey fixture repeats same-URL navigation ten times to exercise
-document timing and policy binding. For a longer local stress run, set
+document timing and policy binding. If Firefox reports ambiguous timing, the fixture
+checks that fallback makes no vault assertion request and cancels the native prompt.
+It still requires explicit desktop-denial coverage. For a longer local stress run, set
 `BOLTWARDEN_FIREFOX_NAVIGATIONS=100` when running `tests/passkey-firefox-e2e.mjs`
 from the extension directory after building it.
 
