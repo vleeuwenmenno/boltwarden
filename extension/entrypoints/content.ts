@@ -1,6 +1,8 @@
+import { fillCard } from '../lib/cards';
+import { isCard, clearCard } from '../lib/protocol';
 import { defineContentScript } from 'wxt/utils/define-content-script';
 import { browser } from 'wxt/browser';
-import { activeInput, fillForm, fillOtp, formContains, formKind, loginForms, sameForm, selectForm, visibleInput, type LoginForm } from '../lib/forms';
+import { activeInput, autofillForms, fillForm, fillOtp, formContains, formKind, loginForms, sameForm, selectForm, visibleInput, type LoginForm } from '../lib/forms';
 import { installPasswordCapture, saveNotice } from '../lib/password-capture';
 import { createInlineController } from '../lib/inline';
 import type { InlineAction, InlineValue } from '../lib/inline-types';
@@ -73,7 +75,7 @@ export default defineContentScript({
         }
         try {
           if (message.type === 'inspect') {
-            const forms = loginForms(document);
+            const forms = autofillForms(document);
             const active = activeInput(document);
             if (typeof message.requestedToken === 'string') {
               const focused = currentInline(message.requestedToken);
@@ -82,7 +84,7 @@ export default defineContentScript({
               const form = selectForm(forms, active);
               selected = form ? { token: crypto.randomUUID(), form, url: location.href } : undefined;
               connection.postMessage({ type: 'inspected', id: message.id, generation, token: selected?.token ?? null, kind: form ? formKind(form) : undefined,
-                focused: document.hasFocus() && active instanceof HTMLInputElement && ['text', 'email', 'tel', 'password', 'number'].includes(active.type),
+                focused: document.hasFocus() && (active instanceof HTMLInputElement || active instanceof HTMLSelectElement) && ['text', 'email', 'tel', 'password', 'number', 'month', 'select-one'].includes(active.type),
                 formCount: forms.length });
             }
           } else if (message.type === 'fill') {
@@ -90,16 +92,19 @@ export default defineContentScript({
             const target = isInline ? inlinePin : selected;
             if (isInline) inlinePin = undefined; else selected = undefined;
             const current = () => !!target && target.url === location.href && message.generation === generation
-              && loginForms(document).some(form => sameForm(form, target.form))
+              && autofillForms(document).some(form => sameForm(form, target.form))
               && (!isInline || ('input' in target && (activeInput(document) === target.input || !!target.form.otp && formContains(target.form, activeInput(document))) && visibleInput(target.input as HTMLInputElement)));
             if (!target || target.token !== message.token || !current()) {
               throw new Error('The page or login form changed. Try again.');
             }
-            if (target.form.otp) {
+            if (target.form.card) {
+              if (isInline || location.protocol !== 'https:' || message.kind !== 'card' || !isCard(message.card)) throw new Error('Expected an explicit secure card fill.');
+              try { fillCard(target.form.card, message.card, visibleInput, current); } finally { clearCard(message.card); }
+            } else if (target.form.otp) {
               if (message.kind !== 'totp' || typeof message.code !== 'string' || typeof message.expiresAt !== 'number') throw new Error('Expected a verification code.');
               fillOtp(target.form, message.code, message.expiresAt, visibleInput, current);
             } else {
-              if (message.kind === 'totp' || typeof message.username !== 'string' || typeof message.password !== 'string') throw new Error('Expected login credentials.');
+              if (message.kind === 'totp' || message.kind === 'card' || typeof message.username !== 'string' || typeof message.password !== 'string') throw new Error('Expected login credentials.');
               fillForm(target.form, message.username, message.password, visibleInput, current);
             }
             if (isInline) inline?.reset();

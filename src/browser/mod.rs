@@ -492,6 +492,7 @@ fn read_loop(inner: &Arc<Inner>, connection: &Arc<Connection>, mut socket: UnixS
                 BrowserRequest::SaveLogin { .. }
                     | BrowserRequest::FillLogin { .. }
                     | BrowserRequest::FillTotp { .. }
+                    | BrowserRequest::FillCard { .. }
                     | BrowserRequest::PasskeyGet { .. }
                     | BrowserRequest::PasskeyCreate { .. }
             ) && !allow_rate(&mut secret_requests, 5))

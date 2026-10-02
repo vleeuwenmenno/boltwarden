@@ -12,7 +12,8 @@ function displayed(input: HTMLInputElement): boolean {
 /** Read only the submitted form. Prefer an explicit new password over the old one. */
 export function submittedLogin(form: HTMLFormElement, visible = displayed): SubmittedLogin | undefined {
   const fields = Array.from(form.elements).filter((element): element is HTMLInputElement => element instanceof HTMLInputElement
-    && !element.disabled && element.type !== 'hidden' && visible(element));
+    && !element.disabled && element.type !== 'hidden'
+    && !element.autocomplete.toLowerCase().split(/\s+/).some(token => token.startsWith('cc-')) && visible(element));
   const passwords = fields.filter(input => input.type === 'password' && !input.autocomplete.split(/\s+/).includes('one-time-code'));
   const fresh = passwords.filter(input => input.autocomplete.split(/\s+/).includes('new-password') || /new[-_ ]?password|confirm|repeat/i.test(`${input.name} ${input.id}`));
   const selected = fresh.length ? fresh : passwords;

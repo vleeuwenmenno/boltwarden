@@ -1,4 +1,5 @@
-export interface LoginForm { username?: HTMLInputElement; password?: HTMLInputElement; otp?: HTMLInputElement[] }
+import { cardForms, sameCard, type CardForm } from './cards';
+export interface LoginForm { card?: CardForm; username?: HTMLInputElement; password?: HTMLInputElement; otp?: HTMLInputElement[] }
 const LOGIN_NAME = /user(?:[-_ ]?name)?|e-?mail|login|identifier/i;
 const NEW_PASSWORD = /new[-_ ]?password|confirm|repeat|retype/i;
 
@@ -11,8 +12,8 @@ export function inputs(root: Document | ShadowRoot): HTMLInputElement[] {
   return found;
 }
 
-export function visibleInput(input: HTMLInputElement): boolean {
-  if (!input.isConnected || input.disabled || input.readOnly || input.type === 'hidden' || input.getClientRects().length === 0) return false;
+export function visibleInput(input: HTMLInputElement | HTMLSelectElement): boolean {
+  if (!input.isConnected || input.disabled || ('readOnly' in input && input.readOnly) || input.type === 'hidden' || input.getClientRects().length === 0) return false;
   let element: Element | null = input;
   while (element) {
     if (element.hasAttribute('hidden') || element.hasAttribute('inert') || element.getAttribute('aria-hidden') === 'true' || element.getAttribute('aria-disabled') === 'true') return false;
@@ -26,11 +27,12 @@ export function visibleInput(input: HTMLInputElement): boolean {
 
 function autocomplete(input: HTMLInputElement): string[] { return input.autocomplete.toLowerCase().split(/\s+/); }
 function isUsername(input: HTMLInputElement): boolean {
-  return ['text', 'email', 'tel'].includes(input.type) && !autocomplete(input).some(value => value === 'one-time-code' || value === 'new-password');
+  return ['text', 'email', 'tel'].includes(input.type) && !autocomplete(input).some(value => value.startsWith('cc-') || value === 'one-time-code' || value === 'new-password');
 }
 
 /** OTP fields need an explicit purpose; arbitrary short or numeric fields are not codes. */
 function otpHint(input: HTMLInputElement): boolean {
+  if (autocomplete(input).some(value => value.startsWith('cc-'))) return false;
   const hint = `${input.name} ${input.id} ${input.getAttribute('aria-label') ?? ''} ${Array.from(input.labels ?? []).map(label => label.textContent ?? '').join(' ')}`;
   if (/recovery|backup|herstel/i.test(hint)) return false;
   return autocomplete(input).includes('one-time-code') || /(?:^|[\s_-])(?:totp|otp|2fa|mfa|passcode)(?:$|[\s_\d-])|(?:verification|security|auth(?:entication)?|two[-_ ]?factor|one[-_ ]?time)[-_ ]?code|zescijferige\s*code/i.test(hint);
@@ -44,11 +46,11 @@ function otpFields(fields: HTMLInputElement[]): HTMLInputElement[] | undefined {
   if (hinted.length === 1 && hinted[0]!.maxLength !== 1) return hinted;
 }
 export function formContains(form: LoginForm, input: Element | null): boolean {
-  return form.username === input || form.password === input || !!form.otp?.some(field => field === input);
+  return !!form.card && Object.values(form.card).includes(input as HTMLInputElement) || form.username === input || form.password === input || !!form.otp?.some(field => field === input);
 }
-export function formKind(form: LoginForm): 'login' | 'totp' { return form.otp ? 'totp' : 'login'; }
+export function formKind(form: LoginForm): 'login' | 'totp' | 'card' { return form.card ? 'card' : form.otp ? 'totp' : 'login'; }
 
-export function loginForms(document: Document, visible = visibleInput): LoginForm[] {
+export function loginForms(document: Document, visible: (input: HTMLInputElement) => boolean = visibleInput): LoginForm[] {
   const groups = new Map<Node, HTMLInputElement[]>();
   for (const input of inputs(document).filter(visible)) {
     const group = input.form ?? input.closest('[role="form"]') ?? input.getRootNode();
@@ -58,7 +60,7 @@ export function loginForms(document: Document, visible = visibleInput): LoginFor
   for (const fields of groups.values()) {
     const otp = otpFields(fields);
     if (otp) forms.push({ otp });
-    const passwords = fields.filter(input => input.type === 'password' && !otpHint(input));
+    const passwords = fields.filter(input => input.type === 'password' && !otpHint(input) && !autocomplete(input).some(value => value.startsWith('cc-')));
     // A change form may offer the saved password only in one explicitly marked
     // current-password field. Never fill its new password, confirmation, or username.
     const isNew = (input: HTMLInputElement) => autocomplete(input).includes('new-password') || NEW_PASSWORD.test(`${input.name} ${input.id}`);
@@ -78,6 +80,10 @@ export function loginForms(document: Document, visible = visibleInput): LoginFor
   return forms;
 }
 
+export function autofillForms(document: Document): LoginForm[] {
+  return [...loginForms(document), ...cardForms(document).map(card => ({ card }))];
+}
+
 export function activeInput(document: Document): Element | null {
   let active = document.activeElement;
   while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
@@ -91,11 +97,11 @@ export function selectForm(forms: LoginForm[], active: Element | null): LoginFor
 }
 
 export function sameForm(left: LoginForm, right: LoginForm): boolean {
-  return left.username === right.username && left.password === right.password
+  return sameCard(left.card, right.card) && left.username === right.username && left.password === right.password
     && (left.otp === undefined ? right.otp === undefined : !!right.otp && left.otp.length === right.otp.length && left.otp.every((field, i) => field === right.otp![i]));
 }
 
-export function fillForm(form: LoginForm, username: string, password: string, visible = visibleInput, stillCurrent = () => true): void {
+export function fillForm(form: LoginForm, username: string, password: string, visible: (input: HTMLInputElement) => boolean = visibleInput, stillCurrent = () => true): void {
   const fields: [HTMLInputElement | undefined, string][] = [[form.username, username], [form.password, password]];
   const expected = fields.map(([input]) => ({ type: input?.type, autocomplete: input?.autocomplete }));
   // Validate every target before changing the first field.
@@ -114,7 +120,7 @@ export function fillForm(form: LoginForm, username: string, password: string, vi
 }
 
 /** Fill only the pinned OTP fields. Revalidate after each input handler and never submit. */
-export function fillOtp(form: LoginForm, code: string, expiresAt: number, visible = visibleInput, stillCurrent = () => true): void {
+export function fillOtp(form: LoginForm, code: string, expiresAt: number, visible: (input: HTMLInputElement) => boolean = visibleInput, stillCurrent = () => true): void {
   const fields = form.otp;
   if (!fields?.length || !/^\d{6,10}$/.test(code) || !Number.isSafeInteger(expiresAt)
     || (fields.length > 1 && fields.length !== code.length)) throw new Error('The verification code does not fit this field.');

@@ -302,6 +302,29 @@ impl BwClient {
     }
 
     #[cfg(test)]
+    pub(crate) fn browser_card_test_fixture(protected: bool) -> Self {
+        let mut client = Self::browser_test_fixture();
+        let stored = &client.ciphers["cipher-edit"];
+        let mut raw = stored.raw.clone();
+        raw["type"] = json!(3);
+        raw["reprompt"] = json!(u8::from(protected));
+        raw["login"] = Value::Null;
+        raw["card"] = json!({});
+        for (key, value) in [
+            ("cardholderName", "Alice Example"),
+            ("number", "4111111111111111"),
+            ("code", "123"),
+            ("expMonth", "3"),
+            ("expYear", "2030"),
+            ("brand", "Visa"),
+        ] {
+            raw["card"][key] = encrypt_value(value, &stored.item_key).unwrap();
+        }
+        client.replace_cipher(raw).unwrap();
+        client
+    }
+
+    #[cfg(test)]
     pub(crate) fn browser_totp_test_fixture() -> Self {
         let mut client = Self::browser_test_fixture();
         client.items[0].totp = Some("JBSWY3DPEHPK3PXP".into());
@@ -756,6 +779,85 @@ impl BwClient {
             return Err(BwError::Cli("Incorrect master password".into()));
         }
         Ok(())
+    }
+
+    fn card_details(&self, id: &str) -> Result<crate::browser::protocol::CardDetails, BwError> {
+        let stored = self.ciphers.get(id).ok_or(BwError::NotFound)?;
+        // Read canonical card fields, never similarly named user-defined fields.
+        let raw = raw_get(&stored.raw, "card")
+            .filter(|value| value.is_object())
+            .or_else(|| raw_get(&stored.raw, "data").filter(|value| value.is_object()))
+            .ok_or(BwError::NotFound)?;
+        let card: CardResponse =
+            serde_json::from_value(raw.clone()).map_err(|_| BwError::NotFound)?;
+        let decrypt = |value: Option<String>| -> Result<String, BwError> {
+            Ok(decrypt_opt_string(value.as_deref(), &stored.item_key)?.unwrap_or_default())
+        };
+        Ok(crate::browser::protocol::CardDetails {
+            cardholder: decrypt(card.cardholder_name)?,
+            number: decrypt(card.number)?,
+            code: decrypt(card.code)?,
+            exp_month: decrypt(card.exp_month)?,
+            exp_year: decrypt(card.exp_year)?,
+            brand: decrypt(card.brand)?,
+        })
+    }
+
+    pub fn browser_cards(&self) -> Result<Vec<BrowserMatchSummary>, BwError> {
+        self.require_unlocked()?;
+        let mut cards = Vec::new();
+        for item in &self.items {
+            if item.state != ItemState::Active || item.item_type != "card" {
+                continue;
+            }
+            let card = self.card_details(&item.id)?;
+            let digits = Zeroizing::new(
+                card.number
+                    .chars()
+                    .filter(char::is_ascii_digit)
+                    .collect::<String>(),
+            );
+            if !(12..=19).contains(&digits.len()) {
+                continue;
+            }
+            cards.push(BrowserMatchSummary {
+                id: item.id.clone(),
+                name: item.name.clone(),
+                username: Some(
+                    format!("{} •••• {}", card.brand, &digits[digits.len() - 4..])
+                        .trim()
+                        .to_string(),
+                ),
+                revision: browser_revision(self.ciphers.get(&item.id).ok_or(BwError::NotFound)?)?,
+                reprompt: self.item_requires_reprompt(&item.id),
+                insecure_downgrade: false,
+            });
+        }
+        cards.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        Ok(cards)
+    }
+
+    pub fn browser_card(
+        &self,
+        id: &str,
+        revision: &str,
+        protected_authorized: bool,
+    ) -> Result<crate::browser::protocol::CardDetails, BwError> {
+        self.require_unlocked()?;
+        let item = self
+            .items
+            .iter()
+            .find(|item| {
+                item.id == id && item.state == ItemState::Active && item.item_type == "card"
+            })
+            .ok_or(BwError::NotFound)?;
+        if browser_revision(self.ciphers.get(id).ok_or(BwError::NotFound)?)? != revision {
+            return Err(BwError::NotFound);
+        }
+        if self.item_requires_reprompt(&item.id) && !protected_authorized {
+            return Err(BwError::RepromptRequired);
+        }
+        self.card_details(id)
     }
 
     pub fn browser_matches(
@@ -5766,6 +5868,32 @@ mod tests {
         client.verify_master_password("correct").unwrap();
         client.verified_unlock = true;
         client
+    }
+
+    #[test]
+    fn browser_cards_mask_summaries_and_recheck_type_revision_reprompt_and_state() {
+        let mut client = BwClient::browser_card_test_fixture(true);
+        let cards = client.browser_cards().unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].username.as_deref(), Some("Visa •••• 1111"));
+        let revision = cards[0].revision.clone();
+        assert!(matches!(
+            client.browser_card("cipher-edit", &revision, false),
+            Err(BwError::RepromptRequired)
+        ));
+        assert!(client.browser_card("cipher-edit", "stale", true).is_err());
+        let card = client.browser_card("cipher-edit", &revision, true).unwrap();
+        assert_eq!(card.number, "4111111111111111");
+        assert_eq!(card.code, "123");
+        assert!(!format!("{card:?}").contains("4111"));
+        client.items[0].state = ItemState::Deleted;
+        assert!(client.browser_cards().unwrap().is_empty());
+        assert!(client.browser_card("cipher-edit", &revision, true).is_err());
+        client.items[0].state = ItemState::Active;
+        client.items[0].item_type = "login".into();
+        assert!(client.browser_card("cipher-edit", &revision, true).is_err());
+        client.user_key = None;
+        assert!(client.browser_cards().is_err());
     }
 
     #[test]

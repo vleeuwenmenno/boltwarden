@@ -23,3 +23,9 @@ it('does not offer saves for synthetic submissions, blank passwords or oversized
   target.querySelector<HTMLInputElement>('[type=password]')!.value = ''; expect(submittedLogin(target, visible)).toBeUndefined();
   target.querySelector<HTMLInputElement>('[type=password]')!.value = 'a'.repeat(4097); expect(submittedLogin(target, visible)).toBeUndefined();
 });
+it('never captures payment fields as saved login credentials', () => {
+  const target = form('<input name="username" autocomplete="cc-name" value="Alice Example"><input type="password" autocomplete="section-payment CC-CSC" value="123">');
+  expect(submittedLogin(target, visible)).toBeUndefined();
+  target.insertAdjacentHTML('beforeend', '<input autocomplete="username" value="alice"><input type="password" autocomplete="current-password" value="secret">');
+  expect(submittedLogin(target, visible)).toEqual({username: 'alice', password: 'secret'});
+});

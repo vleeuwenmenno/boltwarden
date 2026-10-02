@@ -4,14 +4,14 @@
 
 **Name:** Boltwarden
 
-**Short description:** Fill logins and use passkeys with your Boltwarden desktop vault.
+**Short description:** Fill logins and credit cards, and use passkeys with your Boltwarden desktop vault.
 
 **Full description:**
 
 Boltwarden connects your browser to the Boltwarden Linux desktop password manager.
 Use inline suggestions, the toolbar popup, or Ctrl+Shift+L to fill matching logins.
 Save new or changed passwords through desktop approval, fill supported verification
-codes, and create or use supported passkeys on HTTPS sites.
+codes, select saved credit cards for standard payment fields, and use supported passkeys on HTTPS sites. Cards require HTTPS and explicit selection; the extension never submits a payment.
 
 Install and run the separate Boltwarden desktop app, register your browser in
 Settings → Browser setup, enable integration, and pair the extension by comparing
@@ -38,13 +38,13 @@ and does not cover every WebAuthn option.
   sites. HTTP or cross-origin filling needs confirmation; passkeys require HTTPS.
 
 Firefox requires 140+ and declares `authenticationInfo`, `personallyIdentifyingInfo`,
-`browsingActivity`, and `websiteContent`. Native messaging to a local program counts
+`browsingActivity`, `financialAndPaymentInfo`, and `websiteContent`. Native messaging to a local program counts
 as data transmission under Mozilla's rules; do not replace these with `none`.
 See [Mozilla's native messaging consent guidance](https://extensionworkshop.com/documentation/develop/best-practices-for-collecting-user-data-consents/)
 and [built-in consent](https://extensionworkshop.com/documentation/develop/firefox-builtin-data-consent/).
 
 For Chrome, describe authentication information, identifying information (including
-email usernames), website URLs, and relevant page/form content consistently with
+email usernames), financial/payment information, website URLs, and relevant page/form content consistently with
 [PRIVACY.md](../PRIVACY.md). Do not claim the extension never processes or transmits
 personal data simply because the app is local. It has no analytics, advertising,
 data sale, or remote executable code. Complete the dashboard's data-use and permission
@@ -54,11 +54,9 @@ justifications using the exact behavior above, then review the current
 ## Build and inspect
 
 ```sh
-npm ci
-npm run typecheck
-npm test
-npm run zip
-npm run check:release
+# From the repository root:
+make extension-deps extension-check extension-test extension-zip extension-release-check
+# For release artifacts, use the Docker command in docs/releasing.md.
 ```
 
 Artifacts are `.output/boltwarden-browser-VERSION-chrome.zip`, `-firefox.zip`, and

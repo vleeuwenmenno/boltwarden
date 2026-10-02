@@ -28,7 +28,7 @@ for (const browser of ['chrome', 'firefox']) {
     assert.equal(gecko.id, ids.firefox_id);
     assert(Number.parseInt(gecko.strict_min_version) >= 140);
     assert.deepEqual([...gecko.data_collection_permissions.required].sort(),
-      ['authenticationInfo', 'personallyIdentifyingInfo', 'browsingActivity', 'websiteContent'].sort());
+      ['financialAndPaymentInfo', 'authenticationInfo', 'personallyIdentifyingInfo', 'browsingActivity', 'websiteContent'].sort());
   } else assert.equal(manifest.key, ids.chrome_public_key);
 }
 const files = await readdir(resolve(root, '.output'));

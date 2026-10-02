@@ -832,3 +832,8 @@ Boltwarden is source-available under [MIT with Commons Clause v1.0](LICENSE).
 Internal business use is permitted; selling products or services based substantially
 on Boltwarden is restricted. Forks and distributions must retain Menno van Leeuwen’s
 copyright notice and the complete license. Third-party dependencies keep their own licenses.
+
+Credit cards can be selected from the extension toolbar on HTTPS payment forms
+with standard `cc-*` autocomplete fields. The popup displays masked card numbers;
+fills require explicit selection and never submit payments. See the
+[browser extension guide](extension/README.md#credit-card-autofill).

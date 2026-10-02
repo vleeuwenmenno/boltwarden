@@ -66,7 +66,13 @@ function receive(message) {
     reply({ type: 'UnlockRequested' });
     setTimeout(() => changeLock(true, epoch + 1), 120); return;
   }
-  if (!unlocked && ['ListMatches', 'ListTotpMatches', 'FillLogin', 'FillTotp', 'SaveLogin', 'PasskeyGet', 'PasskeyCreate'].includes(message.type)) { reply({ type: 'Error', code: 'Locked', message: 'Vault locked' }); return; }
+  if (!unlocked && ['ListCards', 'FillCard', 'ListMatches', 'ListTotpMatches', 'FillLogin', 'FillTotp', 'SaveLogin', 'PasskeyGet', 'PasskeyCreate'].includes(message.type)) { reply({ type: 'Error', code: 'Locked', message: 'Vault locked' }); return; }
+  if (message.type === 'ListCards') {
+    reply({type:'Matches',items:[{id:'card',name:'Test Visa',username:'Visa •••• 1111',reprompt:false,requires_confirmation:false,revision:'1'}],epoch,next_offset:null}); return;
+  }
+  if (message.type === 'FillCard') {
+    reply({type:'Card',card:{cardholder:'Alice Example',number:'4111111111111111',code:'123',exp_month:'3',exp_year:'2030',brand:'Visa'},document_id:message.document_id,epoch}); return;
+  }
   if (message.type === 'ListMatches' || message.type === 'ListTotpMatches') {
     const item = { id: 'one', name: 'Test login', username: 'alice', reprompt: false, requires_confirmation: message.frame_url.includes('/insecure'), revision: '1' };
     reply({ type: 'Matches', items: message.frame_url.includes('/multiple') ? [item, { ...item, id: 'two', name: 'Other login', username: 'bob' }] : [item], epoch, next_offset: null, warning: null }); return;

@@ -90,7 +90,7 @@ describe('popup selection', () => {
     });
     expect(calls('fill')).toHaveLength(1);
     expect(calls('fill')[0]![0]).toMatchObject({ targetId: frame.targetId, itemId: 'two', confirmCrossOrigin: false, confirmInsecure: false });
-    await act(() => fill.resolve(response(null))); await vi.waitFor(() => expect(app.textContent).toContain('Login filled'));
+    await act(() => fill.resolve(response(null))); await vi.waitFor(() => expect(app.textContent).toContain('Filled'));
   });
 
   it('opens a guarded confirmation with Cancel focused, traps Tab, and preserves explicit flags', async () => {
@@ -166,7 +166,7 @@ describe('popup invalidation', () => {
     expect(rows()).toHaveLength(0); expect(calls('list')).toHaveLength(before);
     expect(app.textContent).toContain('Verify your master password');
     await act(() => fill.resolve(response(null)));
-    await vi.waitFor(() => expect(app.textContent).toContain('Login filled')); expect(calls('list')).toHaveLength(before);
+    await vi.waitFor(() => expect(app.textContent).toContain('Filled')); expect(calls('list')).toHaveLength(before);
   });
 
   it('defers page discovery until an invalidated fill finishes', async () => {

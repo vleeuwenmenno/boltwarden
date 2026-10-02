@@ -159,6 +159,10 @@ impl BrowserHandler for DaemonBrowserBackend {
             }
             request => request,
         };
+        let card = matches!(
+            request,
+            BrowserRequest::ListCards { .. } | BrowserRequest::FillCard { .. }
+        );
         let totp = matches!(
             request,
             BrowserRequest::ListTotpMatches { .. } | BrowserRequest::FillTotp { .. }
@@ -205,6 +209,12 @@ impl BrowserHandler for DaemonBrowserBackend {
                 document_id,
                 offset,
             }
+            | BrowserRequest::ListCards {
+                top_url,
+                frame_url,
+                document_id,
+                offset,
+            }
             | BrowserRequest::ListTotpMatches {
                 top_url,
                 frame_url,
@@ -214,8 +224,14 @@ impl BrowserHandler for DaemonBrowserBackend {
                 let Some(_) = context(&top_url, &frame_url, &document_id) else {
                     return error("InvalidContext");
                 };
+                if card && (!top_url.starts_with("https://") || !frame_url.starts_with("https://"))
+                {
+                    return error("InvalidContext");
+                }
                 sync_browser_vault(&mut state);
-                match if totp {
+                match if card {
+                    state.bw.browser_cards()
+                } else if totp {
                     state
                         .bw
                         .browser_totp_matches(&frame_url, state.browser_default_match)
@@ -262,6 +278,16 @@ impl BrowserHandler for DaemonBrowserBackend {
                 confirm_insecure,
                 confirm_cross_origin,
             }
+            | BrowserRequest::FillCard {
+                item_id,
+                revision,
+                top_url,
+                frame_url,
+                document_id,
+                interaction,
+                confirm_insecure,
+                confirm_cross_origin,
+            }
             | BrowserRequest::FillTotp {
                 item_id,
                 revision,
@@ -275,8 +301,14 @@ impl BrowserHandler for DaemonBrowserBackend {
                 let Some(cross_origin) = context(&top_url, &frame_url, &document_id) else {
                     return error("InvalidContext");
                 };
+                if card && (!top_url.starts_with("https://") || !frame_url.starts_with("https://"))
+                {
+                    return error("InvalidContext");
+                }
                 sync_browser_vault(&mut state);
-                let matches = match if totp {
+                let matches = match if card {
+                    state.bw.browser_cards()
+                } else if totp {
                     state
                         .bw
                         .browser_totp_matches(&frame_url, state.browser_default_match)
@@ -300,7 +332,7 @@ impl BrowserHandler for DaemonBrowserBackend {
                 {
                     return error("ConfirmationRequired");
                 }
-                if interaction == FillInteraction::Shortcut && matches.len() != 1 {
+                if interaction == FillInteraction::Shortcut && (card || matches.len() != 1) {
                     return error("ConfirmationRequired");
                 }
                 if item.reprompt && interaction != FillInteraction::Popup {
@@ -346,6 +378,17 @@ impl BrowserHandler for DaemonBrowserBackend {
                 }
                 if !state.browser_enabled || epoch != state.browser_epoch || ctx.is_cancelled() {
                     return error("StaleRequest");
+                }
+                if card {
+                    return match state.bw.browser_card(&item_id, &revision, protected) {
+                        Ok(card) if !ctx.is_cancelled() => BrowserResponse::Card {
+                            card,
+                            document_id,
+                            epoch,
+                        },
+                        Ok(_) => error("Cancelled"),
+                        Err(e) => map_error(e),
+                    };
                 }
                 if totp {
                     return match state.bw.browser_totp(

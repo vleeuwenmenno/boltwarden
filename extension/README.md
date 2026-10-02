@@ -141,3 +141,18 @@ Release builds require Firefox 140+ or Chromium 127+. See
 [PUBLISHING.md](PUBLISHING.md) for store metadata, identities, permissions, and
 submission steps, and [the privacy notice](../PRIVACY.md) for data handling.
 The extension uses [MIT with Commons Clause v1.0](public/LICENSE).
+
+## Credit card autofill
+
+Focus a payment field on an HTTPS checkout, open the Boltwarden toolbar popup,
+and select a saved card. The list shows the card name, brand, and last four digits.
+The shortcut opens the picker rather than silently choosing a card. Protected cards
+still require a fresh master-password check in the desktop app. Embedded payment
+frames require destination confirmation and are filled separately.
+
+Supported fields use standard `autocomplete` purposes: `cc-name`, `cc-given-name`,
+`cc-family-name`, `cc-number`, `cc-csc`, `cc-exp`, `cc-exp-month`, `cc-exp-year`, and
+`cc-type`. Inputs, expiry dropdowns, and open shadow roots are supported. Generic
+unmarked fields, duplicate ambiguous fields, hidden/disabled fields, and closed
+shadow roots are not filled. Card fills never submit a form or save card details
+in extension storage. Cards are offered independently of login URL matching.

@@ -554,3 +554,41 @@ describe('submitted password saves', () => {
     await vi.waitFor(() => expect(h.native.request).toHaveBeenCalledTimes(1));
   });
 });
+
+describe('credit card document routing', () => {
+  const card = () => ({ cardholder:'Alice', number:'4111111111111111', code:'123', exp_month:'3', exp_year:'2030', brand:'Visa' });
+  function nativeCards() {
+    h.native.request.mockImplementation(async (request:any) => request.type === 'ListCards'
+      ? {type:'Matches',items:[{...one,name:'Visa',username:'Visa •••• 1111'}],epoch:1,next_offset:null}
+      : {type:'Card',card:card(),epoch:1,document_id:request.document_id});
+  }
+  it('requires explicit popup selection even for one card and wipes returned card values', async () => {
+    nativeCards(); const {messages} = documentPort(0,tab.url,undefined,{kind:'card'});
+    await shortcut(); await vi.waitFor(() => expect(h.browser.action.openPopup).toHaveBeenCalled());
+    expect(h.native.request.mock.calls.some(([value]) => value.type === 'FillCard')).toBe(false);
+    const page = await ui({type:'list'});
+    const result = await ui({type:'fill',targetId:page.value.frames[0].targetId,itemId:one.id});
+    expect(result.ok).toBe(true);
+    expect(h.native.request.mock.calls.some(([value]) => value.type === 'FillCard' && value.interaction === 'popup')).toBe(true);
+    const fill = messages.find(value => value.type === 'fill');
+    expect(fill.kind).toBe('card'); expect(fill.card.number).toBe(''); expect(fill.card.code).toBe('');
+  });
+  it('does not even list cards for an HTTP page', async () => {
+    nativeCards(); tab.url = 'http://example.com/pay'; documentPort(0,tab.url,undefined,{kind:'card'});
+    const result = await ui({type:'list'}); expect(result.ok).toBe(true);
+    expect(h.native.request).not.toHaveBeenCalled();
+  });
+  it('discards delayed card secrets when navigation replaces the document', async () => {
+    nativeCards(); const {messages} = documentPort(0,tab.url,undefined,{kind:'card'});
+    const page = await ui({type:'list'});
+    let complete!: (value:any) => void;
+    h.native.request.mockImplementation(() => new Promise(resolve => {complete=resolve;}));
+    const pending = ui({type:'fill',targetId:page.value.frames[0].targetId,itemId:one.id});
+    await vi.waitFor(() => expect(complete).toBeDefined());
+    const request = h.native.request.mock.calls.at(-1)![0]; const secrets = card();
+    h.browser.webNavigation.onBeforeNavigate.emit({tabId:1,frameId:0,url:'https://example.com/other'});
+    complete({type:'Card',card:secrets,epoch:1,document_id:request.document_id});
+    expect((await pending).ok).toBe(false);
+    expect(messages.some(value => value.type === 'fill')).toBe(false); expect(secrets.number).toBe(''); expect(secrets.code).toBe('');
+  });
+});

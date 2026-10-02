@@ -236,7 +236,8 @@ function App({ options }: { options: boolean }) {
       : connection?.state === 'disconnected' ? 'Unavailable' : 'Connecting';
 
   const codePage = !!page?.frames.length && page.frames.every(frame => frame.kind === 'totp');
-  const searchLabel = codePage ? 'Filter verification accounts' : 'Filter this page’s logins';
+  const cardPage = !!page?.frames.length && page.frames.every(frame => frame.kind === 'card');
+  const searchLabel = cardPage ? 'Filter credit cards' : codePage ? 'Filter verification accounts' : 'Filter this page’s logins';
 
   return <main class={options ? 'options' : 'popup'} onKeyDown={keyboard}>
     <header class="header">
@@ -278,14 +279,14 @@ function App({ options }: { options: boolean }) {
           <button disabled={busy || !state?.fingerprint} onClick={() => void action('pair')}>Pair with Boltwarden</button></section>}
         {connection?.state === 'locked' && <section class="empty-state"><div class="state-icon"><Symbol name="lock" /></div><h2>Vault locked</h2><p>Unlock in Boltwarden desktop to see matching logins.</p><button disabled={busy} onClick={() => void action('unlock')}>Unlock desktop vault</button></section>}
         {ready && options && <section class="connection-details"><h2>This browser is paired</h2><p>Press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> on a login form. If more than one login matches, choose it from the toolbar popup.</p><p>Manage or revoke paired browsers in Boltwarden desktop settings.</p><h3>Browser fingerprint</h3><code class="fingerprint">{state?.fingerprint}</code></section>}
-        {ready && !options && filled && <section class="empty-state" role="status"><div class="state-icon success"><Symbol name="check" /></div><h2>Login filled</h2><p>You can return to the page.</p></section>}
+        {ready && !options && filled && <section class="empty-state" role="status"><div class="state-icon success"><Symbol name="check" /></div><h2>Filled</h2><p>You can return to the page.</p></section>}
         {ready && !options && !page && !filled && <section class="empty-state">{operation === 'loading' ? <><span class="spinner large" /><h2>Finding matching logins…</h2></> : operation === 'filling' ? <div class="state-icon"><Symbol name="lock" /></div> : <><div class="state-icon"><Symbol name="key" /></div><h2>Choose a login to fill</h2><p>Refresh to check this page again.</p></>}</section>}
         {page && ready && <section id="matching-logins" aria-label="Matching logins">
           <span class="visually-hidden" role="status">{active ? `${active.item.name || 'Unnamed login'}, ${active.item.username || 'No username'}` : 'No matching logins'}</span>
           {page.warning && <p class="notice warning" role="status">{page.warning}</p>}
-          {rows.length === 0 && <section class="empty-state no-matches"><div class="state-icon"><Symbol name="key" /></div><h2>{filteringLoadedMatches ? 'No matching logins' : 'No logins for this page'}</h2><p>{filteringLoadedMatches ? 'Try another name or username.' : page.message || 'Open a login form, then refresh.'}</p></section>}
+          {rows.length === 0 && <section class="empty-state no-matches"><div class="state-icon"><Symbol name="key" /></div><h2>{filteringLoadedMatches ? 'No matching logins' : cardPage ? 'No cards available' : 'No logins for this page'}</h2><p>{filteringLoadedMatches ? 'Try another name or username.' : page.message || 'Open a login form, then refresh.'}</p></section>}
           {groups.filter(({ frame, items }) => items.length || frame.more).map(({ frame, items }) => <section key={frame.targetId} class="frame">
-            <h2 class="frame-heading"><span title={frame.origin}>{frame.origin}{frame.kind === 'totp' ? ' · Verification codes' : ''}</span>{frame.crossOrigin && <span class="frame-warning" title="This embedded page has a different origin">Embedded page</span>}</h2>
+            <h2 class="frame-heading"><span title={frame.origin}>{frame.origin}{frame.kind === 'card' ? ' · Credit cards' : frame.kind === 'totp' ? ' · Verification codes' : ''}</span>{frame.crossOrigin && <span class="frame-warning" title="This embedded page has a different origin">Embedded page</span>}</h2>
             {items.map(item => {
               const row = { frame, item }, key = selectionKey(row), selected = key === activeKey;
               return <button id={`login-${encodeURIComponent(key)}`} class={`login${selected ? ' selected' : ''}`} key={item.id} disabled={busy}
@@ -297,10 +298,10 @@ function App({ options }: { options: boolean }) {
                 {selected && <span class="enter-hint" aria-hidden="true">↵</span>}
               </button>;
             })}
-            {frame.more && <button class="more secondary" disabled={busy} onClick={() => void more(frame)}>Load more matching logins</button>}
+            {frame.more && <button class="more secondary" disabled={busy} onClick={() => void more(frame)}>{frame.kind === 'card' ? 'Load more cards' : 'Load more matching logins'}</button>}
           </section>)}
         </section>}
-        {options && <section class="connection-details help"><h2>Using this extension</h2><p>The popup only shows logins that match the current page. Filtering narrows loaded matches; it does not search the whole vault.</p><p>Selected credentials are sent to the page when you fill. Passwords you submit can be sent to Boltwarden for saving after desktop approval. Pending saves stay in browser session storage until saved, discarded, or the browser session ends.</p><p><a href="/privacy.html" target="_blank" rel="noreferrer">Privacy and data handling</a></p><h3>Desktop setup</h3><p>Run <code>boltwarden install-browser</code>, start Boltwarden, and enable browser integration in desktop settings.</p></section>}
+        {options && <section class="connection-details help"><h2>Using this extension</h2><p>The popup shows matching logins or your saved cards when a payment field is selected. Card numbers are masked until you choose a card to fill on an HTTPS page. Filtering narrows the loaded items.</p><p>Selected credentials are sent to the page when you fill. Passwords you submit can be sent to Boltwarden for saving after desktop approval. Pending saves stay in browser session storage until saved, discarded, or the browser session ends.</p><p><a href="/privacy.html" target="_blank" rel="noreferrer">Privacy and data handling</a></p><h3>Desktop setup</h3><p>Run <code>boltwarden install-browser</code>, start Boltwarden, and enable browser integration in desktop settings.</p></section>}
       </>}
     </div>
 

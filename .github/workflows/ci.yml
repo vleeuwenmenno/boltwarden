@@ -102,6 +102,21 @@ jobs:
         run: |
           cd dist
           sha256sum --check ./*.sha256
+          version="${RELEASE_TAG#v}"
+          for arch in x86_64 aarch64; do
+            test -s "boltwarden-${version}-${arch}-linux.tar.gz"
+            test -s "boltwarden-${version}-1-${arch}.pkg.tar.zst"
+          done
+          for arch in amd64 arm64; do test -s "boltwarden_${version}_${arch}.deb"; done
+          shopt -s nullglob
+          for browser in chrome firefox sources; do
+            files=(boltwarden-browser-*-"${browser}".zip)
+            if [ "${#files[@]}" -ne 1 ]; then
+              echo "Expected exactly one ${browser} extension archive" >&2
+              exit 1
+            fi
+            test -s "${files[0]}"
+          done
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --verify-tag --draft --generate-notes
           fi

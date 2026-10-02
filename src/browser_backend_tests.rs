@@ -105,6 +105,7 @@ impl Harness {
             if response["id"] == id {
                 return response;
             }
+            assert_ne!(response["type"], "Card", "unexpected card secrets");
             assert_ne!(response["type"], "Totp", "unexpected verification code");
             assert_ne!(
                 response["type"], "Credentials",
@@ -291,6 +292,7 @@ impl Harness {
             .unwrap();
         while let Ok(body) = session::read_frame(&mut self.client, false) {
             let response: Value = serde_json::from_slice(&body).unwrap();
+            assert_ne!(response["type"], "Card", "unexpected card secrets");
             assert_ne!(response["type"], "Totp", "unexpected verification code");
             assert_ne!(
                 response["type"], "Credentials",
@@ -1264,4 +1266,136 @@ fn saved_password_submissions_do_not_prompt_and_http_or_iframe_saves_are_rejecte
         }
         assert!(h.vault.lock().unwrap().browser_approvals.active().is_none());
     }
+}
+
+fn card_request(
+    revision: &str,
+    top: &str,
+    frame: &str,
+    interaction: FillInteraction,
+    cross: bool,
+) -> BrowserRequest {
+    BrowserRequest::FillCard {
+        item_id: "cipher-edit".into(),
+        revision: revision.into(),
+        top_url: top.into(),
+        frame_url: frame.into(),
+        document_id: "card-document".into(),
+        interaction,
+        confirm_insecure: true,
+        confirm_cross_origin: cross,
+    }
+}
+
+#[test]
+fn browser_card_fill_requires_https_explicit_selection_and_destination_consent() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let mut h = Harness::paired();
+    h.vault.lock().unwrap().bw = BwClient::browser_card_test_fixture(false);
+    h.send(
+        "cards",
+        BrowserRequest::ListCards {
+            top_url: "https://shop.example".into(),
+            frame_url: "https://pay.example".into(),
+            document_id: "card-document".into(),
+            offset: 0,
+        },
+    );
+    let list = h.read("cards");
+    assert_eq!(list["type"], "Matches");
+    assert_eq!(list["items"][0]["username"], "Visa •••• 1111");
+    assert!(!list.to_string().contains("4111111111111111"));
+    let revision = list["items"][0]["revision"].as_str().unwrap();
+    for (id, top, frame, interaction, cross, expected) in [
+        (
+            "http",
+            "http://shop.example",
+            "https://pay.example",
+            FillInteraction::Popup,
+            true,
+            "InvalidContext",
+        ),
+        (
+            "frame-http",
+            "https://shop.example",
+            "http://pay.example",
+            FillInteraction::Popup,
+            true,
+            "InvalidContext",
+        ),
+        (
+            "shortcut",
+            "https://shop.example",
+            "https://shop.example",
+            FillInteraction::Shortcut,
+            false,
+            "ConfirmationRequired",
+        ),
+        (
+            "cross",
+            "https://shop.example",
+            "https://pay.example",
+            FillInteraction::Popup,
+            false,
+            "ConfirmationRequired",
+        ),
+    ] {
+        h.send(id, card_request(revision, top, frame, interaction, cross));
+        assert_eq!(h.read(id)["code"], expected);
+    }
+    // Respect the production secret-request rate limit in this real transport test.
+    std::thread::sleep(Duration::from_millis(1100));
+    h.send(
+        "fill",
+        card_request(
+            revision,
+            "https://shop.example",
+            "https://pay.example",
+            FillInteraction::Popup,
+            true,
+        ),
+    );
+    let filled = h.read("fill");
+    assert_eq!(filled["type"], "Card");
+    assert_eq!(filled["card"]["number"], "4111111111111111");
+    assert_eq!(filled["document_id"], "card-document");
+}
+
+#[test]
+fn protected_card_fill_requires_fresh_password_and_lock_cancels_approval() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let mut h = Harness::paired();
+    h.vault.lock().unwrap().bw = BwClient::browser_card_test_fixture(true);
+    let revision = h.vault.lock().unwrap().bw.browser_cards().unwrap()[0]
+        .revision
+        .clone();
+    h.send(
+        "fill",
+        card_request(
+            &revision,
+            "https://shop.example",
+            "https://shop.example",
+            FillInteraction::Popup,
+            false,
+        ),
+    );
+    let approval = h.approval();
+    assert!(approval.requires_password);
+    assert!(h.decide(&approval.id, true, "wrong").is_err());
+    h.decide(&approval.id, true, "correct").unwrap();
+    assert_eq!(h.read("fill")["type"], "Card");
+    h.send(
+        "locked",
+        card_request(
+            &revision,
+            "https://shop.example",
+            "https://shop.example",
+            FillInteraction::Popup,
+            false,
+        ),
+    );
+    let _approval = h.approval();
+    crate::lock_vault_state(&mut h.vault.lock().unwrap(), "card test");
+    h.wait_for_approval_end();
+    h.assert_no_credentials();
 }

@@ -8,7 +8,7 @@ by the maintainer. The extension does not send your vault to the maintainer.
 
 ## Browser extension
 
-The extension reads relevant page and frame URLs, login and verification fields,
+The extension reads relevant page and frame URLs, login, payment, and verification fields,
 page titles used for saved logins, and WebAuthn requests. It exchanges this data,
 usernames (which can be email addresses), selected passwords, verification codes,
 and passkey requests and results with your paired local Boltwarden desktop app
@@ -17,6 +17,13 @@ for matching, filling, saving, and passkey functionality. Password and passkey
 approval and vault access are handled by the desktop app. Filling a password or
 verification code gives it to the selected website; passkey private keys remain
 in the desktop vault, while public credentials and signed assertions reach the site.
+
+When you select a card in the toolbar popup, the desktop sends its cardholder
+name, number, security code, expiry, and brand through native messaging to the
+selected HTTPS payment form. Card lists contain only names, brands, and last four
+digits. Card details are not saved in extension storage or pending password saves.
+Embedded payment frames require explicit destination confirmation. Filling gives
+that site the selected payment data; the extension never submits the payment.
 
 The extension persistently stores its pairing identifier and non-extractable
 pairing key. It does not keep a complete vault. Matching results and selected

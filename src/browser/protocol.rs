@@ -37,6 +37,32 @@ impl Drop for CapturedLogin {
     }
 }
 
+#[derive(Clone, Default, Deserialize, Serialize)]
+pub struct CardDetails {
+    pub cardholder: String,
+    pub number: String,
+    pub code: String,
+    pub exp_month: String,
+    pub exp_year: String,
+    pub brand: String,
+}
+impl std::fmt::Debug for CardDetails {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CardDetails([redacted])")
+    }
+}
+impl Drop for CardDetails {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.cardholder.zeroize();
+        self.number.zeroize();
+        self.code.zeroize();
+        self.exp_month.zeroize();
+        self.exp_year.zeroize();
+        self.brand.zeroize();
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RequestEnvelope {
     pub version: u8,
@@ -76,6 +102,13 @@ pub enum BrowserRequest {
         #[serde(default)]
         offset: usize,
     },
+    ListCards {
+        top_url: String,
+        frame_url: String,
+        document_id: String,
+        #[serde(default)]
+        offset: usize,
+    },
     ListTotpMatches {
         top_url: String,
         frame_url: String,
@@ -102,6 +135,18 @@ pub enum BrowserRequest {
         login: CapturedLogin,
     },
     FillLogin {
+        item_id: String,
+        revision: String,
+        top_url: String,
+        frame_url: String,
+        document_id: String,
+        interaction: FillInteraction,
+        #[serde(default)]
+        confirm_insecure: bool,
+        #[serde(default)]
+        confirm_cross_origin: bool,
+    },
+    FillCard {
         item_id: String,
         revision: String,
         top_url: String,
@@ -177,6 +222,11 @@ pub enum BrowserResponse {
         #[serde(default)]
         warning: Option<String>,
     },
+    Card {
+        card: CardDetails,
+        document_id: String,
+        epoch: u64,
+    },
     Credentials {
         username: String,
         password: String,
@@ -203,6 +253,9 @@ impl std::fmt::Debug for BrowserResponse {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Credentials {
+                document_id, epoch, ..
+            }
+            | Self::Card {
                 document_id, epoch, ..
             }
             | Self::Totp {

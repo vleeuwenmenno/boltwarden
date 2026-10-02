@@ -40,7 +40,8 @@ Confirm extension 0.5.6 has not already been used in either store before submiss
 A `vX.Y.Z` tag must match Cargo.toml. Desktop and extension versions are independent:
 verify the extension version is greater than the last version in each store.
 Only after every job succeeds does the workflow create a **draft** GitHub release
-and attach artifacts. Existing draft assets with the same names are replaced on a rerun; published
+and attach both architectures’ binaries/packages, Chrome and Firefox ZIPs, the
+AMO source ZIP, and their checksums. Missing artifact groups fail the release job. Existing draft assets with the same names are replaced on a rerun; published
 release assets are never overwritten. The workflow does not publish the draft or
 submit to extension stores.
 

@@ -45,7 +45,7 @@ Fixed issues:
   send `.onion` or `.i2p` hostnames to the icon service.
 - Firefox previously declared no data transmission despite native messaging.
   It now declares authentication information, identifying information, browsing
-  activity, and website content, and requires Firefox 140+ for built-in consent.
+  activity, financial/payment information, and website content, and requires Firefox 140+ for built-in consent.
 - Privacy documentation now describes temporary credentials held for pending saves.
 - Firefox document binding now uses the browser's epoch navigation-to-parser-start
   interval instead of independently rounded `timeOrigin` values and first-byte

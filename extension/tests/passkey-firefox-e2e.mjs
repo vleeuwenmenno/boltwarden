@@ -118,6 +118,24 @@ try {
     await until(() => evaluate('Boolean(window.passkeyFixture) && document.readyState === "complete"'), 'Completed passkey fixture');
     await evaluate('(() => { window.fixtureLogs = []; const info = console.info; console.info = (...args) => { window.fixtureLogs.push(args); info.apply(console, args); }; return true; })()');
   };
+  await navigate('/cards');
+  await evaluate('document.querySelector("[autocomplete=cc-number]").focus()');
+  await send('Marionette:SetContext', {value:'chrome'});
+  await send('WebDriver:ExecuteScript', {script: `const {ExtensionParent} = ChromeUtils.importESModule("resource://gre/modules/ExtensionParent.sys.mjs"); ExtensionParent.apiManager.global.browserActionFor(WebExtensionPolicy.getByID(${JSON.stringify(identities.firefox_id)}).extension).triggerAction(window); return true;`, args:[], newSandbox:false, sandbox:null});
+  await until(async () => (await send('WebDriver:ExecuteScript', {script:'return !!document.querySelector(".webextension-popup-browser")?.messageManager;', args:[], newSandbox:false, sandbox:null})).value, 'Firefox toolbar popup');
+  // Marionette cannot enter a remote XUL popup. Drive its real DOM through the
+  // disposable test browser's privileged frame-script bridge.
+  await send('WebDriver:ExecuteScript', {script: `const popup = document.querySelector(".webextension-popup-browser");
+    popup.messageManager.loadFrameScript("data:application/javascript," + encodeURIComponent(\`const {setInterval, clearInterval} = ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs"); let attempts = 0; const timer = setInterval(() => {
+      const button = [...content.document.querySelectorAll("button")].find(button => button.textContent.includes("Test Visa") && !button.disabled);
+      if (button) { clearInterval(timer); if (content.document.body.textContent.includes("4111111111111111")) throw new Error("Card number exposed in picker"); button.click(); }
+      else if (++attempts > 200) { clearInterval(timer); throw new Error("Card picker unavailable"); }
+    }, 50);\`), false); return true;`, args:[], newSandbox:false, sandbox:null});
+  await send('Marionette:SetContext', {value:'content'});
+  await until(() => evaluate('document.querySelector("[autocomplete=cc-number]").value === "4111111111111111"'), 'Firefox card fill');
+  assert.equal(await evaluate('document.querySelector("[autocomplete=cc-csc]").value'), '123');
+  assert.equal(await evaluate('document.querySelector("[autocomplete=cc-exp-month]").value'), '3');
+  assert.equal(await evaluate('!!window.cardSubmitted'), false);
   await navigate('/');
   const registration = await evaluate('passkeyFixture.create()');
   verifyRegistration(registration, fixture.origin);
@@ -176,7 +194,7 @@ try {
   await send('WebDriver:PerformActions', {actions: [{type:'key', id:'keyboard', actions:[{type:'keyDown', value:'\uE007'}, {type:'keyUp', value:'\uE007'}]}]});
   await until(() => evaluate("document.getElementById('old-password').value === 'test-password-only'"), 'Current password fill');
   assert.equal(await evaluate("document.getElementById('test-password').value === 'new-sentinel' && document.getElementById('confirm-password').value === 'new-sentinel' && document.getElementById('test-username').value === 'boltwarden-test-alice'"), true);
-  console.log(`Firefox ${session.capabilities.browserVersion}: passkey creation, assertion, credential methods, denial, abort, password registration and change capture passed.`);
+  console.log(`Firefox ${session.capabilities.browserVersion}: credit card filling, passkey creation, assertion, credential methods, denial, abort, password registration and change capture passed.`);
 } catch (error) {
   console.error(error);
   if (existsSync(join(directory, 'pairing.json.log'))) console.error(await readFile(join(directory, 'pairing.json.log'), 'utf8'));

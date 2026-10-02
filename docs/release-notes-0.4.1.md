@@ -14,6 +14,15 @@ Store listings and Firefox signing are separate from these unsigned build artifa
 - Document pending-save credentials held in browser session storage. Locking does
   not discard these credentials; use the extension's Discard action when needed.
 
+## Credit card autofill
+
+Select a saved credit card in the toolbar popup on an HTTPS payment form. Listings
+show only names, brands, and last four digits; standard `cc-*` input and select
+fields receive the selected details. Protected cards require a fresh password,
+embedded frames require destination confirmation, and navigation or locking cancels
+pending fills. Payment forms are never submitted automatically. Firefox data consent
+and privacy disclosures now include financial/payment information.
+
 ## Browser compatibility
 
 - Fix inline suggestions on Firefox ESR when constructed stylesheets are rejected
