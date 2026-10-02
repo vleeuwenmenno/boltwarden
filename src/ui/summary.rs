@@ -297,75 +297,72 @@ pub fn draw_summary(
             });
     }
 
-    egui::Panel::top("header")
-        .frame(widgets::header_frame())
-        .show(root, |ui| {
-            ui.horizontal(|ui| {
-                if !embedded {
-                    let back = ui.add(
-                        egui::Button::new(
-                            RichText::new(t.icon("\u{f060}", "←"))
+    widgets::header(root, "header", |ui| {
+        ui.horizontal(|ui| {
+            if !embedded {
+                let back = ui.add(
+                    egui::Button::new(
+                        RichText::new(t.icon("\u{f060}", "←"))
+                            .size(t.title())
+                            .color(t.text_muted),
+                    )
+                    .frame(false),
+                );
+                if back.clicked() {
+                    action = Some(SummaryAction::Back);
+                }
+            }
+            if let Some(detail) = &detail {
+                let website_icon = icons::icon_host(&detail.uris).and_then(|host| icons.get(&host));
+                match website_icon {
+                    Some(texture) => {
+                        ui.add(
+                            egui::Image::new(&texture)
+                                .fit_to_exact_size(egui::vec2(t.title(), t.title())),
+                        );
+                    }
+                    None => {
+                        ui.label(
+                            RichText::new(t.item_icon(&detail.item_type))
                                 .size(t.title())
-                                .color(t.text_muted),
-                        )
-                        .frame(false),
-                    );
-                    if back.clicked() {
-                        action = Some(SummaryAction::Back);
+                                .color(t.accent),
+                        );
                     }
                 }
-                if let Some(detail) = &detail {
-                    let website_icon =
-                        icons::icon_host(&detail.uris).and_then(|host| icons.get(&host));
-                    match website_icon {
-                        Some(texture) => {
-                            ui.add(
-                                egui::Image::new(&texture)
-                                    .fit_to_exact_size(egui::vec2(t.title(), t.title())),
-                            );
-                        }
-                        None => {
-                            ui.label(
-                                RichText::new(t.item_icon(&detail.item_type))
-                                    .size(t.title())
-                                    .color(t.accent),
-                            );
+                ui.add_space(6.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&detail.name)
+                            .size(t.title())
+                            .color(t.text_strong),
+                    )
+                    .truncate(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(header_action) = draw_header_actions(
+                        ui,
+                        detail.state,
+                        detail.favorite,
+                        keys_enabled && !state.offline,
+                    ) {
+                        match header_action {
+                            SummaryAction::Item(
+                                confirm @ (ItemAction::Trash | ItemAction::DeleteForever),
+                            ) => state.confirm = Some(confirm),
+                            other => action = Some(other),
                         }
                     }
-                    ui.add_space(6.0);
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(&detail.name)
-                                .size(t.title())
-                                .color(t.text_strong),
-                        )
-                        .truncate(),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(header_action) = draw_header_actions(
-                            ui,
-                            detail.state,
-                            detail.favorite,
-                            keys_enabled && !state.offline,
-                        ) {
-                            match header_action {
-                                SummaryAction::Item(
-                                    confirm @ (ItemAction::Trash | ItemAction::DeleteForever),
-                                ) => state.confirm = Some(confirm),
-                                other => action = Some(other),
-                            }
-                        }
-                        if state.action_in_flight {
-                            ui.add(egui::Spinner::new().color(t.text_muted));
-                        }
-                        if let Some(folder) = &detail.folder {
-                            ui.add_space(8.0);
-                            ui.label(RichText::new(folder).color(t.text_faint));
-                        }
-                    });
-                }
-            });
+                    if state.action_in_flight {
+                        ui.add(egui::Spinner::new().color(t.text_muted));
+                    }
+                    if let Some(folder) = &detail.folder {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(folder).color(t.text_faint));
+                    }
+                });
+            }
         });
+    });
 
     egui::CentralPanel::default()
         .frame(widgets::body_frame())

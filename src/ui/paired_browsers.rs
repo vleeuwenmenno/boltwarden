@@ -347,6 +347,7 @@ fn fingerprint(ui: &mut Ui, fingerprint: &str) {
 
 /// Pairing timestamps are Unix seconds. Explicit UTC avoids implying the daemon
 /// recorded a local timezone or treating an unavailable timestamp as recent use.
+#[cfg(unix)]
 fn format_timestamp(seconds: u64) -> Option<String> {
     if seconds == 0 {
         return None;
@@ -371,6 +372,38 @@ fn format_timestamp(seconds: u64) -> Option<String> {
     Some(format!(
         "{} {month} {year}, {:02}:{:02} UTC",
         date.tm_mday, date.tm_hour, date.tm_min
+    ))
+}
+
+#[cfg(windows)]
+fn format_timestamp(seconds: u64) -> Option<String> {
+    use windows_sys::Win32::{
+        Foundation::{FILETIME, SYSTEMTIME},
+        System::Time::FileTimeToSystemTime,
+    };
+    if seconds == 0 {
+        return None;
+    }
+    let ticks = seconds
+        .checked_add(11_644_473_600)?
+        .checked_mul(10_000_000)?;
+    let file = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
+    let mut date: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    if unsafe { FileTimeToSystemTime(&file, &mut date) } == 0
+        || !(1970..=9999).contains(&date.wYear)
+    {
+        return None;
+    }
+    let month = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+    .get(date.wMonth.checked_sub(1)? as usize)?;
+    Some(format!(
+        "{} {month} {}, {:02}:{:02} UTC",
+        date.wDay, date.wYear, date.wHour, date.wMinute
     ))
 }
 

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Browser,
+    #[cfg_attr(windows, allow(dead_code))]
     Ssh,
     Unlock,
 }

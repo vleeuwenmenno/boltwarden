@@ -47,6 +47,10 @@
               lockFile = ./Cargo.lock;
             };
 
+            # The Windows native-host executable has its own entry point. Linux
+            # keeps the existing wrapper below.
+            cargoBuildFlags = [ "--bin" "boltwarden" ];
+
             nativeBuildInputs = with pkgs; [
               copyDesktopItems
               makeWrapper

@@ -63,23 +63,21 @@ pub fn draw_two_factor(root: &mut egui::Ui, state: &mut TwoFactorState) -> Optio
                 None,
             )
         });
-    egui::Panel::top("header")
-        .frame(widgets::header_frame())
-        .show(root, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(t.icon("\u{f132}", "🛡"))
-                        .size(t.title())
-                        .color(t.accent),
-                );
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new("Two-step login")
-                        .size(t.title())
-                        .color(t.text_strong),
-                );
-            });
+    widgets::header(root, "header", |ui| {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(t.icon("\u{f132}", "🛡"))
+                    .size(t.title())
+                    .color(t.accent),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("Two-step login")
+                    .size(t.title())
+                    .color(t.text_strong),
+            );
         });
+    });
 
     ctx.input(|input| {
         let count = state.providers.len();

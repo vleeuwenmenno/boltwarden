@@ -187,6 +187,12 @@ fn read_cache(path: &PathBuf, ttl: Duration) -> Option<Directory> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
+#[cfg(windows)]
+fn write_cache(path: &PathBuf, directory: &Directory) -> std::io::Result<()> {
+    crate::platform::windows::write_private(path, &serde_json::to_vec(directory)?)
+}
+
+#[cfg(unix)]
 fn write_cache(path: &PathBuf, directory: &Directory) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

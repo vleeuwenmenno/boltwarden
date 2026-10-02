@@ -221,21 +221,19 @@ pub fn draw_browser_approval(
                 }
             });
         });
-    egui::Panel::top("browser-approval-header")
-        .frame(widgets::header_frame())
-        .show(root, |ui| {
-            ui.horizontal(|ui| {
-                widgets::logo(ui, t.input() + 4.0);
-                ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new(&request.title)
-                        .font(t.font(t.input()))
-                        .color(t.text_strong),
-                );
-            });
-            ui.add_space(8.0);
-            ui.label(egui::RichText::new(&request.description).color(t.text_muted));
+    widgets::header(root, "browser-approval-header", |ui| {
+        ui.horizontal(|ui| {
+            widgets::logo(ui, t.input() + 4.0);
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(&request.title)
+                    .font(t.font(t.input()))
+                    .color(t.text_strong),
+            );
         });
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new(&request.description).color(t.text_muted));
+    });
     // Mouse selection happens after the action area is painted. Keep its scroll
     // request for the next frame, when a newly required password field has resized
     // the list. Keyboard changes happen before this point and scroll immediately.

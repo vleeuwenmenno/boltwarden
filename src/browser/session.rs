@@ -1,12 +1,12 @@
 //! Pairing proof verification and bounded framing shared by the daemon and native host.
 use super::protocol::MAX_FRAME_BYTES;
+use crate::platform::ipc::Stream as UnixStream;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use p256::ecdsa::{Signature, VerifyingKey};
 use p256::pkcs8::DecodePublicKey;
 use signature::Verifier;
 use std::io::{self, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 pub fn transcript(nonce: &str, pairing_id: &str, host_pid: u32) -> Vec<u8> {

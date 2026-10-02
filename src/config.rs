@@ -105,7 +105,7 @@ pub struct AppSettings {
     /// Fetch website icons from the vault server's icon service (cached on disk).
     #[serde(default = "default_true")]
     pub show_website_icons: bool,
-    /// Ask Hyprland to obscure this popup in screenshots and screen sharing.
+    /// Ask the desktop to exclude this window from supported capture APIs.
     #[serde(default = "default_true")]
     pub obscure_screen_capture: bool,
     #[serde(default)]
@@ -337,10 +337,7 @@ pub fn load_or_create_device_identifier() -> String {
     }
 
     let identifier = uuid::Uuid::new_v4().to_string();
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _ = fs::write(path, format!("{identifier}\n"));
+    let _ = write_private(DEVICE_ID_FILE, format!("{identifier}\n").as_bytes());
     identifier
 }
 
@@ -410,14 +407,9 @@ pub fn load_settings() -> AppSettings {
 }
 
 pub fn save_settings(settings: &AppSettings) -> io::Result<()> {
-    let path = config_path(SETTINGS_FILE)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "config directory unavailable"))?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let data = serde_json::to_vec_pretty(settings)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    fs::write(path, data)
+    write_private(SETTINGS_FILE, &data)
 }
 
 pub fn load_recent_item() -> Option<RecentItem> {
@@ -484,6 +476,14 @@ pub fn clear_item_usage() -> io::Result<()> {
 }
 
 /// Writes a config file readable only by the current user.
+#[cfg(windows)]
+pub(crate) fn write_private(file_name: &str, data: &[u8]) -> io::Result<()> {
+    let path =
+        config_path(file_name).ok_or_else(|| io::Error::other("config directory unavailable"))?;
+    crate::platform::windows::write_private(&path, data)
+}
+
+#[cfg(not(windows))]
 pub(crate) fn write_private(file_name: &str, data: &[u8]) -> io::Result<()> {
     let path = config_path(file_name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "config directory unavailable"))?;
@@ -538,20 +538,54 @@ fn unix_millis_now() -> u64 {
 }
 
 pub(crate) fn config_path(file_name: &str) -> Option<PathBuf> {
-    Some(config_base()?.join(APP_DIR).join(file_name))
+    let path = config_base()?.join(APP_DIR).join(file_name);
+    #[cfg(windows)]
+    {
+        if crate::platform::windows::reject_reparse(&path).is_err() {
+            return None;
+        }
+        if path.exists() && crate::platform::windows::verify_private(&path).is_err() {
+            return None;
+        }
+    }
+    Some(path)
 }
 
+#[cfg(windows)]
+fn config_base() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(test) = std::env::var_os("XDG_CONFIG_HOME") {
+        return Some(test.into());
+    }
+    crate::platform::windows::data_dir()
+        .ok()?
+        .parent()
+        .map(PathBuf::from)
+}
+
+#[cfg(not(windows))]
 fn config_base() -> Option<PathBuf> {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
 }
 
-/// `$XDG_CACHE_HOME/boltwarden`, or `~/.cache/boltwarden`.
+/// The platform's Boltwarden cache directory.
+#[cfg(not(windows))]
 pub fn cache_dir() -> Option<PathBuf> {
     Some(cache_base()?.join(APP_DIR))
 }
 
+#[cfg(windows)]
+pub fn cache_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(test) = std::env::var_os("XDG_CACHE_HOME") {
+        return Some(PathBuf::from(test).join(APP_DIR));
+    }
+    Some(crate::platform::windows::data_dir().ok()?.join("Cache"))
+}
+
+#[cfg(not(windows))]
 fn cache_base() -> Option<PathBuf> {
     std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
@@ -594,6 +628,13 @@ pub(crate) fn with_test_config(test: impl FnOnce(&std::path::Path)) {
 mod tests {
     use super::*;
 
+    fn write_fixture(path: &std::path::Path, bytes: &[u8]) {
+        #[cfg(unix)]
+        fs::write(path, bytes).unwrap();
+        #[cfg(windows)]
+        crate::platform::windows::write_private(path, bytes).unwrap();
+    }
+
     #[test]
     fn passkey_verification_defaults_safely_and_persists_all_choices() {
         let migrated: AppSettings =
@@ -627,7 +668,7 @@ mod tests {
 
     #[test]
     fn offline_cache_storage_is_private_and_forgotten_with_session() {
-        with_test_config(|root| {
+        with_test_config(|_root| {
             assert!(load_settings().keep_offline_copy);
             assert!(
                 serde_json::from_str::<AppSettings>("{}")
@@ -641,7 +682,7 @@ mod tests {
             {
                 use std::os::unix::fs::PermissionsExt;
                 assert_eq!(
-                    fs::metadata(root.join(APP_DIR).join(VAULT_CACHE_FILE))
+                    fs::metadata(_root.join(APP_DIR).join(VAULT_CACHE_FILE))
                         .unwrap()
                         .permissions()
                         .mode()
@@ -662,9 +703,15 @@ mod tests {
             std::env::temp_dir().join(format!("boltwarden-config-test-{}", uuid::Uuid::new_v4()));
         let config_dir = temp.join("config");
         let app_dir = config_dir.join(APP_DIR);
+        #[cfg(unix)]
         fs::create_dir_all(&app_dir).unwrap();
+        #[cfg(windows)]
+        crate::platform::windows::private_dir(&app_dir).unwrap();
         let expected = uuid::Uuid::new_v4().to_string();
-        fs::write(app_dir.join(DEVICE_ID_FILE), format!("{expected}\n")).unwrap();
+        write_fixture(
+            &app_dir.join(DEVICE_ID_FILE),
+            format!("{expected}\n").as_bytes(),
+        );
         let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
 
         unsafe {
@@ -947,14 +994,16 @@ mod tests {
             std::env::temp_dir().join(format!("boltwarden-config-test-{}", uuid::Uuid::new_v4()));
         let config_dir = temp.join("config");
         let app_dir = config_dir.join(APP_DIR);
+        #[cfg(unix)]
         fs::create_dir_all(&app_dir).unwrap();
-        fs::write(
-            app_dir.join(SETTINGS_FILE),
-            r#"{
+        #[cfg(windows)]
+        crate::platform::windows::private_dir(&app_dir).unwrap();
+        write_fixture(
+            &app_dir.join(SETTINGS_FILE),
+            br#"{
   "show_keyboard_shortcuts": false
 }"#,
-        )
-        .unwrap();
+        );
         let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
 
         unsafe {
@@ -980,6 +1029,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn expands_and_validates_ssh_agent_socket_path() {
         let _guard = ENV_LOCK.lock().unwrap();
         let previous_home = std::env::var_os("HOME");
@@ -1094,7 +1144,10 @@ mod tests {
         let temp =
             std::env::temp_dir().join(format!("boltwarden-private-{}", uuid::Uuid::new_v4()));
         let app_dir = temp.join(APP_DIR);
+        #[cfg(unix)]
         fs::create_dir_all(&app_dir).unwrap();
+        #[cfg(windows)]
+        crate::platform::windows::private_dir(&app_dir).unwrap();
         let target = temp.join("unrelated");
         fs::write(&target, b"unchanged").unwrap();
         let path = app_dir.join(SESSION_FILE);

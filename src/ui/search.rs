@@ -8,7 +8,8 @@ use egui::{Context, RichText, Ui};
 
 const SEARCH_INPUT_ID: &str = "vault-search-input";
 const SSH_PATH_INPUT_ID: &str = "settings-ssh-socket-path";
-const SETTINGS_ROWS: usize = 16;
+const SETTINGS_ROWS: usize = 17;
+const SHORTCUT_ROW: usize = 16;
 const ACKNOWLEDGEMENTS_ROW: usize = 15;
 const BROWSER_SETUP_ROW: usize = 14;
 const PASSKEY_VERIFICATION_ROW: usize = 13;
@@ -28,7 +29,7 @@ pub enum SettingsGroup {
 impl SettingsGroup {
     fn contains(self, row: usize) -> bool {
         match self {
-            Self::General => matches!(row, 0..=7 | 9),
+            Self::General => matches!(row, 0..=7 | 9 | SHORTCUT_ROW),
             Self::Browser => matches!(row, 10..=14),
             Self::Ssh => row == 8,
         }
@@ -172,6 +173,7 @@ pub struct SearchState {
     pub settings_selected: usize,
     pub settings_group: Option<SettingsGroup>,
     pub capture_pending: bool,
+    pub shortcut_setup: crate::ui::shortcut_setup::ShortcutSetup,
     pub paired_browsers: PairedBrowsersState,
     pub browser_setup: crate::ui::browser_setup::BrowserSetupState,
     paired_browsers_return: SearchView,
@@ -205,6 +207,7 @@ impl Default for SearchState {
             settings_selected: 0,
             settings_group: None,
             capture_pending: false,
+            shortcut_setup: Default::default(),
             paired_browsers: PairedBrowsersState::default(),
             browser_setup: Default::default(),
             paired_browsers_return: SearchView::Results,
@@ -700,9 +703,7 @@ pub fn draw_search(
             });
     }
 
-    egui::Panel::top("header")
-        .frame(widgets::header_frame())
-        .show(root, |ui| draw_search_field(ui, state));
+    widgets::header(root, "header", |ui| draw_search_field(ui, state));
 
     egui::CentralPanel::default()
         .frame(widgets::body_frame())
@@ -1203,6 +1204,7 @@ fn toggle_setting(row: usize, settings: &AppSettings) -> Option<SearchAction> {
         0 => SearchAction::SetKeyboardShortcuts(!settings.show_keyboard_shortcuts),
         1 => SearchAction::SetCloseAfterCopy(!settings.close_after_copy),
         2 => SearchAction::SetRestoreRecentItem(!settings.restore_recent_item),
+        SHORTCUT_ROW => SearchAction::OpenShortcutSetup,
         START_LIST_ROW => SearchAction::SetStartList(settings.start_list.next()),
         4 => SearchAction::SetShowWebsiteIcons(!settings.show_website_icons),
         SCREEN_CAPTURE_ROW if crate::screen_capture::available() => {
@@ -1212,7 +1214,7 @@ fn toggle_setting(row: usize, settings: &AppSettings) -> Option<SearchAction> {
         IDLE_TIMEOUT_ROW => {
             SearchAction::SetLockAfterIdleTimeout(!settings.lock_after_idle_timeout)
         }
-        8 => SearchAction::SetSshAgentEnabled(!settings.ssh_agent_enabled),
+        8 if !cfg!(windows) => SearchAction::SetSshAgentEnabled(!settings.ssh_agent_enabled),
         9 => SearchAction::SetKeepOfflineCopy(!settings.keep_offline_copy),
         10 => SearchAction::SetBrowserIntegrationEnabled(!settings.browser_integration_enabled),
         DEFAULT_URI_MATCH_ROW => {
@@ -1247,7 +1249,7 @@ pub fn draw_settings(
         state.settings_scrolled_to = None;
     }
     // The start list row (a choice, not a toggle) is drawn separately at START_LIST_ROW.
-    let rows: [(bool, &str, &str); SETTINGS_ROWS - 6] = [
+    let rows: [(bool, &str, &str); SETTINGS_ROWS - 7] = [
         (
             settings.show_keyboard_shortcuts,
             "Show keyboard shortcuts",
@@ -1276,7 +1278,7 @@ pub fn draw_settings(
             } else if crate::screen_capture::available() {
                 "Hide this window in screenshots and screen sharing"
             } else {
-                "Requires Hyprland; capture protection is unavailable here"
+                "Capture protection is unavailable on this desktop"
             },
         ),
         (
@@ -1292,7 +1294,11 @@ pub fn draw_settings(
         (
             settings.ssh_agent_enabled,
             "Enable SSH agent",
-            "Serve SSH keys from the vault over a local agent socket",
+            if cfg!(windows) {
+                "Unavailable in the Windows preview; SSH items remain accessible"
+            } else {
+                "Serve SSH keys from the vault over a local agent socket"
+            },
         ),
         (
             settings.keep_offline_copy,
@@ -1339,8 +1345,9 @@ pub fn draw_settings(
                         action = toggle_setting(START_LIST_ROW, settings);
                     }
                 }
-                let enabled = idx != SCREEN_CAPTURE_ROW
-                    || (crate::screen_capture::available() && !state.capture_pending);
+                let enabled = !(cfg!(windows) && idx == 8)
+                    && (idx != SCREEN_CAPTURE_ROW
+                        || (crate::screen_capture::available() && !state.capture_pending));
                 let response = ui
                     .add_enabled_ui(enabled, |ui| {
                         widgets::toggle_row(
@@ -1486,7 +1493,26 @@ pub fn draw_settings(
                     action = Some(SearchAction::OpenAcknowledgements);
                 }
             }
-            if visible(8) && settings.ssh_agent_enabled {
+            if visible(SHORTCUT_ROW) {
+                let response = widgets::choice_row(
+                    ui,
+                    state.settings_selected == SHORTCUT_ROW,
+                    "Quick access shortcut",
+                    "Record, change, or clear the global shortcut",
+                    "Configure",
+                );
+                if state.settings_selected == SHORTCUT_ROW
+                    && state.settings_scrolled_to != Some(SHORTCUT_ROW)
+                {
+                    response.scroll_to_me(None);
+                    state.settings_scrolled_to = Some(SHORTCUT_ROW);
+                }
+                if response.clicked() {
+                    state.settings_selected = SHORTCUT_ROW;
+                    action = Some(SearchAction::OpenShortcutSetup);
+                }
+            }
+            if !cfg!(windows) && visible(8) && settings.ssh_agent_enabled {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.add_space(54.0);
@@ -1541,6 +1567,7 @@ pub enum SearchAction {
     OpenResult(usize),
     OpenWindow,
     OpenAcknowledgements,
+    OpenShortcutSetup,
     SetKeepOfflineCopy(bool),
     SetKeyboardShortcuts(bool),
     SetCloseAfterCopy(bool),
@@ -1630,7 +1657,7 @@ mod tests {
     #[test]
     fn settings_tabs_keep_keyboard_actions_within_visible_rows() {
         for (group, first, last) in [
-            (SettingsGroup::General, 0, 9),
+            (SettingsGroup::General, 0, SHORTCUT_ROW),
             (SettingsGroup::Browser, 10, 14),
             (SettingsGroup::Ssh, 8, 8),
         ] {
@@ -1671,7 +1698,13 @@ mod tests {
             })
             .textures_delta
             .clear();
+            #[cfg(unix)]
             assert!(matches!(action, Some(SearchAction::SetSshAgentEnabled(_))));
+            #[cfg(windows)]
+            assert!(
+                action.is_none(),
+                "Windows must not enable its unsupported SSH agent"
+            );
         }
     }
 
@@ -1860,7 +1893,12 @@ mod tests {
     fn passkey_verification_setting_cycles_after_existing_browser_rows() {
         let mut settings = AppSettings::default();
         assert_eq!(PASSKEY_VERIFICATION_ROW, PAIRED_BROWSERS_ROW + 1);
-        assert_eq!(ACKNOWLEDGEMENTS_ROW, SETTINGS_ROWS - 1);
+        assert_eq!(SHORTCUT_ROW, SETTINGS_ROWS - 1);
+        assert_eq!(ACKNOWLEDGEMENTS_ROW, SHORTCUT_ROW - 1);
+        assert!(matches!(
+            toggle_setting(SHORTCUT_ROW, &settings),
+            Some(SearchAction::OpenShortcutSetup)
+        ));
         assert!(matches!(
             toggle_setting(ACKNOWLEDGEMENTS_ROW, &settings),
             Some(SearchAction::OpenAcknowledgements)

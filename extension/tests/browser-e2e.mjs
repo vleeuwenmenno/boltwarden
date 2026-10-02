@@ -81,6 +81,8 @@ try {
   await delay(100);
   async function popup() {
     await send('Target.activateTarget', { targetId: website.targetId });
+    // CDP can expose the worker target before extension APIs are initialized.
+    await until(() => evaluate(workerSession, 'typeof chrome !== "undefined" && typeof chrome.action?.openPopup === "function"'), 'Extension action API');
     await evaluate(workerSession, 'chrome.action.openPopup()');
     const target = await until(async () => (await send('Target.getTargets')).targetInfos.find(target => target.url === `chrome-extension://${identities.chrome_id}/popup.html`), 'Extension popup');
     return { target, session: await attach(target.targetId) };

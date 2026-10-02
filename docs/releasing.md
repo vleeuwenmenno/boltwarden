@@ -25,6 +25,24 @@ their checksums; the existing RC1 release remains unchanged. Fedora 44 is the
 tested RPM baseline. Other RPM distributions, including older RHEL/CentOS
 systems, are not covered by these tests and may not meet the glibc requirement.
 
+The `windows-x86_64` job runs on `windows-2025` with Rust 1.98.1 and the
+`x86_64-pc-windows-msvc` target. It runs Windows/shared Rust tests, generates
+Windows dependency notices, and builds the GUI and native-host EXEs with static
+CRT linkage. A version-pinned, SHA-256-verified Inno Setup 6.7.3 compiler produces
+a per-user installer. Packaging checks PE architecture and imported runtime DLLs.
+The same application payload is also packaged as a ZIP; both have checksums.
+The smoke test runs only on a disposable CI account and refuses existing app data.
+It opens both GUI windows with default and forced WARP software rendering using
+synthetic demo data, then checks native-host framing, registration, singleton activation, installation,
+upgrade while running, optional sign-in/browser tasks, and uninstall while
+preserving user data.
+
+Windows assets are unsigned previews, including on stable desktop tags. Do not
+advertise stable Windows support until both EXEs and the installer are signed
+and the Windows 11 checks in [Windows validation](windows.md#release-validation)
+have passed. Hosted Windows Server tests do not certify Windows 11 desktop behavior.
+Existing published releases are unchanged; release the new assets under a new tag.
+
 A separate container checks npm dependencies, types, unit tests, playground tests,
 and real Chromium/Firefox integration fixtures, then exports Chrome/Firefox ZIPs
 and the AMO source ZIP. CI uploads them as separate `extension-chrome`,
@@ -66,11 +84,11 @@ would restore the old names; use this corrected packaging workflow for later tag
 A release tag must equal `v` plus Cargo.toml's version. Chrome extension versions
 remain numeric; do not copy the desktop RC suffix into the extension manifest.
 Release notes must exist at `docs/release-notes-VERSION.md`. The release job checks
-all eleven expected artifacts and their checksums, rejecting missing or extra files.
+all thirteen expected artifacts and their checksums, rejecting missing or extra files.
 RC tags create drafts marked as prereleases; stable tags create ordinary drafts.
 Only after every job succeeds does the workflow create a **draft** GitHub release
 and attach both architectures’ binaries/packages, Chrome and Firefox ZIPs, the
-AMO source ZIP, and their checksums. Missing artifact groups fail the release job. Existing draft assets with the same names are replaced on a rerun; published
+AMO source ZIP, Windows installer/ZIP, and their checksums. Missing artifact groups fail the release job. Existing draft assets with the same names are replaced on a rerun; published
 release assets are never overwritten. The workflow does not publish the draft or
 submit to extension stores.
 

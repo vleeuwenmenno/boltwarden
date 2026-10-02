@@ -1,7 +1,10 @@
 //! Public pairing identities. The user's account and browser profile remain trusted.
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{self, Write};
+use std::io;
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -31,18 +34,17 @@ pub struct PairingStore {
 
 impl PairingStore {
     pub fn load() -> io::Result<Self> {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".config")))
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "Config directory unavailable")
-            })?;
-        Self::load_at(base.join("boltwarden/browsers.json"))
+        let path = crate::config::config_path("browsers.json").ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "Config directory unavailable")
+        })?;
+        Self::load_at(path)
     }
     pub(super) fn load_at(path: PathBuf) -> io::Result<Self> {
         let records = match fs::symlink_metadata(&path) {
             Ok(metadata) => {
+                #[cfg(windows)]
+                crate::platform::windows::verify_private(&path)?;
+                #[cfg(unix)]
                 if !metadata.is_file()
                     || metadata.uid() != crate::unix_socket::current_uid()
                     || metadata.mode() & 0o077 != 0
@@ -165,6 +167,12 @@ pub fn fingerprint(spki: &str) -> Result<String, String> {
         .join(":"))
 }
 
+#[cfg(windows)]
+fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
+    crate::platform::windows::write_private(path, data)
+}
+
+#[cfg(unix)]
 fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
@@ -207,13 +215,17 @@ mod tests {
             fingerprint: "fingerprint".into(),
         };
         store.insert(&pending).unwrap();
+        #[cfg(unix)]
         assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+        #[cfg(windows)]
+        crate::platform::windows::verify_private(&path).unwrap();
         assert_eq!(PairingStore::load_at(path.clone()).unwrap().list().len(), 1);
         store.revoke(&pending.pairing_id).unwrap();
         assert!(PairingStore::load_at(path).unwrap().list().is_empty());
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
+    #[cfg(unix)]
     fn refuses_symlink_trust_store() {
         let dir = std::env::temp_dir().join(format!("boltwarden-pairing-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&dir).unwrap();

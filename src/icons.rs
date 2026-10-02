@@ -8,7 +8,10 @@
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::io::Write;
+use std::io::{self, Read};
+#[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -398,6 +401,12 @@ fn is_fresh(path: &Path, ttl: Duration) -> bool {
 }
 
 /// Writes via a temp file and rename so a crash never leaves a half-written icon.
+#[cfg(windows)]
+fn write_private(_: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    crate::platform::windows::write_private(path, bytes)
+}
+
+#[cfg(unix)]
 fn write_private(dir: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::DirBuilder::new()
         .recursive(true)

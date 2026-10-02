@@ -54,7 +54,7 @@ impl Default for BrowserSetupState {
 fn discover() -> SetupResult {
     let preferences = config::load_browser_setup().map_err(|e| e.to_string())?;
     let mut rows = install::discover().map_err(|e| e.to_string())?;
-    for custom in &preferences.custom {
+    for custom in preferences.custom.iter().filter(|_| !cfg!(windows)) {
         let normalized = install::normalize_native_host_dir(&custom.native_host_dir)
             .map_err(|e| e.to_string())?;
         if rows.iter().any(|r| {
@@ -329,7 +329,7 @@ pub fn draw_browser_setup(ui: &mut Ui, state: &mut BrowserSetupState) {
                     if widgets::button(ui, "Refresh", false, true).clicked() {
                         state.refresh();
                     }
-                    if widgets::button(ui, "Add browser", false, true).clicked() {
+                    if !cfg!(windows) && widgets::button(ui, "Add browser", false, true).clicked() {
                         state.custom_open = !state.custom_open;
                         if state.directory.is_empty() {
                             state.directory = install::default_native_host_dir(state.family)

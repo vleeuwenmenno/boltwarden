@@ -1,0 +1,47 @@
+Boltwarden for Windows 11 x64 — unsigned preview
+
+This preview is unsigned. Windows may display download or publisher warnings.
+Use a test vault when evaluating it. SSH agent support is not included; SSH
+vault items can still be viewed and edited. Windows 10 and native ARM64 are
+not certified. Capture exclusion is best effort, not a security boundary.
+
+Installer: installs for the current user without administrator access.
+Start-menu shortcuts are included. Desktop shortcut, sign-in autostart,
+and Chrome/Edge/Firefox registration are optional and initially unchecked.
+
+ZIP: extract every file into one directory. Run boltwarden.exe. Keep
+boltwarden-native-host.exe beside it. Application data lives under
+%LOCALAPPDATA%\Boltwarden for both downloads; the ZIP is not a portable vault.
+
+Run these commands from PowerShell in the extracted or installed directory:
+  .\boltwarden.exe window
+  .\boltwarden.exe toggle
+  .\boltwarden.exe --daemon
+  .\boltwarden.exe install-browser --browser all
+  .\boltwarden.exe uninstall-browser --browser all
+  .\boltwarden.exe quit
+
+Browser registration is also available in Settings > Browser integration.
+Install the separate Boltwarden browser extension and pair each profile.
+Chrome and Edge use the Chromium extension; Firefox uses the Firefox build.
+Registration does not install extensions or bypass enterprise browser policies.
+The native host requires an already running Boltwarden daemon.
+
+Set a global shortcut in Settings > General > Quick access shortcut. Record or
+select a combination and Apply. Conflicts preserve the previous shortcut. Clear
+removes it. The shortcut works while Boltwarden is running, even when locked;
+the installer's optional sign-in autostart keeps it available after login.
+
+Before moving a ZIP installation, unregister its browsers and quit Boltwarden.
+After moving, register again from the new directory. Foreign registrations are
+not overwritten. Do not run installer and ZIP copies at the same time.
+
+Quit before upgrading; unsaved edits must be saved first. Uninstall removes this
+installation's browser registration and sign-in entry, while keeping settings,
+encrypted sessions, encrypted offline vault data, and paired-browser records.
+To remove that data, use another account / clear offline data in the app first,
+or deliberately delete %LOCALAPPDATA%\Boltwarden after quitting.
+
+Passwords expire from the clipboard after 45 seconds unless another application
+has replaced the contents. Copies opt out of Windows clipboard history/cloud
+sync. Other clipboard tools and software running as your user remain trusted.
