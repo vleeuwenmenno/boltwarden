@@ -114,7 +114,6 @@ fn main() -> eframe::Result<()> {
         }
         _ => {}
     }
-    config::migrate_legacy_dirs();
     if std::env::args().any(|arg| arg == "--popup") {
         return run_popup();
     }

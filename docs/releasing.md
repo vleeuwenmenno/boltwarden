@@ -12,15 +12,16 @@ The native `ubuntu-24.04` and `ubuntu-24.04-arm` jobs build in a Debian 12 conta
 with Rust 1.98.1. Each runs Rust tests, then produces a release tarball, `.deb`,
 and `.pkg.tar.zst` with SHA-256 checksums. Each CPU job then installs the Debian
 package in a clean container, checks native-host startup, and removes the package.
-These are regular dynamically linked
-Linux binaries, not the old self-extracting Nix bundles. They require glibc 2.36+
+These are dynamically linked Linux binaries. They require glibc 2.36+
 and the desktop libraries listed in package metadata (Debian 12+ or Ubuntu 24.04+
 are suitable baselines). ARM64 package architecture is `arm64` on Debian and
 `aarch64` on Arch Linux ARM. Arch Linux itself targets x86_64.
 
 A separate container checks npm dependencies, types, unit tests, playground tests,
 and real Chromium/Firefox integration fixtures, then exports Chrome/Firefox ZIPs
-and the AMO source ZIP. All browser tests use disposable profiles and synthetic
+and the AMO source ZIP. CI uploads them as separate `extension-chrome`,
+`extension-firefox`, and `extension-sources` artifacts, each containing one ZIP
+and its checksum. Releases attach the ZIPs and checksums individually. All browser tests use disposable profiles and synthetic
 credentials. They do not use a real vault. The source ZIP contains the license,
 source code, lockfile, tests, and reviewer build instructions.
 The Firefox passkey fixture repeats same-URL navigation ten times to exercise

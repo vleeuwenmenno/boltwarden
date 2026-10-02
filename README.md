@@ -1,18 +1,16 @@
 # Boltwarden
 
+[![CI](https://github.com/vleeuwenmenno/boltwarden/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/vleeuwenmenno/boltwarden/actions/workflows/ci.yml)
+[![Release downloads](https://img.shields.io/badge/releases-downloads-7c3aed?logo=github&logoColor=white)](https://github.com/vleeuwenmenno/boltwarden/releases)
+[![Linux x86_64 and ARM64](https://img.shields.io/badge/Linux-x86__64%20%7C%20ARM64-1793d1?logo=linux&logoColor=white)](#install)
+[![License: MIT with Commons Clause](https://img.shields.io/badge/license-MIT%20%2B%20Commons%20Clause-f59e0b)](LICENSE)
+
 An unofficial Linux desktop app for Vaultwarden and Bitwarden vaults: a quick
 access popup plus a full vault window. It is not affiliated with Bitwarden or the
 Vaultwarden project.
 
-Formerly `bw-quick-access`. On first start, Boltwarden moves
-`~/.config/bw-quick-access` and `~/.cache/bw-quick-access` to their new names, so the
-saved session and settings carry over. Remove the old user service
-(`systemctl --user disable --now bw-quick-access.service`) and binary after
-installing the new one.
-
-The goal is to provide a 1Password-style quick access window: open it from a
-keyboard shortcut or tray icon, search your vault, open an entry, and copy the
-field you need without switching to a full password manager window.
+Open quick access from a keyboard shortcut or tray icon, search your vault,
+and copy the field you need. Use the full vault window to browse and edit entries.
 
 This project talks to the Bitwarden/Vaultwarden HTTP API directly. It does not
 shell out to the `bw` CLI.
@@ -30,14 +28,46 @@ shell out to the `bw` CLI.
 - Entry detail view with username, password, URI, notes, custom fields, and TOTP
 - Copy selected fields from the keyboard or mouse
 - Optional SSH agent socket for official Bitwarden/Vaultwarden SSH key items
-- Experimental Chrome/Chromium and Firefox extension for daemon-backed login filling
+- Chrome/Chromium and Firefox extensions for login, TOTP, and credit card filling
+- Experimental passkey registration and sign-in through the desktop vault
 - Auto-hide on Escape and focus loss, with confirmation before discarding edits
 - Random password generation, masked TOTP seeds, and timed secret reveal
 - Manual and periodic vault synchronization
 - A full vault window with a folder tree, favorites and an action center
 - Passkeys shown on items; the editor can remove them after a confirmation
 
+Credit cards can be selected from the extension toolbar on HTTPS payment forms
+with standard `cc-*` autocomplete fields. The popup displays masked card numbers;
+fills require explicit selection and never submit payments. See the
+[browser extension guide](extension/README.md#credit-card-autofill).
+
+## Downloads
+
+Choose your platform and browser from the assets on the
+[Releases page](https://github.com/vleeuwenmenno/boltwarden/releases).
+Desktop packages support Linux x86_64 and ARM64. Browser extensions are separate
+downloads and require the Boltwarden desktop app:
+
+| Browser | Release asset |
+| --- | --- |
+| Chrome / Chromium | `boltwarden-browser-VERSION-chrome.zip` |
+| Firefox | `boltwarden-browser-VERSION-firefox.zip` |
+| Source review / development | `boltwarden-browser-VERSION-sources.zip` |
+
+Each file has a matching `.sha256` checksum. The source archive is not an installable
+extension. These ZIPs are build artifacts, not store-signed installations; see
+[extension setup](extension/README.md#development) and
+[publishing instructions](extension/PUBLISHING.md).
+
+Before a release is published, use a successful
+[CI run](https://github.com/vleeuwenmenno/boltwarden/actions/workflows/ci.yml).
+Its `extension-chrome`, `extension-firefox`, and `extension-sources` downloads each
+contain the corresponding ZIP and checksum. Release assets expose those files
+individually, alongside the native packages.
+
 ## Install
+
+### Build from source
 
 Requirements:
 
@@ -832,8 +862,3 @@ Boltwarden is source-available under [MIT with Commons Clause v1.0](LICENSE).
 Internal business use is permitted; selling products or services based substantially
 on Boltwarden is restricted. Forks and distributions must retain Menno van Leeuwen’s
 copyright notice and the complete license. Third-party dependencies keep their own licenses.
-
-Credit cards can be selected from the extension toolbar on HTTPS payment forms
-with standard `cc-*` autocomplete fields. The popup displays masked card numbers;
-fills require explicit selection and never submit payments. See the
-[browser extension guide](extension/README.md#credit-card-autofill).

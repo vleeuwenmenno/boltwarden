@@ -3928,8 +3928,7 @@ fn session_storage_key(
 ) -> Result<Zeroizing<[u8; 64]>, BwError> {
     let context = serde_json::to_vec(&(&session.server_url, &session.email))
         .map_err(|e| BwError::Parse(e.to_string()))?;
-    // Keeps the pre-rename label: changing it would make every saved session unreadable.
-    let kdf = hkdf::Hkdf::<Sha256>::new(Some(b"bw-quick-access/session-token/v1"), user_key);
+    let kdf = hkdf::Hkdf::<Sha256>::new(Some(b"boltwarden/session-token/v1"), user_key);
     let mut key = Zeroizing::new([0u8; 64]);
     kdf.expand(&context, key.as_mut())
         .map_err(|_| BwError::Parse("Session key derivation failed".into()))?;

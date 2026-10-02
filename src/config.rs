@@ -6,8 +6,6 @@ use std::path::PathBuf;
 use zeroize::Zeroizing;
 
 const APP_DIR: &str = "boltwarden";
-/// The directory name before the app was renamed from bw-quick-access.
-const LEGACY_APP_DIR: &str = "bw-quick-access";
 const DEVICE_ID_FILE: &str = "device-id";
 const VAULT_CACHE_FILE: &str = "vault-cache.json";
 const SESSION_FILE: &str = "session.json";
@@ -514,21 +512,6 @@ fn cache_base() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
 }
 
-/// Moves the config (saved session, settings, device id) and cache directories from
-/// the old bw-quick-access name, once. Nothing moves when the new directory exists.
-pub fn migrate_legacy_dirs() {
-    for base in [config_base(), cache_base()].into_iter().flatten() {
-        let _ = migrate_dir(&base.join(LEGACY_APP_DIR), &base.join(APP_DIR));
-    }
-}
-
-fn migrate_dir(old: &std::path::Path, new: &std::path::Path) -> io::Result<()> {
-    if !old.is_dir() || new.exists() {
-        return Ok(());
-    }
-    fs::rename(old, new)
-}
-
 #[cfg(test)]
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -623,26 +606,6 @@ mod tests {
             assert!(load_vault_cache().is_none());
             clear_vault_cache().unwrap();
         });
-    }
-
-    #[test]
-    fn migrates_the_legacy_directory_once() {
-        let temp =
-            std::env::temp_dir().join(format!("boltwarden-migrate-{}", uuid::Uuid::new_v4()));
-        let (old, new) = (temp.join(LEGACY_APP_DIR), temp.join(APP_DIR));
-        fs::create_dir_all(&old).unwrap();
-        fs::write(old.join(SESSION_FILE), "saved").unwrap();
-
-        migrate_dir(&old, &new).unwrap();
-        assert_eq!(fs::read_to_string(new.join(SESSION_FILE)).unwrap(), "saved");
-        assert!(!old.exists());
-
-        // A newer directory is never overwritten by an old one.
-        fs::create_dir_all(&old).unwrap();
-        fs::write(old.join(SESSION_FILE), "stale").unwrap();
-        migrate_dir(&old, &new).unwrap();
-        assert_eq!(fs::read_to_string(new.join(SESSION_FILE)).unwrap(), "saved");
-        let _ = fs::remove_dir_all(temp);
     }
 
     #[test]
