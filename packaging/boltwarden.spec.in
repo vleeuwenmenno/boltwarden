@@ -1,0 +1,35 @@
+# Package the tested portable binary without changing it or generating debuginfo.
+%global debug_package %{nil}
+%global __os_install_post %{nil}
+%global _build_id_links none
+
+Name: boltwarden
+Version: @VERSION@
+Release: 1
+Summary: Unofficial Linux desktop client for Bitwarden and Vaultwarden
+License: LicenseRef-MIT-Commons-Clause
+URL: https://github.com/vleeuwenmenno/boltwarden
+BuildArch: @ARCH@
+# Include dynamically loaded desktop libraries as well as automatic ELF deps.
+Requires: glibc >= 2.36
+Requires: libgcc, fontconfig, libglvnd-glx
+Requires: libX11, libXcursor, libXi, libXrandr, libxcb, libxkbcommon, wayland-libs
+
+%description
+Desktop vault, browser integration, and an optional systemd user service.
+Run boltwarden-setup as your desktop user to choose graphical-login autostart.
+Package installation does not enable or start the service.
+
+%install
+mkdir -p %{buildroot}
+cp -a %{payload}/. %{buildroot}/
+
+%files
+%defattr(-,root,root,-)
+/usr/bin/boltwarden
+/usr/bin/boltwarden-setup
+/usr/lib/systemd/user/boltwarden.service
+/usr/share/applications/boltwarden.desktop
+/usr/share/icons/hicolor/scalable/apps/boltwarden.svg
+%doc /usr/share/doc/boltwarden
+%license /usr/share/licenses/boltwarden

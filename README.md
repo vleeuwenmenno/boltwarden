@@ -112,7 +112,11 @@ without opening the popup immediately.
 ### Distribution packages and autostart
 
 Install the matching release `.deb` with `sudo apt install ./boltwarden_*.deb`,
-or an Arch package with `sudo pacman -U ./boltwarden-*.pkg.tar.zst`.
+an Arch package with `sudo pacman -U ./boltwarden-*.pkg.tar.zst`, or a Fedora `.rpm`
+with `sudo dnf install ./boltwarden-*.rpm`.
+RPM packages are available in CI builds after RC1 and will be attached to the next
+release; the published RC1 does not include them. There is no Boltwarden DNF/YUM
+repository yet, so updates require downloading a newer package.
 Run `boltwarden-setup` **without sudo** afterward to choose whether Boltwarden
 starts at graphical login. Packages install a user service but never enable it
 for all users. See [package requirements and verification](docs/releasing.md).
@@ -143,7 +147,7 @@ boltwarden --daemon
 This is useful on desktops where you prefer launching the daemon manually instead
 of installing the systemd user service.
 
-GitHub Actions prepares release tarballs, Debian packages, and Arch packages for
+GitHub Actions prepares release tarballs, Debian, Arch, and Fedora RPM packages for
 `x86_64` and `aarch64`, with SHA-256 checksums. Distribution binaries require
 glibc 2.36+ and desktop libraries; they are not self-contained Nix bundles.
 Chrome and Firefox ZIPs and the Firefox review source ZIP are also produced.

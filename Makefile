@@ -97,7 +97,7 @@ security: ## Audit Rust and npm dependencies (requires cargo-audit)
 	$(CARGO) audit --deny warnings
 	$(NPM) --prefix extension audit
 
-package: ## Build tested Linux tar, Debian, and Arch packages with Docker
+package: ## Build tested Linux tar, Debian, Arch, and RPM packages with Docker
 	docker buildx build -f packaging/Dockerfile --output type=local,dest=dist .
 
 packaging-test: ## Check packaging and user-service opt-in behavior

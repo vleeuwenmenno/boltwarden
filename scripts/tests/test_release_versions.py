@@ -19,6 +19,8 @@ class ReleaseVersionsTests(unittest.TestCase):
         names = artifact_names('1.0.0-rc.1', '0.5.6')
         self.assertIn('boltwarden_1.0.0-rc.1_amd64.deb', names)
         self.assertIn('boltwarden_1.0.0-rc.1_arm64.deb', names)
+        self.assertIn('boltwarden-1.0.0-rc.1-1.x86_64.rpm', names)
+        self.assertIn('boltwarden-1.0.0-rc.1-1.aarch64.rpm', names)
         for name in names:
             self.assertIsNotNone(re.fullmatch(r'[A-Za-z0-9_.-]+', name), name)
 
@@ -47,7 +49,7 @@ class ReleaseVersionsTests(unittest.TestCase):
         version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['package']['version']
         extension = json.loads((ROOT / 'extension/package.json').read_text())['version']
         names = artifact_names(version, extension)
-        self.assertEqual(len(names), 9)
+        self.assertEqual(len(names), 11)
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             for name in names:

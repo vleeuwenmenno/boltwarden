@@ -123,6 +123,25 @@ Description: Unofficial Linux desktop client for Bitwarden and Vaultwarden
         artifacts.append(target)
         shutil.rmtree(debian)
 
+        # RPM uses the same '~rc.N' ordering as Debian, but download names use
+        # SemVer because GitHub rewrites '~' in attachment filenames.
+        rpm_work = work / 'rpm'
+        rpm_work.mkdir()
+        spec = (ROOT / 'packaging/boltwarden.spec.in').read_text()
+        spec = spec.replace('@VERSION@', deb_version).replace('@ARCH@', arch)
+        spec_path = rpm_work / 'boltwarden.spec'
+        spec_path.write_text(spec)
+        rpm_name = f'boltwarden-{version}-1.{arch}.rpm'
+        subprocess.run([
+            'rpmbuild', '-bb', '--target', arch,
+            '--define', f'_topdir {rpm_work}',
+            '--define', f'_rpmdir {output}',
+            '--define', f'_rpmfilename {rpm_name}',
+            '--define', f'payload {root}',
+            str(spec_path),
+        ], check=True)
+        artifacts.append(output / rpm_name)
+
         license_id = tomllib.loads((ROOT / 'Cargo.toml').read_text())['package'].get('license', 'LicenseRef-MIT-Commons-Clause')
         (root / '.PKGINFO').write_text(f'''pkgname = boltwarden
 pkgbase = boltwarden
