@@ -63,7 +63,7 @@ jobs:
           sha256sum --check ./*.sha256
           for file in *.deb; do dpkg-deb --info "$file"; dpkg-deb --contents "$file"; done
           for file in *.pkg.tar.zst; do tar --zstd -tf "$file"; done
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: linux-${{ matrix.arch }}
           path: dist/*
@@ -77,7 +77,7 @@ jobs:
           persist-credentials: false
       - name: Audit, test in Chromium and Firefox, and package extensions
         run: docker buildx build --file packaging/Dockerfile.extension --output type=local,dest=dist .
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: extensions
           path: dist/*
