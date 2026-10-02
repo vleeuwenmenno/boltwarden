@@ -436,7 +436,7 @@ fn details() -> Vec<BwItemDetail> {
     let mut github = detail(
         "github",
         "GitHub",
-        Some("menno@example.com"),
+        Some("alex@example.com"),
         Some("Development"),
     );
     github.uris = vec!["https://github.com/login".into()];
@@ -451,15 +451,15 @@ fn details() -> Vec<BwItemDetail> {
     github.passkeys = vec![Passkey {
         rp_id: "github.com".into(),
         rp_name: Some("GitHub".into()),
-        user_name: Some("menno".into()),
-        user_display_name: Some("Menno".into()),
+        user_name: Some("alex".into()),
+        user_display_name: Some("Alex".into()),
         creation_date: Some("2026-05-17T08:12:00.000Z".into()),
     }];
 
     let mut gitlab = detail(
         "gitlab",
         "GitLab (work)",
-        Some("m.vanleeuwen"),
+        Some("alex.example"),
         Some("Work"),
     );
     gitlab.uris = vec!["https://gitlab.com/users/sign_in".into()];
@@ -483,7 +483,7 @@ fn details() -> Vec<BwItemDetail> {
     note.password = None;
     note.notes = Some("SSID: Skynet\nPassword: in the drawer".into());
 
-    let mut card = detail("card", "Visa", Some("M. van Leeuwen"), Some("Finance"));
+    let mut card = detail("card", "Visa", Some("Alex Example"), Some("Finance"));
     card.item_type = "card".into();
     card.password = None;
     card.custom_fields = vec![
@@ -516,7 +516,7 @@ fn details() -> Vec<BwItemDetail> {
         id: "ssh".into(),
         name: "Laptop SSH key".into(),
         public_key:
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDemoDemoDemoDemoDemoDemoDemoDemo menno@laptop"
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDemoDemoDemoDemoDemoDemoDemoDemo alex@laptop"
                 .into(),
         private_key: "-----BEGIN OPENSSH PRIVATE KEY-----\ndemo\n-----END OPENSSH PRIVATE KEY-----"
             .into(),
@@ -567,7 +567,7 @@ fn details() -> Vec<BwItemDetail> {
             "2012-07-07",
         ),
     ] {
-        let mut item = detail(id, name, Some("menno"), None);
+        let mut item = detail(id, name, Some("alex"), None);
         item.uris = vec![uri.into()];
         item.state = state;
         item.dates = ItemDates {
@@ -594,7 +594,7 @@ fn details() -> Vec<BwItemDetail> {
         } else {
             "Homelab"
         };
-        let mut item = detail(&format!("extra-{idx}"), name, Some("menno"), Some(folder));
+        let mut item = detail(&format!("extra-{idx}"), name, Some("alex"), Some(folder));
         item.uris = vec![(*uri).into()];
         items.push(item);
     }
@@ -638,10 +638,10 @@ fn demo_ssh_request() -> SshApprovalRequest {
             start_time_ticks: None,
             process_name: Some("ssh".into()),
             command_line: Some(
-                "ssh git@git.example.com git-upload-pack 'menno/dotfiles.git'".into(),
+                "ssh git@git.example.com git-upload-pack 'alex/dotfiles.git'".into(),
             ),
             executable: Some("/usr/bin/ssh".into()),
-            cwd: Some("/home/menno/Projects/boltwarden".into()),
+            cwd: Some("/home/alex/Projects/boltwarden".into()),
             parent_pid: Some(4200),
             parent_name: Some("git".into()),
             parent_start_time_ticks: None,

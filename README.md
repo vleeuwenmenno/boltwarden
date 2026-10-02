@@ -25,6 +25,25 @@ and copy the field you need. Use the full vault window to browse and edit entrie
 - **Offline access** — unlock an encrypted local vault cache when your server
   is unavailable.
 
+## Screenshots
+
+All screenshots show fictional data from the built-in demo vault.
+
+![Full vault window with folders, login details, a verification code, and a passkey](docs/screenshots/vault.png)
+
+<details>
+<summary>Quick access and vault health</summary>
+
+**Quick access** — search and reach credentials from the keyboard.
+
+![Quick-access popup searching fictional GitHub, GitLab, and Gitea entries](docs/screenshots/quick-access.png)
+
+**Action center** — review weak or reused passwords and account security suggestions.
+
+![Action center showing the demo vault's password health and security suggestions](docs/screenshots/action-center.png)
+
+</details>
+
 ## Downloads
 
 Choose your platform and browser from the assets on the
