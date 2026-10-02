@@ -56,3 +56,52 @@ it('deduplicates pending captures and never runs duplicate concurrent saves', as
   finish({ type: 'LoginSaved', saved: true }); await saving;
   expect(native.request).toHaveBeenCalledTimes(2);
 });
+it('keeps failed discards visible and retryable until session storage confirms removal', async () => {
+  const { queue, storage, create } = fixture();
+  await queue.add(1, 'https://example.test/', 'document', login);
+  const id = (await queue.list())[0]!.id;
+  const set = vi.spyOn(storage, 'set').mockRejectedValueOnce(new Error('Storage unavailable'));
+  await expect(queue.discard(id)).rejects.toThrow(/could not be discarded/);
+  expect((await queue.list())[0]?.id).toBe(id);
+  expect(JSON.stringify(await storage.get())).toContain(login.password);
+  set.mockRestore(); await queue.discard(id);
+  expect(await create().list()).toHaveLength(0);
+});
+it('retries cleanup after a successful vault save without resubmitting credentials', async () => {
+  const { queue, native, storage } = fixture('ready');
+  const set = storage.set;
+  vi.spyOn(storage, 'set').mockImplementation(async next => {
+    if ((next.pending_password_saves as any[]).length === 0) throw new Error('Removal failed');
+    await set(next);
+  });
+  await queue.add(1, 'https://example.test/', 'document', login);
+  const [entry] = await queue.list(); expect(entry?.message).toContain('temporary copy');
+  vi.restoreAllMocks(); await queue.retry(entry!.id);
+  expect(native.request).toHaveBeenCalledTimes(1); expect(await queue.list()).toHaveLength(0);
+});
+it('does not overwrite unread session data when loading fails', async () => {
+  const { queue, create, storage, native } = fixture();
+  await queue.add(1, 'https://example.test/first', 'document', login);
+  const restored = create();
+  const get = vi.spyOn(storage, 'get').mockRejectedValue(new Error('Read failed'));
+  const set = vi.spyOn(storage, 'set');
+  await restored.add(2, 'https://example.test/second', 'second', { username: 'bob', password: 'second-secret' });
+  expect(set).not.toHaveBeenCalled(); expect(native.request).toHaveBeenCalledTimes(1);
+  const [entry] = await restored.list(); expect(entry?.message).toContain('background restart');
+  get.mockRestore(); await restored.retry(entry!.id);
+  expect(await restored.list()).toHaveLength(2);
+});
+it('does not resurrect discarded credentials during a concurrent save', async () => {
+  const { queue, storage, create } = fixture();
+  await queue.add(1, 'https://example.test/first', 'document', login);
+  const id = (await queue.list())[0]!.id;
+  const set = storage.set;
+  let finish!: () => void;
+  vi.spyOn(storage, 'set').mockImplementationOnce(async next => { await new Promise<void>(resolve => { finish = resolve; }); await set(next); });
+  const discard = queue.discard(id);
+  await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+  const add = queue.add(2, 'https://example.test/second', 'second', { username: 'bob', password: 'second-secret' });
+  finish(); await Promise.all([discard, add]);
+  expect(await create().list()).toHaveLength(1);
+  expect(JSON.stringify(await storage.get())).not.toContain(login.password);
+});

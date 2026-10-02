@@ -115,7 +115,7 @@ export default defineBackground(() => {
   }
   native.onChange = (snapshot, event) => {
     passkeys.nativeChanged(snapshot, event);
-    void saves.resume();
+    void saves.resume().catch(() => {});
     const stateChanged = snapshot.state !== previousSnapshot.state || snapshot.epoch !== previousSnapshot.epoch || snapshot.error !== previousSnapshot.error;
     const matchesChanged = event?.type === 'MatchesChanged'
       || (!event && snapshot.state === 'ready' && snapshot.epoch !== previousSnapshot.epoch);

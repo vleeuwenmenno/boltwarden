@@ -1189,7 +1189,7 @@ impl BwClient {
         let key = self.user_key.as_deref().ok_or(BwError::NotUnlocked)?;
         let (method, path, body) =
             if let (Some(target), Some(stored)) = (target, target_cipher.as_ref()) {
-                let draft = draft_from_raw(&stored.raw, &stored.item_key)?;
+                let draft = Zeroizing::new(draft_from_raw(&stored.raw, &stored.item_key)?);
                 let mut body = build_save_request(stored, &draft, &iso8601_now())?;
                 let created =
                     build_passkey_create_request(context, options, &generated, &stored.item_key)?;

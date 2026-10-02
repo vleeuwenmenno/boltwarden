@@ -1,7 +1,7 @@
 import { expect, NativeError } from './protocol';
 import type { NativeClient } from './native';
 export interface PendingSaveSummary { id: string; origin: string; username: string; message: string; busy: boolean }
-interface PendingSave { id: string; tabId: number; url: string; documentId: string; login: { username: string; password: string }; waiting: boolean; message: string }
+interface PendingSave { id: string; tabId: number; url: string; documentId: string; login: { username: string; password: string }; waiting: boolean; message: string; saved?: boolean }
 interface SessionStorage { get(key: string): Promise<Record<string, any>>; set(values: Record<string, unknown>): Promise<void> }
 const key = 'pending_password_saves';
 /** Session-only storage survives background suspension, but never persists to disk. */
@@ -9,21 +9,38 @@ export function pendingSaves(native: NativeClient, storage: SessionStorage, chan
   notice: (entry: { tabId: number; url: string }, message: string) => void) {
   const entries = new Map<string, PendingSave>();
   const busy = new Set<string>();
-  const ready = storage.get(key).then(data => {
-    for (const entry of data[key] ?? []) entries.set(entry.id, entry);
-  }).catch(() => {});
+  let loaded = false, loading: Promise<void> | undefined;
+  async function load() {
+    if (loaded) return;
+    loading ??= storage.get(key).then(data => {
+      for (const entry of data[key] ?? []) if (!entries.has(entry.id)) entries.set(entry.id, entry);
+      loaded = true;
+    });
+    try { await loading; } finally { loading = undefined; }
+  }
   let writes = Promise.resolve();
+  function write(operation: () => Promise<void>) {
+    const result = writes.catch(() => {}).then(async () => { await load(); await operation(); });
+    writes = result; return result;
+  }
   function persist() {
-    const snapshot = structuredClone([...entries.values()]);
-    const write = writes.catch(() => {}).then(() => storage.set({ [key]: snapshot }));
-    writes = write; return write;
+    // Take the snapshot when the queued write runs, not before earlier removals.
+    return write(() => storage.set({ [key]: structuredClone([...entries.values()]) }));
+  }
+  function remove(entry: PendingSave) {
+    return write(async () => {
+      await storage.set({ [key]: structuredClone([...entries.values()].filter(value => value.id !== entry.id)) });
+      // Do not claim deletion or lose the retry handle until storage confirms it.
+      entries.delete(entry.id); entry.login.password = ''; entry.login.username = '';
+    });
   }
   async function retry(id: string) {
-    await ready;
     const entry = entries.get(id);
     if (!entry || busy.has(id)) return;
     busy.add(id); entry.message = 'Waiting for Boltwarden…'; changed();
     try {
+      await persist();
+      if (entry.saved) { await remove(entry); return; }
       await native.connect();
       if (native.snapshot.state === 'locked') {
         entry.waiting = true; entry.message = 'Unlock Boltwarden to finish saving. Password retained for this browser session.';
@@ -34,36 +51,43 @@ export function pendingSaves(native: NativeClient, storage: SessionStorage, chan
       entry.waiting = false;
       expect(await native.request({ type: 'SaveLogin', top_url: entry.url, frame_url: entry.url,
         document_id: entry.documentId, login: { ...entry.login } }), 'LoginSaved');
-      entries.delete(id); await persist(); entry.login.password = ''; entry.login.username = '';
+      entry.saved = true;
+      await remove(entry);
       notice(entry, 'Password saved in Boltwarden.');
     } catch (error) {
       // A lock may race the request. Retain the same credentials for the next unlock.
       entry.waiting = error instanceof NativeError && error.code === 'Locked';
-      entry.message = `${error instanceof Error ? error.message : 'Could not save password.'} Password retained; open Boltwarden’s extension to retry or discard.`;
+      entry.message = entry.saved ? 'Password saved, but the temporary copy could not be removed. Retry or discard to finish cleanup.'
+        : `${error instanceof Error ? error.message : 'Could not save password.'} Password retained; open Boltwarden’s extension to retry or discard.`;
       notice(entry, entry.message);
     } finally {
-      busy.delete(id); await persist().catch(() => {}); changed();
+      busy.delete(id);
+      try { await persist(); } catch { entry.message += ' Session storage unavailable: recovery cannot survive a background restart.'; }
+      changed();
     }
   }
   return {
     async add(tabId: number, url: string, documentId: string, login: PendingSave['login']) {
-      await ready;
+      await load().catch(() => {});
       if ([...entries.values()].some(entry => entry.url === url && entry.login.username === login.username && entry.login.password === login.password)) return;
       const entry: PendingSave = { id: crypto.randomUUID(), tabId, url, documentId, login: { ...login }, waiting: false, message: '' };
       entries.set(entry.id, entry);
-      await persist().catch(() => {}); changed();
+      changed();
       await retry(entry.id);
     },
-    async list(): Promise<PendingSaveSummary[]> { await ready; return [...entries.values()].map(entry => ({
+    async list(): Promise<PendingSaveSummary[]> { await load().catch(error => { if (!entries.size) throw error; }); return [...entries.values()].map(entry => ({
       id: entry.id, origin: new URL(entry.url).origin, username: entry.login.username, message: entry.message, busy: busy.has(entry.id),
     })); },
-    retry,
+    async retry(id: string) { await load().catch(() => {}); await retry(id); },
     async discard(id: string) {
-      await ready;
+      await load();
       if (busy.has(id)) throw new Error('Wait for the save request to finish.');
       const entry = entries.get(id); if (!entry) return;
-      entries.delete(id); await persist(); entry.login.password = ''; entry.login.username = ''; changed();
+      busy.add(id); changed();
+      try { await remove(entry); }
+      catch { entry.message = 'Temporary password could not be discarded. Retry discard to remove it.'; throw new Error(entry.message); }
+      finally { busy.delete(id); changed(); }
     },
-    async resume() { await ready; if (native.snapshot.state === 'ready') for (const entry of entries.values()) if (entry.waiting) void retry(entry.id); },
+    async resume() { await load(); if (native.snapshot.state === 'ready') for (const entry of entries.values()) if (entry.waiting) void retry(entry.id); },
   };
 }

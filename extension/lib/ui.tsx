@@ -78,7 +78,7 @@ function App({ options }: { options: boolean }) {
     try {
       if (retry) await call('retry');
       const next = await call<UiState>('state');
-      void call<PendingSaveSummary[]>('pending-saves').then(items => { if (live()) setPending(items ?? []); }).catch(() => {});
+      void call<PendingSaveSummary[]>('pending-saves').then(items => { if (live()) setPending(items ?? []); }).catch(error => { if (live()) setError(`Pending passwords unavailable: ${errorMessage(error)}`); });
       if (!live()) return;
       // Retain the public fingerprint even when a newer connection event has
       // superseded this response during the native handshake.
@@ -98,7 +98,7 @@ function App({ options }: { options: boolean }) {
   function connectionChanged(event: UiStateChange) {
     if (!live() || event.type !== 'state-changed') return;
     const previous = currentState.current?.connection;
-    void call<PendingSaveSummary[]>('pending-saves').then(items => setPending(items ?? [])).catch(() => {});
+    void call<PendingSaveSummary[]>('pending-saves').then(items => { if (live()) setPending(items ?? []); }).catch(error => { if (live()) setError(`Pending passwords unavailable: ${errorMessage(error)}`); });
     updateState({ fingerprint: currentState.current?.fingerprint ?? '', connection: event.connection });
     const changed = !previous || previous.state !== event.connection.state;
     const invalid = event.reason !== 'state' || (changed && event.connection.state !== 'ready');
