@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · Example</title>
+  <link rel="stylesheet" href="/login.css">
+  <script src="/login.js" defer></script>
+</head>
+<body>
+  <header><a class="brand" href="/login" aria-label="Example home"><span class="mark" aria-hidden="true">e</span>example<span class="brand-dot">.</span></a><span class="demo">Demo workspace</span></header>
+  <main>
+    <section class="login" aria-labelledby="title">
+      <p class="eyebrow">YOUR PERSONAL WORKSPACE</p>
+      <h1 id="title">Welcome back.</h1>
+      <p class="intro">A little less busy. A little more done.</p>
+      <form>
+        <label for="email">Email address</label>
+        <input id="email" name="username" type="email" autocomplete="username" placeholder="you@example.com" required spellcheck="false" autocapitalize="none">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required>
+        <button type="submit">Sign in <span aria-hidden="true">↗</span></button>
+        <p id="status" role="status">Your day, all in one place.</p>
+      </form>
+    </section>
+    <aside aria-label="Workspace illustration">
+      <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div>
+      <div class="note"><span class="note-label">A FRESH START</span><p>Make room<br>for what matters.</p><span class="note-line"></span><span class="note-small">One thing at a time.</span></div>
+      <span class="spark" aria-hidden="true">✳</span>
+    </aside>
+  </main>
+  <footer><span>Example is a fictional workspace.</span><span>Demo only · Use sample credentials</span></footer>
+</body>
+</html>

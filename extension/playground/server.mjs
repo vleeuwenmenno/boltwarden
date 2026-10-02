@@ -22,12 +22,15 @@ export function createRelyingParty(origin, now = Date.now) {
     if (path === '/api/reset') { generation++; accounts.clear(); pending.clear(); return state(); }
     if (path === '/api/password') {
       const { action, username, password, oldPassword = '', confirmation } = body;
+      const testAccount = typeof username === 'string'
+        ? /^(?:boltwarden-test-([a-zA-Z0-9._-]{1,64})|([a-zA-Z0-9._-]{1,64})@example\.com)$/.exec(username)
+        : null;
       if (!['register', 'login', 'change'].includes(action) || typeof username !== 'string'
-        || !/^boltwarden-test-[a-zA-Z0-9._-]{1,64}$/.test(username)
+        || !testAccount
         || typeof password !== 'string' || !password || password.length > 4096
-        || typeof oldPassword !== 'string' || oldPassword.length > 4096) throw new Error('Use a test username and a nonempty test password.');
+        || typeof oldPassword !== 'string' || oldPassword.length > 4096) throw new Error('Use boltwarden-test-NAME or NAME@example.com and a nonempty test password.');
       if (action !== 'login' && confirmation !== password) throw new Error('Passwords do not match.');
-      const name = username.slice('boltwarden-test-'.length);
+      const name = testAccount[1] ?? testAccount[2];
       let account = accounts.get(name);
       if (action === 'register') {
         if (account?.password) throw new Error('Password account already exists. Use Sign in or Change password.');
@@ -112,6 +115,9 @@ export async function startPlayground({ port = 8443, directory = join(root, '.pl
       '-days', '30', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost'], { stdio: 'ignore' });
   }
   const routes = new Map([
+    ['/login', ['playground/login.html', 'text/html']],
+    ['/login.css', ['playground/login.css', 'text/css']],
+    ['/login.js', ['playground/login.js', 'text/javascript']],
     ['/', ['playground/index.html', 'text/html']], ['/app.js', ['playground/app.js', 'text/javascript']],
     ['/ui.css', ['lib/ui.css', 'text/css']], ['/playground.css', ['playground/style.css', 'text/css']],
     ['/bolt.svg', ['public/bolt.svg', 'image/svg+xml']],

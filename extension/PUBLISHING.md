@@ -71,7 +71,9 @@ before each new store submission.
 ## Chrome Web Store
 
 Create an unpublished listing and upload the Chrome ZIP. Retrieve its public key
-from the developer dashboard and check that the assigned extension ID equals
+from the Package tab. The store ZIP omits the manifest `key` field, which Chrome
+Web Store rejects; unpacked builds retain it for a stable development ID.
+Check that the assigned extension ID equals
 `lib/browser-identities.json`'s `chrome_id`. The committed public key fixes the
 unpacked development identity; it does not guarantee the store will assign that
 identity. If different, replace `chrome_public_key` and `chrome_id` together,
