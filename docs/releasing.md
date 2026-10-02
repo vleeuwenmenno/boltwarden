@@ -42,6 +42,16 @@ Supported desktop versions are `X.Y.Z` and `X.Y.Z-rc.N`, with N starting at 1.
 Tarballs retain the desktop version; Debian maps RCs to `X.Y.Z~rc.N` and Arch to
 `X.Y.ZrcN-1` so final releases sort newer. Package-order regression tests exercise
 `dpkg` and `vercmp` when those tools are installed.
+Debian download filenames retain the desktop version (for example,
+`boltwarden_1.0.0-rc.1_amd64.deb`), while their internal Version field uses
+`1.0.0~rc.1`. GitHub rewrites `~` in asset names, so it must not appear in filenames.
+The release job downloads its uploaded assets and verifies the inventory and
+checksums again to catch hosting-side name changes.
+
+The initial RC1 upload exposed this GitHub rewrite. Its draft Debian downloads
+were renamed and their checksum sidecars regenerated without changing package
+contents or moving the tag. Re-running RC1's original tagged release workflow
+would restore the old names; use this corrected packaging workflow for later tags.
 
 A release tag must equal `v` plus Cargo.toml's version. Chrome extension versions
 remain numeric; do not copy the desktop RC suffix into the extension manifest.
