@@ -1,0 +1,15 @@
+[Unit]
+Description=Boltwarden password manager
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/boltwarden --daemon
+Restart=on-failure
+RestartSec=2
+UMask=0077
+LimitCORE=0
+
+[Install]
+WantedBy=graphical-session.target

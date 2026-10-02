@@ -1,3 +1,5 @@
+.DEFAULT_GOAL := help
+
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 BIN_NAME := boltwarden
@@ -8,54 +10,94 @@ CARGO ?= cargo
 NPM ?= npm
 BROWSER_TARGET ?= all
 
-.PHONY: all build release install install-service install-browser uninstall uninstall-service check test clean extension-deps extension-check extension-test extension-build extension-zip playground
+.PHONY: help all build release install install-service install-browser uninstall uninstall-service check test clean extension-deps extension-check extension-test extension-build extension-zip extension-release-check playground security package packaging-test
 
-all: release
+##@ General
+help: ## Show available targets (default)
+	@awk 'BEGIN { \
+		FS = ":.*## "; \
+		if (!ENVIRON["NO_COLOR"]) { \
+			cyan = "\033[1;36m"; blue = "\033[1;34m"; \
+			bold = "\033[1m"; reset = "\033[0m"; \
+		} \
+		printf "\n%s", cyan; \
+		print "  BBBB   OOO  L     TTTTT W   W  AAA  RRRR  DDDD  EEEEE N   N"; \
+		print "  B   B O   O L       T   W   W A   A R   R D   D E     NN  N"; \
+		printf "%s", blue; \
+		print "  BBBB  O   O L       T   W W W AAAAA RRRR  D   D EEE   N N N"; \
+		print "  B   B O   O L       T   WW WW A   A R  R  D   D E     N  NN"; \
+		print "  BBBB   OOO  LLLLL   T   W   W A   A R   R DDDD  EEEEE N   N"; \
+		printf "%s\n  %sUsage:%s make [target]\n", reset, bold, reset; \
+	} \
+	/^##@ / { printf "\n  %s%s%s\n", bold, substr($$0, 5), reset } \
+	/^[a-zA-Z0-9_-]+:.*## / { printf "    %s%-24s%s %s\n", cyan, $$1, reset, $$2 } \
+	END { printf "\n  Disable colors: NO_COLOR=1 make help\n\n" }' $(MAKEFILE_LIST)
 
-build:
+##@ Rust build and checks
+all: release ## Build the release binary
+
+build: ## Build the debug binary
 	$(CARGO) build
 
-release:
+release: ## Build the release binary
 	$(CARGO) build --release
 
-install:
-	sh scripts/install.sh install-binary "target/release/$(BIN_NAME)" "$(DESTDIR)$(BIN_PATH)"
-
-install-service:
-	sh scripts/install.sh install-service "$(BIN_PATH)" "$(SERVICE_NAME)" "$(SYSTEMD_USER_DIR)"
-
-install-browser:
-	"$(BIN_PATH)" install-browser --browser "$(BROWSER_TARGET)" --path "$(BIN_PATH)"
-
-uninstall:
-	sh scripts/install.sh uninstall-binary "$(DESTDIR)$(BIN_PATH)"
-
-uninstall-service:
-	sh scripts/install.sh uninstall-service "$(SERVICE_NAME)" "$(SYSTEMD_USER_DIR)"
-
-check:
+check: ## Check Rust code
 	$(CARGO) check
 
-test:
-	$(CARGO) test
+test: ## Run Rust tests
+	$(CARGO) test --locked -- --test-threads=1
 
-extension-deps:
+clean: ## Remove Rust build artifacts
+	$(CARGO) clean
+
+##@ Installation
+install: ## Install the existing release binary
+	sh scripts/install.sh install-binary "target/release/$(BIN_NAME)" "$(DESTDIR)$(BIN_PATH)"
+
+install-service: ## Install the systemd user service
+	sh scripts/install.sh install-service "$(BIN_PATH)" "$(SERVICE_NAME)" "$(SYSTEMD_USER_DIR)"
+
+install-browser: ## Register the installed binary with browsers (BROWSER_TARGET=all)
+	"$(BIN_PATH)" install-browser --browser "$(BROWSER_TARGET)" --path "$(BIN_PATH)"
+
+uninstall: ## Remove the installed binary
+	sh scripts/install.sh uninstall-binary "$(DESTDIR)$(BIN_PATH)"
+
+uninstall-service: ## Remove the systemd user service
+	sh scripts/install.sh uninstall-service "$(SERVICE_NAME)" "$(SYSTEMD_USER_DIR)"
+
+##@ Browser extension
+extension-deps: ## Install browser extension dependencies
 	$(NPM) --prefix extension ci
 
-extension-check:
+extension-check: ## Typecheck the browser extension
 	$(NPM) --prefix extension run typecheck
 
-extension-test:
+extension-test: ## Run browser extension tests
 	$(NPM) --prefix extension test
 
-extension-build:
+extension-build: ## Build the browser extension
 	$(NPM) --prefix extension run build
 
-extension-zip:
+extension-zip: ## Package the browser extension
+	python3 scripts/third-party-notices.py npm extension/public/THIRD_PARTY_NOTICES.txt
 	$(NPM) --prefix extension run zip
 
-playground:
+extension-release-check: ## Validate built store manifests and ZIPs
+	$(NPM) --prefix extension run check:release
+
+playground: ## Start the extension playground
 	$(NPM) --prefix extension run playground
 
-clean:
-	$(CARGO) clean
+##@ Release and security
+security: ## Audit Rust and npm dependencies (requires cargo-audit)
+	@$(CARGO) audit --version >/dev/null 2>&1 || { echo 'Install audit tooling first: cargo install cargo-audit --version 0.22.2 --locked' >&2; exit 1; }
+	$(CARGO) audit --deny warnings
+	$(NPM) --prefix extension audit
+
+package: ## Build tested Linux tar, Debian, and Arch packages with Docker
+	docker buildx build -f packaging/Dockerfile --output type=local,dest=dist .
+
+packaging-test: ## Check packaging and user-service opt-in behavior
+	python3 -m unittest discover -s scripts/tests

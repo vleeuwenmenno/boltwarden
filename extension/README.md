@@ -1,7 +1,9 @@
 # Boltwarden browser extension
 
 The extension fills usernames, email addresses, and passwords and handles supported passkey
-requests through a running Boltwarden desktop daemon. It stores only its pairing ID and a non-extractable pairing key. Matching,
+requests through a running Boltwarden desktop daemon. It persistently stores its pairing ID and a non-extractable pairing key. Pending
+password saves use browser session storage until saved, discarded, or the session
+ends; locking does not discard them. Matching,
 vault locking, and master-password verification remain in the desktop app.
 
 ## Development
@@ -42,7 +44,7 @@ Moving focus, navigating, locking, and disconnecting cancel stale operations.
 
 Press **Ctrl+Shift+L** over a login form. One eligible match fills directly;
 multiple matches open the picker where the browser allows it. If the popup cannot
-open, its toolbar badge indicates that a click is required. Firefox 128–148 can
+open, its toolbar badge indicates that a click is required. Firefox 140–148 can
 require that click after an asynchronous native lookup. Master-password reprompt
 items require explicit selection and desktop verification; HTTPS-to-HTTP downgrades
 and cross-origin frames require toolbar confirmation.
@@ -132,3 +134,10 @@ the synthetic pairing, matching, locked, filtered, and confirmation screens.
 
 `npm run zip` generates both browser archives and the Firefox source archive.
 Build instructions for source reviewers are in `SOURCE_CODE_REVIEW.md`.
+
+## Publishing and privacy
+
+Release builds require Firefox 140+ or Chromium 127+. See
+[PUBLISHING.md](PUBLISHING.md) for store metadata, identities, permissions, and
+submission steps, and [the privacy notice](../PRIVACY.md) for data handling.
+The extension uses [MIT with Commons Clause v1.0](public/LICENSE).

@@ -54,7 +54,7 @@ case "$command" in
 
         if [ ! -x "$binary_path" ]; then
             echo "installed binary not found or not executable: $binary_path" >&2
-            echo "Run 'make' and 'sudo make install' first, or pass BINDIR/PREFIX matching your install path." >&2
+            echo "Run 'make release' and 'sudo make install' first, or pass BINDIR/PREFIX matching your install path." >&2
             exit 1
         fi
 
@@ -70,6 +70,8 @@ Type=simple
 ExecStart=$binary_path --daemon
 Restart=on-failure
 RestartSec=2
+UMask=0077
+LimitCORE=0
 
 [Install]
 WantedBy=default.target

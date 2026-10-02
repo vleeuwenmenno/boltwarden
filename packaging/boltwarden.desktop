@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Boltwarden
+Comment=Open your Bitwarden or Vaultwarden vault
+Exec=boltwarden window
+Icon=boltwarden
+Terminal=false
+Categories=Utility;Security;

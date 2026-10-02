@@ -182,7 +182,8 @@ describe('popup invalidation', () => {
 
   it('keeps setup details in options without discovering the active page', async () => {
     await open(true); expect(calls('list')).toHaveLength(0);
-    expect(app.textContent).toContain('No vault is stored'); expect(app.textContent).toContain('ABCD:1234');
+    expect(app.textContent).toContain('Pending saves stay in browser session storage'); expect(app.textContent).toContain('ABCD:1234');
+    expect(document.querySelector('a[href="/privacy.html"]')?.textContent).toBe('Privacy and data handling');
     expect(app.textContent).toContain('boltwarden install-browser');
   });
 });

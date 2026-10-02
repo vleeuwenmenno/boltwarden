@@ -61,6 +61,8 @@ fn is_public_domain(domain: &str) -> bool {
         ".home.arpa",
         ".test",
         ".invalid",
+        ".onion",
+        ".i2p",
     ];
     domain.contains('.')
         && domain != "localhost"
@@ -221,6 +223,7 @@ impl IconCache {
             let client = match &self.client {
                 Some(client) => client.clone(),
                 None => match reqwest::blocking::Client::builder()
+                    .https_only(true)
                     .timeout(Duration::from_secs(5))
                     .redirect(reqwest::redirect::Policy::limited(3))
                     .build()
@@ -515,6 +518,8 @@ mod tests {
             "http://localhost:3000",
             "https://router",
             "https://grafana.home.arpa",
+            "https://private-service.onion",
+            "https://private-service.i2p",
         ] {
             assert_eq!(icon_host(&uris(&[uri])), None, "{uri}");
         }

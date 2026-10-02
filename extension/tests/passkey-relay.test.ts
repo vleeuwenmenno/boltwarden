@@ -34,9 +34,25 @@ function request() {
 }
 
 beforeEach(() => { vi.useFakeTimers(); vi.clearAllMocks(); h.browser.runtime.onMessage.listeners.length = 0; connection = setup(); });
-afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+afterEach(() => { vi.clearAllTimers(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe('passkey relay document readiness', () => {
+  it('uses a coherent epoch timing pair when Firefox rounds timeOrigin independently', () => {
+    vi.stubGlobal('performance', { timeOrigin: 1001, getEntriesByType: () => [{ responseStart: 3 }],
+      timing: { navigationStart: 1000, responseStart: 1000, domLoading: 1003 } });
+    const page = setup();
+    expect(page.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'identify', navigation_start: 1000, binding_end: 1003,
+    }));
+  });
+  it('does not combine incomplete legacy timing with modern timing', () => {
+    vi.stubGlobal('performance', { timeOrigin: 1001, getEntriesByType: () => [{ responseStart: 3 }],
+      timing: { navigationStart: 1000, responseStart: 0, domLoading: 0 } });
+    const page = setup();
+    expect(page.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'identify', navigation_start: 1001, binding_end: 1004,
+    }));
+  });
   it('preserves an unsent request through startup generations, then cancels a sent request on replacement', () => {
     const channel = request();
     expect(channel.postMessage).toHaveBeenCalledWith({ type: 'ack', id: 'request' });

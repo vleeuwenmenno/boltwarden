@@ -1,0 +1,21 @@
+FROM node:22-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium firefox-esr openssl python3 && rm -rf /var/lib/apt/lists/*
+ENV FIREFOX_BIN=firefox-esr
+WORKDIR /src/extension
+COPY extension/package.json extension/package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY extension ./
+COPY scripts/third-party-notices.py /src/scripts/third-party-notices.py
+RUN python3 /src/scripts/third-party-notices.py npm public/THIRD_PARTY_NOTICES.txt
+RUN npm run typecheck && npm test && npm run test:playground && npm audit
+RUN npm run zip
+FROM build AS check
+RUN node tests/browser-e2e.mjs && node tests/inline-e2e.mjs && \
+    node tests/inline-firefox-e2e.mjs && node tests/passkey-e2e.mjs && \
+    node tests/passkey-firefox-e2e.mjs
+RUN npm run check:release
+RUN mkdir /artifacts && cp .output/*.zip /artifacts/ && \
+    cd /artifacts && for file in *.zip; do sha256sum "$file" > "$file.sha256"; done
+FROM scratch AS artifacts
+COPY --from=check /artifacts/ /

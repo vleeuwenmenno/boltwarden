@@ -45,10 +45,10 @@ Requirements:
 - Linux desktop session
 - systemd user services, if you want autostart
 
-Build a release binary:
+Build a release binary (`make` alone shows help):
 
 ```bash
-make
+make release
 ```
 
 Install it to `/usr/local/bin/boltwarden`:
@@ -72,19 +72,27 @@ The service runs:
 `--daemon` starts the tray icon, activation socket, and in-memory vault session
 without opening the popup immediately.
 
+### Distribution packages and autostart
+
+Install the matching release `.deb` with `sudo apt install ./boltwarden_*.deb`,
+or an Arch package with `sudo pacman -U ./boltwarden-*.pkg.tar.zst`.
+Run `boltwarden-setup` **without sudo** afterward to choose whether Boltwarden
+starts at graphical login. Packages install a user service but never enable it
+for all users. See [package requirements and verification](docs/releasing.md).
+
 ## Nix
 
 Build and run directly from the flake:
 
 ```bash
-nix run git+ssh://git@git.mvl.sh/vleeuwenmenno/boltwarden.git
+nix run github:vleeuwenmenno/boltwarden
 ```
 
 Use it as a flake input:
 
 ```nix
 {
-  inputs.boltwarden.url = "git+ssh://git@git.mvl.sh/vleeuwenmenno/boltwarden.git";
+  inputs.boltwarden.url = "github:vleeuwenmenno/boltwarden";
 }
 ```
 
@@ -98,10 +106,12 @@ boltwarden --daemon
 This is useful on desktops where you prefer launching the daemon manually instead
 of installing the systemd user service.
 
-Published Gitea releases include an `x86_64-linux` tarball with a bundled
-executable and a `.sha256` checksum. Browser extension releases also include
-Chrome and Firefox ZIPs, a Firefox review source ZIP, and checksums. These archives
-are development artifacts; they are not signed Firefox add-ons or store listings.
+GitHub Actions prepares release tarballs, Debian packages, and Arch packages for
+`x86_64` and `aarch64`, with SHA-256 checksums. Distribution binaries require
+glibc 2.36+ and desktop libraries; they are not self-contained Nix bundles.
+Chrome and Firefox ZIPs and the Firefox review source ZIP are also produced.
+Firefox ZIPs are unsigned until Mozilla review/signing. See
+[release preparation](docs/releasing.md) and [extension publishing](extension/PUBLISHING.md).
 
 The Nix package includes a `boltwarden-native-host` launcher and native messaging
 manifests under `lib/mozilla/native-messaging-hosts` and
@@ -461,9 +471,12 @@ fills. There is no separate browser vault to synchronize.
 
 ### Browser trust and privacy
 
-The extension stores its pairing key and identifier, not vault passwords or
-decrypted vault items. Matching summaries and selected credentials pass through
-extension memory while used; filling necessarily gives the page its credentials.
+The extension persistently stores its pairing key and identifier, not a full
+vault. Matching summaries and selected credentials pass through extension memory.
+Pending saves temporarily retain usernames and passwords in browser session
+storage until saved and cleaned up, explicitly discarded, or the browser session
+ends. Locking does not discard these pending saves. Filling necessarily gives
+the page its credentials. See the [privacy notice](PRIVACY.md).
 Locking the vault clears extension matching state but cannot erase a password
 already filled into a website.
 
@@ -739,7 +752,7 @@ sudo make uninstall
 The Makefile supports the usual `PREFIX` override:
 
 ```bash
-make
+make release
 sudo make install PREFIX=/opt/boltwarden
 make install-service PREFIX=/opt/boltwarden
 ```
@@ -809,3 +822,13 @@ make release
   low-overhead daemon/session model.
 - `cargo fmt` may not be installed with every Rust toolchain; install
   `rustfmt` if you want formatter support.
+
+## Release and project policies
+
+See [security](SECURITY.md), [privacy](PRIVACY.md),
+[release preparation](docs/releasing.md), and [extension publishing](extension/PUBLISHING.md).
+
+Boltwarden is source-available under [MIT with Commons Clause v1.0](LICENSE).
+Internal business use is permitted; selling products or services based substantially
+on Boltwarden is restricted. Forks and distributions must retain Menno van Leeuwen’s
+copyright notice and the complete license. Third-party dependencies keep their own licenses.

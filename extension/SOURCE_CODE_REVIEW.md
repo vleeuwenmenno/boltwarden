@@ -49,3 +49,11 @@ it does not require the Rust project. Different librsvg versions may rasterize
 edge pixels differently. Chromium uses a neutral gray mark; Firefox additionally
 uses light and dark toolbar variants according to the toolbar text color, as
 documented in [Firefox action.theme_icons](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/manifest.json/action#theme_icons).
+
+## Release disclosures
+
+Firefox 140+ provides built-in consent for the declared native messaging data
+categories. See `public/privacy.html` and `public/LICENSE` for the packaged privacy
+notice and MIT with Commons Clause license. Pending-save credentials live in
+browser session storage, not persistent local storage; they remain until saved,
+discarded, or the browser session ends.

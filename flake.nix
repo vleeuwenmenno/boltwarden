@@ -14,7 +14,7 @@
       ...
     }:
     let
-      supportedSystems = [ "x86_64-linux" ];
+      supportedSystems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
       packageVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
       browserIdentity = builtins.fromJSON (builtins.readFile ./extension/lib/browser-identities.json);
@@ -100,7 +100,7 @@
 
             meta = {
               description = "Linux quick-access GUI for Bitwarden and Vaultwarden vaults";
-              homepage = "https://git.mvl.sh/vleeuwenmenno/boltwarden";
+              homepage = "https://github.com/vleeuwenmenno/boltwarden";
               mainProgram = "boltwarden";
               platforms = supportedSystems;
             };

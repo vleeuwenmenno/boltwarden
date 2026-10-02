@@ -1,0 +1,29 @@
+#!/bin/sh
+# Run as the desktop user after installing a package.
+set -eu
+if [ "$(id -u)" -eq 0 ]; then
+    echo 'Run boltwarden-setup as your desktop user, without sudo.' >&2
+    exit 1
+fi
+case "${1:-}" in
+    --enable-service) enable=yes ;;
+    --help|-h)
+        echo 'Usage: boltwarden-setup [--enable-service]'
+        echo 'Offers to enable Boltwarden at graphical login for the current user.'
+        exit 0 ;;
+    '')
+        if [ ! -t 0 ]; then
+            echo 'Run interactively, or pass --enable-service to opt in explicitly.' >&2
+            exit 2
+        fi
+        printf 'Start Boltwarden at graphical login for your user? [y/N] '
+        read -r enable ;;
+    *) echo 'Unknown option. Use --help.' >&2; exit 2 ;;
+esac
+case "$enable" in
+    y|Y|yes|YES)
+        systemctl --user daemon-reload
+        systemctl --user enable --now boltwarden.service
+        echo 'Boltwarden user service enabled.' ;;
+    *) echo 'Autostart left unchanged. Start manually with: boltwarden --daemon' ;;
+esac

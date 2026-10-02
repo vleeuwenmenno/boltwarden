@@ -99,6 +99,8 @@ try {
   }
   const text = session => evaluate(session, 'document.body.innerText');
   async function click(session, label) {
+    // The label appears before asynchronous fingerprint loading enables pairing.
+    await until(() => evaluate(session, `(() => { const button = [...document.querySelectorAll('button')].find(button => button.textContent.includes(${JSON.stringify(label)})); return Boolean(button && !button.disabled); })()`), `Enabled ${label} button`);
     await evaluate(session, `(() => { const button = [...document.querySelectorAll('button')].find(button => button.textContent.includes(${JSON.stringify(label)})); if (!button || button.disabled) throw Error('Button not ready'); button.click(); })()`);
   }
   async function screenshot(session, name) {

@@ -110,7 +110,7 @@ describe('trusted passkey broker', () => {
     native = { snapshot: { state: 'ready', epoch: 1 }, connect: vi.fn(async () => {}), request: vi.fn(async request => ({ ...result, document_id: request.document_id })) };
     broker = installPasskeyBroker(native as unknown as NativeClient);
   });
-  function port(overrides = {}, timing = { navigation_start: 1, response_start: 1000 }, autoComplete = true) {
+  function port(overrides = {}, timing = { navigation_start: 1, binding_end: 1000 }, autoComplete = true) {
     const messages: any[] = [];
     let queued: Record<string, unknown> | undefined;
     const emit = (extra: Record<string, unknown>) => connection.onMessage.emit({ type: 'operation', id: 'request',
@@ -124,7 +124,7 @@ describe('trusted passkey broker', () => {
       } };
     h.browser.runtime.onConnect.emit(connection);
     connection.onMessage.emit({ type: 'identify', token, ...timing });
-    if (autoComplete) h.browser.webNavigation.onCompleted.emit({ tabId: 1, frameId: 0, url: tab.url, timeStamp: timing.response_start + 1 });
+    if (autoComplete) h.browser.webNavigation.onCompleted.emit({ tabId: 1, frameId: 0, url: tab.url, timeStamp: timing.binding_end + 1 });
     return { connection, messages, token, call(extra = {}) {
       if (messages.filter(message => message.type === 'generation').at(-1)?.ready) emit(extra);
       else queued = extra;
@@ -137,11 +137,11 @@ describe('trusted passkey broker', () => {
     for (const sender of [{ origin: 'null' }, { origin: 'https://evil.com' }, { frameId: 2 }, { id: 'other' }, { url: 'http://example.com' }]) expect(port(sender).connection.disconnect).toHaveBeenCalled();
   });
   it('requires a known policy when the isolated DOM has no policy API', async () => {
-    const page = port({}, { navigation_start: 1, response_start: 20 }); page.call({ policy_allowed: undefined });
+    const page = port({}, { navigation_start: 1, binding_end: 20 }); page.call({ policy_allowed: undefined });
     await vi.waitFor(() => expect(page.messages.at(-1)?.type).toBe('fallback'), { timeout: 2000 }); expect(native.request).not.toHaveBeenCalled();
     h.browser.webRequest.onBeforeRequest.emit({ tabId: 1, requestId: 'response', url: tab.url, timeStamp: 40 });
     h.browser.webRequest.onHeadersReceived.emit({ tabId: 1, requestId: 'response', url: tab.url, responseHeaders: [] });
-    const replacement = port({}, { navigation_start: 30, response_start: 50 }); replacement.call({ policy_allowed: undefined });
+    const replacement = port({}, { navigation_start: 30, binding_end: 50 }); replacement.call({ policy_allowed: undefined });
     await vi.waitFor(() => expect(replacement.messages.at(-1)?.type).toBe('result'));
   });
   it('waits for late Firefox response headers bound to the observed request', async () => {
@@ -168,8 +168,8 @@ describe('trusted passkey broker', () => {
   it('rejects old same-URL policy when replacement port arrives before its request event', async () => {
     h.browser.webRequest.onBeforeRequest.emit({ tabId: 1, requestId: 'old', url: tab.url, timeStamp: 10 });
     h.browser.webRequest.onHeadersReceived.emit({ tabId: 1, requestId: 'old', url: tab.url, responseHeaders: [] });
-    port({}, { navigation_start: 1, response_start: 20 });
-    const replacement = port({}, { navigation_start: 30, response_start: 50 });
+    port({}, { navigation_start: 1, binding_end: 20 });
+    const replacement = port({}, { navigation_start: 30, binding_end: 50 });
     replacement.call({ policy_allowed: undefined });
     await vi.waitFor(() => expect(replacement.messages.at(-1)?.type).toBe('fallback'), { timeout: 2000 });
     expect(native.request).not.toHaveBeenCalled();
@@ -179,6 +179,26 @@ describe('trusted passkey broker', () => {
     h.browser.webRequest.onHeadersReceived.emit({ tabId: 1, requestId: 'old', url: tab.url, responseHeaders: [] });
     port(); const replacement = port(); replacement.call({ policy_allowed: undefined });
     await vi.waitFor(() => expect(replacement.messages.at(-1)?.type).toBe('fallback'), { timeout: 2000 });
+    expect(native.request).not.toHaveBeenCalled();
+  });
+  it('binds a navigation completed within one clock tick to only one document', async () => {
+    h.browser.webRequest.onBeforeRequest.emit({ tabId: 1, requestId: 'fast', url: tab.url, timeStamp: 10 });
+    h.browser.webRequest.onHeadersReceived.emit({ tabId: 1, requestId: 'fast', url: tab.url, responseHeaders: [] });
+    const page = port({}, { navigation_start: 10, binding_end: 10 });
+    page.call({ policy_allowed: undefined });
+    await vi.waitFor(() => expect(page.messages.at(-1)?.type).toBe('result'));
+    native.request.mockClear();
+    const replacement = port({}, { navigation_start: 10, binding_end: 10 });
+    replacement.call({ policy_allowed: undefined });
+    await vi.waitFor(() => expect(replacement.messages.at(-1)?.type).toBe('fallback'), { timeout: 2000 });
+    expect(native.request).not.toHaveBeenCalled();
+  });
+  it.each([9, 21])('rejects a request at %s outside the document creation interval', async timeStamp => {
+    h.browser.webRequest.onBeforeRequest.emit({ tabId: 1, requestId: 'outside', url: tab.url, timeStamp });
+    h.browser.webRequest.onHeadersReceived.emit({ tabId: 1, requestId: 'outside', url: tab.url, responseHeaders: [] });
+    const page = port({}, { navigation_start: 10, binding_end: 20 });
+    page.call({ policy_allowed: undefined });
+    await vi.waitFor(() => expect(page.messages.at(-1)?.type).toBe('fallback'), { timeout: 2000 });
     expect(native.request).not.toHaveBeenCalled();
   });
   it('keeps explicit denial separate from native fallback', async () => {
@@ -248,7 +268,7 @@ describe('trusted passkey broker', () => {
     await vi.waitFor(() => expect(page.messages.at(-1)?.type).toBe('result'));
   });
   it('recovers a fresh Firefox port after delayed navigation events and ignores older completion', async () => {
-    const page = port({ documentId: undefined, origin: undefined }, { navigation_start: 100, response_start: 120 }, false);
+    const page = port({ documentId: undefined, origin: undefined }, { navigation_start: 100, binding_end: 120 }, false);
     h.browser.webNavigation.onBeforeNavigate.emit({ tabId: 1, frameId: 0, url: tab.url, timeStamp: 100 });
     h.browser.webRequest.onBeforeRequest.emit({ tabId: 1, requestId: 'new', url: tab.url, timeStamp: 110 });
     h.browser.webNavigation.onCompleted.emit({ tabId: 1, frameId: 0, url: tab.url, timeStamp: 90 });
@@ -260,7 +280,7 @@ describe('trusted passkey broker', () => {
     expect(h.browser.tabs.sendMessage).toHaveBeenCalledWith(1, { type: 'passkey-document-check' }, { frameId: 0 });
   });
   it('announces readiness only after a current-token completion newer than this navigation', async () => {
-    const page = port({ documentId: undefined }, { navigation_start: 100, response_start: 120 }, false);
+    const page = port({ documentId: undefined }, { navigation_start: 100, binding_end: 120 }, false);
     expect(page.messages.at(-1)).toMatchObject({ type: 'generation', ready: false });
     h.browser.webNavigation.onCompleted.emit({ tabId: 1, frameId: 0, url: tab.url, timeStamp: 90 });
     await Promise.resolve(); expect(page.messages.some(message => message.ready)).toBe(false);

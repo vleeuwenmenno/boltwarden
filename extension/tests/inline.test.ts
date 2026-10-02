@@ -43,6 +43,18 @@ beforeEach(() => {
 afterEach(() => { for (const ui of controllers.splice(0)) ui.destroy(); vi.restoreAllMocks(); });
 
 describe('isolated inline login picker', () => {
+  it('keeps styling and trusted filling isolated when Firefox rejects constructed sheets', async () => {
+    vi.spyOn(CSSStyleSheet.prototype, 'replaceSync').mockImplementation(() => { throw new Error('Accessing from Xray wrapper is not supported.'); });
+    const fields = form(); fields.username.focus();
+    const { mark, request } = setup();
+    expect(shadow.querySelector('style')).not.toBeNull();
+    expect(document.querySelector('[data-boltwarden-inline]')!.shadowRoot).toBeNull();
+    mark.click(); expect(request).not.toHaveBeenCalled();
+    trusted(mark, 'click'); await settle();
+    trusted(shadow.querySelector<HTMLButtonElement>('[role=option]')!, 'click'); await settle();
+    expect(request).toHaveBeenLastCalledWith('fill', { token: expect.any(String), targetId: 'target-one', itemId: 'first' });
+  });
+
   it('uses a closed shadow root and ignores synthetic activation without reading input values', async () => {
     const fields = form(); fields.password.focus();
     Object.defineProperty(fields.password, 'value', { get() { throw new Error('Typed password must not be read'); } });

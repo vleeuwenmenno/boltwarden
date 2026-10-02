@@ -38,8 +38,17 @@ export default defineContentScript({
         } else if (pending && message.id === pending.id && message.generation === generation) finish(message);
       });
       const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
-      port.postMessage({ type: 'identify', token: documentToken, navigation_start: performance.timeOrigin,
-        response_start: navigation && navigation.responseStart > 0 ? performance.timeOrigin + navigation.responseStart : undefined });
+      // Firefox rounds timeOrigin independently, and a request event can be
+      // timestamped after the first response byte on a fast local navigation.
+      // Bound it by the browser's navigation-to-parser-start epoch interval,
+      // before this document can run page scripts or initiate another navigation.
+      // BFCache restores keep the old timing; no tolerance window is added.
+      const legacy = performance.timing;
+      const epochTiming = legacy && legacy.navigationStart > 0 && legacy.domLoading >= legacy.navigationStart;
+      port.postMessage({ type: 'identify', token: documentToken,
+        navigation_start: epochTiming ? legacy.navigationStart : performance.timeOrigin,
+        binding_end: epochTiming ? legacy.domLoading
+          : navigation && navigation.responseStart > 0 ? performance.timeOrigin + navigation.responseStart : undefined });
       port.onDisconnect.addListener(() => {
         if (connection !== port) return;
         connection = undefined; generation = ''; ready = false;

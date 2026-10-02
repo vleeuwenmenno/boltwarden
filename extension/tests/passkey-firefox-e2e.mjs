@@ -12,6 +12,8 @@ import { startPasskeyFixture, verifyRegistration, verifyAssertion } from './pass
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const identities = JSON.parse(await readFile(join(root, 'lib/browser-identities.json'), 'utf8'));
+const navigationRepeats = Number(process.env.BOLTWARDEN_FIREFOX_NAVIGATIONS ?? 10);
+assert(Number.isInteger(navigationRepeats) && navigationRepeats >= 1 && navigationRepeats <= 1000);
 const directory = await mkdtemp(join(tmpdir(), 'boltwarden-passkey-firefox-'));
 const home = join(directory, 'home'), profile = join(directory, 'profile');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -107,13 +109,14 @@ try {
   });
   await send('Marionette:SetContext', { value: 'content' });
   await send('WebDriver:Navigate', { url: `moz-extension://${hostname}/popup.html` });
-  await until(() => evaluate('document.body.innerText.includes("Pair with Boltwarden")'), 'Pairing page');
+  await until(() => evaluate('[...document.querySelectorAll("button")].some(button => button.textContent.includes("Pair with Boltwarden") && !button.disabled)'), 'Enabled pairing button');
   await evaluate('([...document.querySelectorAll("button")].find(button => button.textContent.includes("Pair with Boltwarden")).click(), true)');
   await until(() => existsSync(join(directory, 'pairing.json')), 'Authenticated native pairing');
   await until(() => evaluate('document.body.innerText.includes("Connected") && !document.body.innerText.includes("Pair with Boltwarden")'), 'Authenticated extension state');
   const navigate = async path => {
     await send('WebDriver:Navigate', { url: `${fixture.origin}${path}` });
     await until(() => evaluate('Boolean(window.passkeyFixture) && document.readyState === "complete"'), 'Completed passkey fixture');
+    await evaluate('(() => { window.fixtureLogs = []; const info = console.info; console.info = (...args) => { window.fixtureLogs.push(args); info.apply(console, args); }; return true; })()');
   };
   await navigate('/');
   const registration = await evaluate('passkeyFixture.create()');
@@ -124,13 +127,20 @@ try {
   verifyAssertion(legacyOptionsAssertion, registration, fixture.origin);
   assert.deepEqual(legacyOptionsAssertion.extensions, {}, 'RP-scoped passkeys must not claim use of the legacy AppID');
   verifyAssertion(await evaluate('passkeyFixture.getCrossRealm()'), registration, fixture.origin);
-  await navigate('/deny');
-  assert.equal(await evaluate('passkeyFixture.get().then(() => "unexpected", error => error.name)'), 'NotAllowedError');
+  // Repeated same-URL navigation catches Firefox's independently rounded clocks.
+  for (let attempt = 0; attempt < navigationRepeats; attempt++) {
+    await navigate('/deny');
+    const denial = await evaluate('passkeyFixture.get().then(() => ({name:"unexpected"}), error => ({name:error.name, message:error.message, logs:window.fixtureLogs, timing:performance.getEntriesByType("navigation")[0].toJSON()}))');
+    assert.equal(denial.name, 'NotAllowedError', JSON.stringify(denial));
+  }
   await navigate('/slow');
   await evaluate('(passkeyFixture.startGet(), true)');
-  await delay(100);
+  await until(async () => (await readFile(join(directory, 'pairing.json.log'), 'utf8')).split('\n')
+    .filter(Boolean).map(line => JSON.parse(line)).some(entry => entry.type === 'PasskeyGet' && entry.frame_url === `${fixture.origin}/slow`), 'Pending native assertion')
+    .catch(async error => { throw new Error(`${error.message}: ${JSON.stringify(await evaluate('({logs:window.fixtureLogs, timing:performance.getEntriesByType("navigation")[0].toJSON()})'))}`); });
   await evaluate('(passkeyFixture.abort(), true)');
   assert.equal((await evaluate('passkeyPending')).error, 'AbortError');
+  await until(async () => (await readFile(join(directory, 'pairing.json.log'), 'utf8')).includes('"type":"Cancel"'), 'Native cancellation');
   const nativeLog = await readFile(join(directory, 'pairing.json.log'), 'utf8');
   assert(nativeLog.includes('PasskeyCreate') && nativeLog.includes('PasskeyGet'), 'Both WebAuthn methods reached the paired native host');
   assert(nativeLog.includes('Cancel'), 'Abort reaches native request cancellation');

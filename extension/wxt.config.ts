@@ -22,7 +22,8 @@ export default defineConfig({
     permissions: ['nativeMessaging', 'storage', 'webNavigation', 'webRequest'],
     host_permissions: ['http://*/*', 'https://*/*'],
     ...(browser === 'firefox'
-      ? { browser_specific_settings: { gecko: { id: identities.firefox_id, strict_min_version: '128.0', data_collection_permissions: { required: ['none'] } } } }
+      ? { browser_specific_settings: { gecko: { id: identities.firefox_id, strict_min_version: '140.0',
+        data_collection_permissions: { required: ['authenticationInfo', 'personallyIdentifyingInfo', 'browsingActivity', 'websiteContent'] } } } }
       : { key: identities.chrome_public_key, minimum_chrome_version: '127' }),
     commands: {
       autofill: { suggested_key: { default: 'Ctrl+Shift+L' }, description: 'Fill a login or select a matching login' },

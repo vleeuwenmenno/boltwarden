@@ -1,6 +1,6 @@
 {
   "name": "boltwarden-browser",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "private": true,
   "type": "module",
   "scripts": {
@@ -15,7 +15,8 @@
     "test:passkeys": "npm run build && node tests/passkey-e2e.mjs && node tests/passkey-firefox-e2e.mjs",
     "test:inline": "npm run build && node tests/inline-e2e.mjs && node tests/inline-firefox-e2e.mjs",
     "playground": "node playground/server.mjs",
-    "test:playground": "node --test tests/playground.test.mjs"
+    "test:playground": "node --test tests/playground.test.mjs",
+    "check:release": "node scripts/check-release.mjs"
   },
   "dependencies": {
     "preact": "11.0.0"
@@ -30,5 +31,6 @@
   },
   "engines": {
     "node": ">=22.12.0"
-  }
+  },
+  "license": "SEE LICENSE IN public/LICENSE"
 }

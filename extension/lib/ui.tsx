@@ -300,7 +300,7 @@ function App({ options }: { options: boolean }) {
             {frame.more && <button class="more secondary" disabled={busy} onClick={() => void more(frame)}>Load more matching logins</button>}
           </section>)}
         </section>}
-        {options && <section class="connection-details help"><h2>Using this extension</h2><p>The popup only shows logins that match the current page. Filtering narrows loaded matches; it does not search the whole vault.</p><p>Passwords are sent only when you choose to fill. No vault is stored in this extension.</p><h3>Desktop setup</h3><p>Run <code>boltwarden install-browser</code>, start Boltwarden, and enable browser integration in desktop settings.</p></section>}
+        {options && <section class="connection-details help"><h2>Using this extension</h2><p>The popup only shows logins that match the current page. Filtering narrows loaded matches; it does not search the whole vault.</p><p>Selected credentials are sent to the page when you fill. Passwords you submit can be sent to Boltwarden for saving after desktop approval. Pending saves stay in browser session storage until saved, discarded, or the browser session ends.</p><p><a href="/privacy.html" target="_blank" rel="noreferrer">Privacy and data handling</a></p><h3>Desktop setup</h3><p>Run <code>boltwarden install-browser</code>, start Boltwarden, and enable browser integration in desktop settings.</p></section>}
       </>}
     </div>
 

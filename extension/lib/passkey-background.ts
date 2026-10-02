@@ -6,7 +6,7 @@ import { isOperation, PASSKEY_PORT, type PasskeyOperation } from './passkey-type
 type Port = ReturnType<typeof browser.runtime.connect>;
 interface Policy { requestId: string; url: string; get: boolean; create: boolean }
 interface Pending { id: string; controller: AbortController; phase: 'preflight' | 'unlock' | 'request'; requestEpoch?: number; wake?: () => void }
-interface Document { port: Port; tabId: number; windowId: number; documentId?: string; token?: string; navigationStart?: number; responseStart?: number; url: string; generation: string; ready: boolean; completedAt?: number; navigating: boolean; navigation?: string; navigationStarted?: number; requestId?: string; policy?: Policy; pending?: Pending }
+interface Document { port: Port; tabId: number; windowId: number; documentId?: string; token?: string; navigationStart?: number; bindingEnd?: number; url: string; generation: string; ready: boolean; completedAt?: number; navigating: boolean; navigation?: string; navigationStarted?: number; requestId?: string; policy?: Policy; pending?: Pending }
 const changed = () => new DOMException('The page changed. Try again.', 'AbortError');
 const withoutFragment = (url: string) => url.split('#')[0];
 
@@ -40,11 +40,11 @@ export function installPasskeyBroker(native: NativeClient) {
   const documents = new Map<number, Document>();
   function bindResponse(document: Document) {
     const request = requests.get(document.tabId), policy = policies.get(document.tabId);
-    // Browser navigation timing is read inside the isolated relay. Its exact
+    // Browser navigation timing is read inside the isolated relay. Its creation
     // interval excludes earlier same-URL documents and later BFCache responses.
     // A request can belong to only one relay lifetime, even with rounded clocks.
-    if (!document.token || document.navigationStart === undefined || document.responseStart === undefined || !request
-      || request.timeStamp < document.navigationStart || request.timeStamp > document.responseStart
+    if (!document.token || document.navigationStart === undefined || document.bindingEnd === undefined || !request
+      || request.timeStamp < document.navigationStart || request.timeStamp > document.bindingEnd
       || !Number.isFinite(request.timeStamp) || (request.token && request.token !== document.token)
       || withoutFragment(request.url) !== withoutFragment(document.url)) return false;
     request.token = document.token;
@@ -57,8 +57,8 @@ export function installPasskeyBroker(native: NativeClient) {
   }
   function completedNavigation(document: Document, url: string, timeStamp: number) {
     return document.ready && document.completedAt !== undefined && document.navigationStart !== undefined
-      && document.responseStart !== undefined && Number.isFinite(timeStamp)
-      && document.navigationStart <= timeStamp && timeStamp <= document.responseStart
+      && document.bindingEnd !== undefined && Number.isFinite(timeStamp)
+      && document.navigationStart <= timeStamp && timeStamp <= document.bindingEnd
       && timeStamp < document.completedAt && withoutFragment(url) === withoutFragment(document.url);
   }
   function cancel(document: Document, reason: Error = changed()) { document.pending?.controller.abort(reason); document.pending?.wake?.(); }
@@ -195,7 +195,7 @@ export function installPasskeyBroker(native: NativeClient) {
     });
   }
   async function policyReady(document: Document, pending: Pending) {
-    if (document.policy || !document.token || document.navigationStart === undefined || document.responseStart === undefined) return;
+    if (document.policy || !document.token || document.navigationStart === undefined || document.bindingEnd === undefined) return;
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => { pending.wake = undefined; resolve(); }, 1000);
       pending.wake = () => {
@@ -278,9 +278,9 @@ export function installPasskeyBroker(native: NativeClient) {
     port.onMessage.addListener(message => {
       if (message?.type === 'identify' && !document.token && typeof message.token === 'string' && message.token.length <= 64) {
         document.token = message.token;
-        if (Number.isFinite(message.navigation_start) && Number.isFinite(message.response_start)
-          && message.navigation_start > 0 && message.response_start > message.navigation_start) {
-          document.navigationStart = message.navigation_start; document.responseStart = message.response_start;
+        if (Number.isFinite(message.navigation_start) && Number.isFinite(message.binding_end)
+          && message.navigation_start > 0 && message.binding_end >= message.navigation_start) {
+          document.navigationStart = message.navigation_start; document.bindingEnd = message.binding_end;
         }
         bindResponse(document);
         const completion = completions.get(document.tabId); if (completion) completed(completion);

@@ -3901,6 +3901,13 @@ fn derive_master_key(
     let mut key = [0u8; 32];
     match kdf {
         0 => {
+            // Prelogin and saved-session parameters are untrusted. Bound work before
+            // entering the KDF, while retaining support for legacy iteration counts.
+            if !(1..=2_000_000).contains(&kdf_iterations) {
+                return Err(BwError::Parse(
+                    "PBKDF2 iterations must be between 1 and 2000000".into(),
+                ));
+            }
             pbkdf2_hmac::<Sha256>(
                 password.as_bytes(),
                 salt.as_bytes(),
@@ -3914,6 +3921,14 @@ fn derive_master_key(
             let parallelism = kdf_parallelism.ok_or_else(|| {
                 BwError::Parse("Argon2 prelogin response missing parallelism".into())
             })?;
+            if !(1..=10).contains(&kdf_iterations)
+                || !(1..=1024).contains(&memory_mib)
+                || !(1..=16).contains(&parallelism)
+            {
+                return Err(BwError::Parse(
+                    "Argon2 parameters exceed supported resource limits".into(),
+                ));
+            }
             let params = Params::new(
                 memory_mib
                     .checked_mul(1024)
@@ -4212,6 +4227,38 @@ mod passkey_vault_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rejects_untrusted_kdf_costs_before_derivation() {
+        for iterations in [0, 2_000_001, u32::MAX] {
+            assert!(
+                super::derive_master_key("password", "salt", 0, iterations, None, None).is_err()
+            );
+        }
+        for (iterations, memory, parallelism) in [
+            (0, 64, 4),
+            (11, 64, 4),
+            (3, 0, 4),
+            (3, 1025, 4),
+            (3, u32::MAX, 4),
+            (3, 64, 0),
+            (3, 64, 17),
+        ] {
+            assert!(
+                super::derive_master_key(
+                    "password",
+                    "salt",
+                    1,
+                    iterations,
+                    Some(memory),
+                    Some(parallelism)
+                )
+                .is_err()
+            );
+        }
+        assert!(super::derive_master_key("password", "salt", 0, 1000, None, None).is_ok());
+        assert!(super::derive_master_key("password", "12345678", 1, 1, Some(1), Some(1)).is_ok());
+    }
+
     use super::*;
 
     fn encrypt_string(plaintext: &str, key: &[u8]) -> String {

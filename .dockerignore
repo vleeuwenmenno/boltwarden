@@ -1,0 +1,13 @@
+.git
+target
+dist
+extension/node_modules
+extension/.output
+extension/.wxt
+
+**/__pycache__
+.aws
+.codex
+.agents
+THIRD_PARTY_NOTICES.txt
+extension/public/THIRD_PARTY_NOTICES.txt

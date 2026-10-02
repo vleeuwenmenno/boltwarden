@@ -16,7 +16,13 @@ export interface InlineOptions {
 export function createInlineController(doc: Document, options: InlineOptions) {
   const host = doc.createElement('div'); host.dataset.boltwardenInline = '';
   const root = host.attachShadow({ mode: 'closed' });
-  const sheet = new CSSStyleSheet(); sheet.replaceSync(css); root.adoptedStyleSheets = [sheet];
+  try {
+    const sheet = new CSSStyleSheet(); sheet.replaceSync(css); root.adoptedStyleSheets = [sheet];
+  } catch {
+    // Firefox ESR rejects constructed sheets through content-script Xray wrappers.
+    // Keep the fallback inside the same closed shadow root, away from page styles.
+    const style = doc.createElement('style'); style.textContent = css; root.append(style);
+  }
   const mark = doc.createElement('button'); mark.className = 'mark'; mark.type = 'button'; mark.tabIndex = -1;
   mark.setAttribute('aria-label', 'Show Boltwarden logins'); mark.title = 'Boltwarden'; mark.hidden = true;
   const svg = new DOMParser().parseFromString(bolt, 'image/svg+xml').documentElement;
