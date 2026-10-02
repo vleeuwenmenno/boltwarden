@@ -109,6 +109,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
@@ -119,28 +122,23 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          cd dist
-          sha256sum --check ./*.sha256
+          python3 scripts/check-release.py
+          python3 scripts/check-release-artifacts.py dist
           version="${RELEASE_TAG#v}"
-          for arch in x86_64 aarch64; do
-            test -s "boltwarden-${version}-${arch}-linux.tar.gz"
-            test -s "boltwarden-${version}-1-${arch}.pkg.tar.zst"
-          done
-          for arch in amd64 arm64; do test -s "boltwarden_${version}_${arch}.deb"; done
-          shopt -s nullglob
-          for browser in chrome firefox sources; do
-            files=(boltwarden-browser-*-"${browser}".zip)
-            if [ "${#files[@]}" -ne 1 ]; then
-              echo "Expected exactly one ${browser} extension archive" >&2
-              exit 1
-            fi
-            test -s "${files[0]}"
-          done
+          prerelease=false
+          flags=()
+          if [[ "$version" == *-rc.* ]]; then
+            prerelease=true
+            flags+=(--prerelease)
+          fi
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --verify-tag --draft --generate-notes
+            gh release create "$RELEASE_TAG" --verify-tag --draft "${flags[@]}" \
+              --title "Boltwarden $version" --notes-file "docs/release-notes-${version}.md"
           fi
           if [ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" != true ]; then
             echo "Refusing to replace assets of an already published release" >&2
             exit 1
           fi
-          gh release upload "$RELEASE_TAG" ./* --clobber
+          gh release edit "$RELEASE_TAG" --prerelease="$prerelease" \
+            --title "Boltwarden $version" --notes-file "docs/release-notes-${version}.md"
+          gh release upload "$RELEASE_TAG" dist/* --clobber

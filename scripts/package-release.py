@@ -4,13 +4,13 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
-import re
 import shutil
 import struct
 import subprocess
 import tarfile
 import tempfile
 import tomllib
+from release_versions import package_versions
 
 ROOT = Path(__file__).resolve().parents[1]
 ARCHES = {62: ('x86_64', 'amd64'), 183: ('aarch64', 'arm64')}
@@ -54,8 +54,10 @@ def main():
     parser.add_argument('--output', type=Path, default=ROOT / 'dist')
     args = parser.parse_args()
     version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['package']['version']
-    if not re.fullmatch(r'\d+\.\d+\.\d+', version):
-        parser.error('Distribution packages currently require a stable X.Y.Z version')
+    try:
+        deb_version, arch_version = package_versions(version)
+    except ValueError as error:
+        parser.error(str(error))
     arch, deb_arch = architecture(args.binary)
     # Nix-linked ELF files are not portable distribution binaries.
     dynamic = subprocess.check_output(['readelf', '-l', '-d', str(args.binary)], text=True)
@@ -103,7 +105,7 @@ def main():
         debian.mkdir()
         size = sum(p.stat().st_size for p in root.rglob('*') if p.is_file()) // 1024 + 1
         (debian / 'control').write_text(f'''Package: boltwarden
-Version: {version}
+Version: {deb_version}
 Architecture: {deb_arch}
 Maintainer: Menno van Leeuwen <menno@vleeuwen.me>
 Section: utils
@@ -116,7 +118,7 @@ Description: Unofficial Linux desktop client for Bitwarden and Vaultwarden
  Includes browser integration and an optional systemd user service.
  Run boltwarden-setup as your desktop user to enable autostart.
 ''')
-        target = output / f'boltwarden_{version}_{deb_arch}.deb'
+        target = output / f'boltwarden_{deb_version}_{deb_arch}.deb'
         subprocess.run(['dpkg-deb', '--root-owner-group', '--build', str(root), str(target)], check=True)
         artifacts.append(target)
         shutil.rmtree(debian)
@@ -124,7 +126,7 @@ Description: Unofficial Linux desktop client for Bitwarden and Vaultwarden
         license_id = tomllib.loads((ROOT / 'Cargo.toml').read_text())['package'].get('license', 'LicenseRef-MIT-Commons-Clause')
         (root / '.PKGINFO').write_text(f'''pkgname = boltwarden
 pkgbase = boltwarden
-pkgver = {version}-1
+pkgver = {arch_version}-1
 pkgdesc = Unofficial Linux desktop client for Bitwarden and Vaultwarden
 url = https://github.com/vleeuwenmenno/boltwarden
 builddate = {epoch}
@@ -148,7 +150,7 @@ optdepend = systemd: optional user service
         (root / '.INSTALL').write_text('post_install() { echo "Run boltwarden-setup as your desktop user to configure autostart."; }\n')
         tar = work / 'arch.tar'
         archive(root, tar, epoch)
-        target = output / f'boltwarden-{version}-1-{arch}.pkg.tar.zst'
+        target = output / f'boltwarden-{arch_version}-1-{arch}.pkg.tar.zst'
         subprocess.run(['zstd', '-q', '-f', str(tar), '-o', str(target)], check=True)
         artifacts.append(target)
     for artifact in artifacts:

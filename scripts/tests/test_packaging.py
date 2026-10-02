@@ -2,12 +2,14 @@ import importlib.util
 import os
 from pathlib import Path
 import struct
+import sys
 import subprocess
 import tarfile
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'scripts'))
 spec = importlib.util.spec_from_file_location('package_release', ROOT / 'scripts/package-release.py')
 package = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(package)

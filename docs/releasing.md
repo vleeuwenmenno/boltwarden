@@ -34,12 +34,18 @@ is globally ignored. Dependabot proposes dependency, action, and container updat
 Nix flake outputs cover both CPUs, but the distribution workflows build through
 Docker; Nix builds need separate validation if their expressions or lockfile change.
 
-The prepared versions are desktop 0.4.1 and extension 0.5.6. The local `v0.4.0`
-tag already exists; the next desktop tag is `v0.4.1`. Do not move the old tag.
-Confirm extension 0.5.6 has not already been used in either store before submission.
+The prepared desktop version is `1.0.0-rc.1`; its tag is `v1.0.0-rc.1`.
+Extension version remains `0.5.6`, independently numbered. Existing tags are never moved.
+Supported desktop versions are `X.Y.Z` and `X.Y.Z-rc.N`, with N starting at 1.
+Tarballs retain the desktop version; Debian maps RCs to `X.Y.Z~rc.N` and Arch to
+`X.Y.ZrcN-1` so final releases sort newer. Package-order regression tests exercise
+`dpkg` and `vercmp` when those tools are installed.
 
-A `vX.Y.Z` tag must match Cargo.toml. Desktop and extension versions are independent:
-verify the extension version is greater than the last version in each store.
+A release tag must equal `v` plus Cargo.toml's version. Chrome extension versions
+remain numeric; do not copy the desktop RC suffix into the extension manifest.
+Release notes must exist at `docs/release-notes-VERSION.md`. The release job checks
+all nine expected artifacts and their checksums, rejecting missing or extra files.
+RC tags create drafts marked as prereleases; stable tags create ordinary drafts.
 Only after every job succeeds does the workflow create a **draft** GitHub release
 and attach both architectures’ binaries/packages, Chrome and Firefox ZIPs, the
 AMO source ZIP, and their checksums. Missing artifact groups fail the release job. Existing draft assets with the same names are replaced on a rerun; published

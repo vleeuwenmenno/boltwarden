@@ -46,6 +46,10 @@ All screenshots show fictional data from the built-in demo vault.
 
 ## Downloads
 
+**1.0.0-rc.1 is a testing release candidate.** Passkeys remain experimental and
+browser ZIPs are unsigned developer builds. See the [RC testing status](docs/rc-testing.md)
+and [release notes](docs/release-notes-1.0.0-rc.1.md) before installing.
+
 Choose your platform and browser from the assets on the
 [Releases page](https://github.com/vleeuwenmenno/boltwarden/releases).
 Desktop packages support Linux x86_64 and ARM64. Browser extensions are separate
