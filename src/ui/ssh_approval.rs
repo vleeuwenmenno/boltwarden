@@ -127,13 +127,13 @@ fn draw_pending_request(
         }
         if widgets::button(
             ui,
-            "Remember process (15 min)",
+            "Remember this terminal (15 min)",
             state.selected_action == 1,
             true,
         )
         .clicked()
         {
-            action = Some(decision(request, true, SshApprovalRemember::Process));
+            action = Some(decision(request, true, SshApprovalRemember::Session));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let deny = ui.add(
@@ -149,10 +149,16 @@ fn draw_pending_request(
         });
     });
     ui.add_space(6.0);
+    let session = match (&request.client.session_name, request.client.session_pid) {
+        (Some(name), Some(pid)) => format!("{name} (PID {pid})"),
+        _ => "the terminal that started this command".into(),
+    };
     ui.label(
-        RichText::new("Remember applies only to this running process for up to 15 minutes.")
-            .size(t.small())
-            .color(t.text_faint),
+        RichText::new(format!(
+            "Remember covers {session} and the commands it starts, such as git, for up to 15 minutes or until the vault locks."
+        ))
+        .size(t.small())
+        .color(t.text_faint),
     );
 
     action
@@ -178,7 +184,7 @@ fn handle_keys(
                 }
                 egui::Key::Enter => {
                     let remember = match state.selected_action {
-                        1 => SshApprovalRemember::Process,
+                        1 => SshApprovalRemember::Session,
                         _ => SshApprovalRemember::Once,
                     };
                     *action = Some(decision(request, true, remember));

@@ -645,6 +645,8 @@ fn demo_ssh_request() -> SshApprovalRequest {
             parent_pid: Some(4200),
             parent_name: Some("git".into()),
             parent_start_time_ticks: None,
+            session_pid: Some(4100),
+            session_name: Some("zsh".into()),
         },
         created_at_unix_ms: now_ms,
         expires_at_unix_ms: (now_ms / 60_000 + 1) * 60_000,
