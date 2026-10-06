@@ -13,3 +13,4 @@ pub mod vault;
 pub mod widgets;
 
 pub mod shortcut_setup;
+pub mod shortcuts;

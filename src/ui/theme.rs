@@ -178,27 +178,46 @@ impl Theme {
 
     /// Installs fonts, text sizes and widget visuals. Call once at startup.
     pub fn install(&self, ctx: &egui::Context) {
+        let mut fonts = egui::FontDefinitions::default();
+        let mut custom = false;
         if let Some(bytes) = self
             .font_file
             .as_ref()
             .and_then(|path| std::fs::read(path).ok())
         {
-            {
-                let mut fonts = egui::FontDefinitions::default();
-                fonts.font_data.insert(
-                    "omarchy".to_owned(),
-                    std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-                );
-                // Keep egui's bundled fonts behind it for emoji and any missing glyphs.
-                for family in [FontFamily::Proportional, FontFamily::Monospace] {
-                    fonts
-                        .families
-                        .entry(family)
-                        .or_default()
-                        .insert(0, "omarchy".to_owned());
-                }
-                ctx.set_fonts(fonts);
+            fonts.font_data.insert(
+                "omarchy".to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            // Keep egui's bundled fonts behind it for emoji and any missing glyphs.
+            for family in [FontFamily::Proportional, FontFamily::Monospace] {
+                fonts
+                    .families
+                    .entry(family)
+                    .or_default()
+                    .insert(0, "omarchy".to_owned());
             }
+            custom = true;
+        }
+        // The bundled fonts lack the modifier key symbols (⇧ ⌥ ⌃) and arrows that macOS
+        // shortcuts are written with; the system's symbol font has them.
+        #[cfg(target_os = "macos")]
+        if let Ok(bytes) = std::fs::read("/System/Library/Fonts/Apple Symbols.ttf") {
+            fonts.font_data.insert(
+                "apple-symbols".to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            for family in [FontFamily::Proportional, FontFamily::Monospace] {
+                fonts
+                    .families
+                    .entry(family)
+                    .or_default()
+                    .push("apple-symbols".to_owned());
+            }
+            custom = true;
+        }
+        if custom {
+            ctx.set_fonts(fonts);
         }
 
         let mut style = (*ctx.global_style()).clone();

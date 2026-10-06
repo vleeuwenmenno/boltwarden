@@ -1,4 +1,5 @@
 use crate::bw::TwoFactorProvider;
+use crate::ui::shortcuts as sc;
 use crate::ui::theme::theme;
 use crate::ui::widgets;
 use egui::RichText;
@@ -59,7 +60,11 @@ pub fn draw_two_factor(root: &mut egui::Ui, state: &mut TwoFactorState) -> Optio
         .show(root, |ui| {
             widgets::footer(
                 ui,
-                &[("⏎", "Verify"), ("↑↓", "Method"), ("Esc", "Back")],
+                &[
+                    (sc::ENTER, "Verify"),
+                    (sc::UP_DOWN, "Method"),
+                    (sc::ESCAPE, "Back"),
+                ],
                 None,
             )
         });

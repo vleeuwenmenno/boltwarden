@@ -1321,6 +1321,13 @@ impl eframe::App for App {
 
         // Before other key handling, so a shortcut being recorded is not also acted on.
         self.search_state.shortcut_setup.poll(ctx, &self.backend);
+        let search = &mut self.search_state;
+        search.shortcuts.handle_keys(ctx);
+        search.shortcuts.show(
+            ctx,
+            crate::ui::shortcuts::QUICK_ACCESS,
+            search.shortcut_setup.active_shortcut(),
+        );
         self.icons.poll(ctx);
         if let Some(warning) = &self.security_warning {
             egui::Panel::top("security-warning").show(root, |ui| {

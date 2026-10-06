@@ -1,7 +1,7 @@
 //! Shared building blocks so every screen uses the same header, rows, inputs and
 //! footer, all colored from [`theme()`].
 
-use crate::ui::theme::theme;
+use crate::ui::{shortcuts, theme::theme};
 use egui::{Color32, Response, RichText, Ui};
 
 /// Every screen uses the same fixed window size, so the popup never resizes (no
@@ -420,7 +420,16 @@ pub fn confirm_dialog(ctx: &egui::Context, dialog: &ConfirmDialog<'_>) -> Option
                     if dialog.busy {
                         ui.add(egui::Spinner::new().color(t.text_muted));
                     } else if dialog.key == ConfirmKey::CtrlEnter {
-                        ui.label(RichText::new("Ctrl+⏎").size(t.small()).color(t.text_faint));
+                        let caps = shortcuts::Combo::command(shortcuts::Key::Enter).caps();
+                        let style = shortcuts::CapStyle::footer();
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(
+                                shortcuts::caps_width(ui.painter(), &caps, style),
+                                style.height,
+                            ),
+                            egui::Sense::hover(),
+                        );
+                        shortcuts::paint_caps(ui.painter(), rect.left_center(), &caps, style);
                     }
                 });
             });
@@ -594,10 +603,11 @@ pub fn empty_state(ui: &mut Ui, icon: &str, text: &str, spinner: bool) {
 /// Footer with keyboard hints on the left and an optional status message on the right.
 pub fn footer(
     ui: &mut Ui,
-    hints: &[(&str, &str)],
+    hints: &[(shortcuts::Combo, &str)],
     status: Option<(&str, Color32)>,
 ) -> Option<egui::Rect> {
     let t = theme();
+    let style = shortcuts::CapStyle::footer();
     let height = 24.0;
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), height),
@@ -622,124 +632,25 @@ pub fn footer(
     }
 
     let mut cursor = rect.left();
-    for (key, label) in hints {
-        let key_size = keycap_size(key);
+    for (combo, label) in hints {
+        let caps = combo.caps();
         let label_galley =
             painter.layout_no_wrap((*label).to_owned(), t.font(t.small()), t.text_muted);
-        let hint_width = key_size.x + 6.0 + label_galley.size().x;
+        let hint_width =
+            shortcuts::caps_width(&painter, &caps, style) + 6.0 + label_galley.size().x;
         if cursor + hint_width > status_left - 12.0 {
             break;
         }
-        let key_rect = egui::Rect::from_min_size(
-            egui::pos2(cursor, rect.center().y - key_size.y / 2.0),
-            key_size,
-        );
-        paint_keycap(&painter, key_rect, key);
-        cursor += key_size.x + 6.0;
+        cursor = shortcuts::paint_caps(&painter, egui::pos2(cursor, rect.center().y), &caps, style)
+            + 6.0;
         painter.galley(
             egui::pos2(cursor, rect.center().y - label_galley.size().y / 2.0),
             label_galley.clone(),
             t.text_muted,
         );
-        cursor += label_galley.size().x + 16.0;
+        cursor += label_galley.size().x + 18.0;
     }
     status_rect
-}
-
-/// Draws `keys` as keycaps, right-aligned so the last one ends at `right_center`.
-pub fn keycaps(painter: &egui::Painter, right_center: egui::Pos2, keys: &[&str]) {
-    let mut right = right_center.x;
-    for key in keys.iter().rev() {
-        let size = keycap_size(key);
-        let rect = egui::Rect::from_min_size(
-            egui::pos2(right - size.x, right_center.y - size.y / 2.0),
-            size,
-        );
-        paint_keycap(painter, rect, key);
-        right = rect.left() - 4.0;
-    }
-}
-
-fn keycap_size(key: &str) -> egui::Vec2 {
-    match key {
-        "↑↓" => egui::vec2(30.0, 20.0),
-        "←↑↓→" => egui::vec2(46.0, 20.0),
-        "⏎" => egui::vec2(26.0, 20.0),
-        "←" | "→" => egui::vec2(22.0, 20.0),
-        _ => egui::vec2(key.chars().count() as f32 * 7.0 + 12.0, 20.0),
-    }
-}
-
-fn paint_keycap(painter: &egui::Painter, rect: egui::Rect, key: &str) {
-    let t = theme();
-    painter.rect_stroke(
-        rect,
-        t.rounding.min(4) as f32,
-        egui::Stroke::new(1.0_f32, t.border),
-        egui::StrokeKind::Inside,
-    );
-    let color = t.text;
-    match key {
-        "↑↓" => {
-            arrow(
-                painter,
-                rect.center() + egui::vec2(-4.0, 0.0),
-                egui::vec2(0.0, -4.5),
-                color,
-            );
-            arrow(
-                painter,
-                rect.center() + egui::vec2(4.0, 0.0),
-                egui::vec2(0.0, 4.5),
-                color,
-            );
-        }
-        "←↑↓→" => {
-            for (offset, direction) in [
-                (-14.0, egui::vec2(-4.5, 0.0)),
-                (-4.0, egui::vec2(0.0, -4.5)),
-                (4.0, egui::vec2(0.0, 4.5)),
-                (14.0, egui::vec2(4.5, 0.0)),
-            ] {
-                arrow(
-                    painter,
-                    rect.center() + egui::vec2(offset, 0.0),
-                    direction,
-                    color,
-                );
-            }
-        }
-        "⏎" => enter_glyph(painter, rect, color),
-        "←" => arrow(painter, rect.center(), egui::vec2(-5.0, 0.0), color),
-        "→" => arrow(painter, rect.center(), egui::vec2(5.0, 0.0), color),
-        _ => {
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                key,
-                t.font(t.small() - 1.0),
-                color,
-            );
-        }
-    }
-}
-
-fn enter_glyph(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-    let stroke = egui::Stroke::new(1.4_f32, color);
-    let left = rect.left() + 7.0;
-    let right = rect.right() - 7.0;
-    let top = rect.top() + 6.0;
-    let mid_y = rect.center().y + 2.5;
-    painter.line_segment([egui::pos2(right, top), egui::pos2(right, mid_y)], stroke);
-    painter.line_segment([egui::pos2(right, mid_y), egui::pos2(left, mid_y)], stroke);
-    painter.line_segment(
-        [egui::pos2(left, mid_y), egui::pos2(left + 3.5, mid_y - 3.0)],
-        stroke,
-    );
-    painter.line_segment(
-        [egui::pos2(left, mid_y), egui::pos2(left + 3.5, mid_y + 3.0)],
-        stroke,
-    );
 }
 
 #[cfg(test)]
@@ -753,16 +664,4 @@ mod tests {
         assert_eq!(super::format_date("2026-13-01"), None);
         assert_eq!(super::format_date("soon"), None);
     }
-}
-
-fn arrow(painter: &egui::Painter, center: egui::Pos2, delta: egui::Vec2, color: Color32) {
-    let stroke = egui::Stroke::new(1.4_f32, color);
-    let start = center - delta * 0.55;
-    let end = center + delta * 0.55;
-    painter.line_segment([start, end], stroke);
-    let direction = delta.normalized();
-    let perp = egui::vec2(-direction.y, direction.x);
-    let back = end - direction * 3.5;
-    painter.line_segment([end, back + perp * 3.0], stroke);
-    painter.line_segment([end, back - perp * 3.0], stroke);
 }

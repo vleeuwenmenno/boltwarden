@@ -1,6 +1,7 @@
 use crate::model::{
     SshApprovalDecision, SshApprovalRemember, SshApprovalRequest, SshApprovalStatus,
 };
+use crate::ui::shortcuts as sc;
 use crate::ui::theme::theme;
 use crate::ui::widgets;
 use egui::{Context, RichText, Ui};
@@ -51,15 +52,10 @@ pub fn draw_ssh_approval(
     let request = state.request.clone();
 
     if show_shortcuts {
-        let hints: &[(&str, &str)] = if request.is_some() {
-            &[
-                ("⏎", "Confirm"),
-                ("←", "Choice"),
-                ("→", "Choice"),
-                ("Esc", "Deny"),
-            ]
+        let hints: &[(sc::Combo, &str)] = if request.is_some() {
+            &[(sc::ENTER, "Confirm"), (sc::ESCAPE, "Deny")]
         } else {
-            &[("Esc", "Back")]
+            &[(sc::ESCAPE, "Back")]
         };
         egui::Panel::bottom("footer")
             .frame(widgets::footer_frame())

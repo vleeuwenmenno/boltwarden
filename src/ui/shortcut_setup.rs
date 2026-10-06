@@ -2,8 +2,8 @@
 //! next key combination is applied at once, and Backspace clears it.
 use crate::{
     backend::AppBackend,
-    shortcut::{MODIFIER_NAMES, Shortcut, Status},
-    ui::{theme::theme, widgets},
+    shortcut::{Shortcut, Status},
+    ui::{shortcuts, theme::theme, widgets},
 };
 use egui::{Response, Ui};
 use std::{sync::mpsc, time::Duration};
@@ -50,6 +50,14 @@ impl ShortcutSetup {
             }
             _ => self.recording = true,
         }
+    }
+
+    /// The active quick access shortcut, for the shortcuts dialog.
+    pub fn active_shortcut(&self) -> Option<&Shortcut> {
+        self.status
+            .as_ref()
+            .filter(|status| status.active)
+            .and_then(|status| status.selected.as_ref())
     }
 
     pub fn clear(&mut self) {
@@ -157,17 +165,17 @@ impl ShortcutSetup {
     }
 
     /// Footer hints for the shortcut row.
-    pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
+    pub fn hints(&self) -> &'static [(shortcuts::Combo, &'static str)] {
+        const HELP: (shortcuts::Combo, &str) = (shortcuts::HELP, "Keyboard shortcuts");
         if self.recording {
-            &[("Esc", "Cancel recording")]
+            &[(shortcuts::ESCAPE, "Cancel recording")]
         } else if self.status.as_ref().is_some_and(|status| !status.supported) {
-            &[("↑↓", "Select"), ("⏎", "Copy command"), ("Esc", "Back")]
+            &[(shortcuts::ENTER, "Copy command"), HELP]
         } else {
             &[
-                ("↑↓", "Select"),
-                ("⏎", "Record"),
-                ("⌫", "Clear"),
-                ("Esc", "Back"),
+                (shortcuts::ENTER, "Record"),
+                (shortcuts::BACKSPACE, "Clear"),
+                HELP,
             ]
         }
     }
@@ -243,18 +251,15 @@ impl ShortcutSetup {
                 t.accent.gamma_multiply(pulse),
             );
         } else if let Some(shortcut) = selected_shortcut {
-            let mut keys: Vec<&str> = [
-                shortcut.ctrl,
-                shortcut.alt,
-                shortcut.shift,
-                shortcut.super_key,
-            ]
-            .into_iter()
-            .zip(MODIFIER_NAMES)
-            .filter_map(|(pressed, name)| pressed.then_some(name))
-            .collect();
-            keys.push(&shortcut.key);
-            widgets::keycaps(&painter, egui::pos2(right, rect.center().y), &keys);
+            let caps = shortcuts::global_caps(shortcut);
+            let style = shortcuts::CapStyle::footer();
+            let width = shortcuts::caps_width(&painter, &caps, style);
+            shortcuts::paint_caps(
+                &painter,
+                egui::pos2(right - width, rect.center().y),
+                &caps,
+                style,
+            );
         } else {
             painter.text(
                 egui::pos2(right, rect.center().y),
@@ -312,6 +317,7 @@ fn default_shortcut() -> Shortcut {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shortcut::MODIFIER_NAMES;
 
     fn press(
         ctx: &egui::Context,

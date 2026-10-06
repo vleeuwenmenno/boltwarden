@@ -1,4 +1,5 @@
 use crate::browser_approval::{BrowserApprovalDecision, BrowserApprovalRequest};
+use crate::ui::shortcuts as sc;
 use crate::ui::{theme::theme, widgets};
 use eframe::egui;
 use std::time::{Duration, Instant};
@@ -149,10 +150,14 @@ pub fn draw_browser_approval(
     egui::Panel::bottom("browser-approval-footer")
         .frame(widgets::footer_frame())
         .show(root, |ui| {
-            let hints: &[(&str, &str)] = if request.choices.len() > 1 {
-                &[("↑↓", "account"), ("Enter", "approve"), ("Esc", "deny")]
+            let hints: &[(sc::Combo, &str)] = if request.choices.len() > 1 {
+                &[
+                    (sc::UP_DOWN, "Account"),
+                    (sc::ENTER, "Approve"),
+                    (sc::ESCAPE, "Deny"),
+                ]
             } else {
-                &[("Enter", "approve"), ("Esc", "deny")]
+                &[(sc::ENTER, "Approve"), (sc::ESCAPE, "Deny")]
             };
             widgets::footer(
                 ui,

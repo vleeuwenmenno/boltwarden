@@ -14,6 +14,7 @@ use crate::model::{
 use crate::ui::auth::{AuthAction, AuthState, draw_auth};
 use crate::ui::edit::{EditAction, EditState, draw_edit};
 use crate::ui::paired_browsers::{PairedBrowsersAction, PairedBrowsersState, draw_paired_browsers};
+use crate::ui::shortcuts as sc;
 use crate::ui::summary::{SummaryAction, SummaryState, draw_summary};
 use crate::ui::theme::theme;
 use crate::ui::two_factor::{TwoFactorAction, TwoFactorState, draw_two_factor};
@@ -1258,6 +1259,13 @@ impl eframe::App for WindowApp {
         }
         // Before other key handling, so a shortcut being recorded is not also acted on.
         self.settings_state.shortcut_setup.poll(ctx, &self.backend);
+        let settings = &mut self.settings_state;
+        settings.shortcuts.handle_keys(ctx);
+        settings.shortcuts.show(
+            ctx,
+            sc::VAULT_WINDOW,
+            settings.shortcut_setup.active_shortcut(),
+        );
         self.icons.poll(ctx);
         if let Some(warning) = &self.security_warning {
             egui::Panel::top("vault-security-warning").show(root, |ui| {
@@ -1950,7 +1958,7 @@ impl WindowApp {
         let mut settings = false;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if widgets::icon_button(ui, t.icon("\u{f023}", "🔒"), true)
-                .on_hover_text("Lock vault (Ctrl+L)")
+                .on_hover_text(format!("Lock vault ({})", sc::command("L").text()))
                 .clicked()
             {
                 lock = true;
@@ -1958,7 +1966,7 @@ impl WindowApp {
             settings = widgets::button(ui, "Settings", false, !editing).clicked();
             let label = format!("{}  New item", t.icon("\u{f067}", "+"));
             new_item = widgets::button(ui, &label, true, !editing && !self.offline())
-                .on_hover_text("Ctrl+N")
+                .on_hover_text(sc::command("N").text())
                 .clicked();
             ui.add_space(8.0);
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -1981,7 +1989,7 @@ impl WindowApp {
                             ui,
                             egui::Id::new(SEARCH_INPUT_ID),
                             &mut self.query,
-                            "Search vault (Ctrl+F)",
+                            &format!("Search vault ({})", sc::command("F").text()),
                             false,
                             t.body(),
                         )
@@ -2017,10 +2025,11 @@ impl WindowApp {
     }
 
     fn draw_statusbar(&mut self, ui: &mut egui::Ui) {
+        const HELP: (sc::Combo, &str) = (sc::HELP, "Keyboard shortcuts");
         let t = theme();
         if self.section == Section::PairedBrowsers && self.browser_setup_open {
-            let hints: &[(&str, &str)] = if self.settings.show_keyboard_shortcuts {
-                &[("↑↓", "Select"), ("Space", "Toggle"), ("⏎", "Apply")]
+            let hints: &[(sc::Combo, &str)] = if self.settings.show_keyboard_shortcuts {
+                &[(sc::SPACE, "Toggle"), (sc::ENTER, "Apply"), HELP]
             } else {
                 &[]
             };
@@ -2028,14 +2037,8 @@ impl WindowApp {
             return;
         }
         if self.section == Section::PairedBrowsers {
-            let hints: &[(&str, &str)] = if self.settings.show_keyboard_shortcuts {
-                &[
-                    ("↑↓", "Navigate"),
-                    ("⏎", "Revoke"),
-                    ("Ctrl+R", "Refresh"),
-                    ("Esc", "Settings"),
-                    ("Ctrl+F", "Search vault"),
-                ]
+            let hints: &[(sc::Combo, &str)] = if self.settings.show_keyboard_shortcuts {
+                &[(sc::ENTER, "Revoke"), (sc::command("R"), "Refresh"), HELP]
             } else {
                 &[]
             };
@@ -2063,24 +2066,21 @@ impl WindowApp {
                     .filter(|_| !self.offline())
                     .map(|warning| (warning, t.warning))
             });
-        let hints: &[(&str, &str)] = if !self.settings.show_keyboard_shortcuts {
+        let hints: &[(sc::Combo, &str)] = if !self.settings.show_keyboard_shortcuts {
             &[]
         } else if self.section == Section::Settings && self.settings_licenses {
-            &[("Esc", "Settings"), ("Ctrl+L", "Lock")]
+            &[(sc::ESCAPE, "Settings"), HELP]
         } else if self.section == Section::Settings {
-            &[
-                ("↑↓", "Settings"),
-                ("Space", "Change"),
-                ("Esc", "Back"),
-                ("Ctrl+L", "Lock"),
-            ]
+            if self.settings_state.shortcut_setup_selected() {
+                self.settings_state.shortcut_setup.hints()
+            } else {
+                &[(sc::SPACE, "Change"), (sc::ESCAPE, "Back"), HELP]
+            }
         } else {
             &[
-                ("↑↓", "Items"),
-                ("Ctrl+F", "Search"),
-                ("Ctrl+N", "New"),
-                ("Ctrl+R", "Sync"),
-                ("Ctrl+L", "Lock"),
+                (sc::command("F"), "Search"),
+                (sc::command("N"), "New item"),
+                HELP,
             ]
         };
         let sync_label = if self.sync_in_flight {
@@ -2115,7 +2115,7 @@ impl WindowApp {
                         .as_ref()
                         .filter(|s| s.offline)
                         .map(|s| s.offline_tooltip())
-                        .unwrap_or_else(|| "Sync vault · Ctrl+R".into()),
+                        .unwrap_or_else(|| format!("Sync vault · {}", sc::command("R").text())),
                 )
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()

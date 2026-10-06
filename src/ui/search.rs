@@ -2,6 +2,7 @@ use crate::config::{self, AppSettings, PasskeyVerification, StartList};
 use crate::icons::IconCache;
 use crate::model::{BwItem, ItemState, SshAgentStatus, SyncStatus};
 use crate::ui::paired_browsers::{PairedBrowsersAction, PairedBrowsersState, draw_paired_browsers};
+use crate::ui::shortcuts as sc;
 use crate::ui::theme::theme;
 use crate::ui::widgets;
 use egui::{Context, RichText, Ui};
@@ -255,6 +256,7 @@ pub struct SearchState {
     pub settings_group: Option<SettingsGroup>,
     pub capture_pending: bool,
     pub shortcut_setup: crate::ui::shortcut_setup::ShortcutSetup,
+    pub shortcuts: sc::ShortcutsDialog,
     pub paired_browsers: PairedBrowsersState,
     pub browser_setup: crate::ui::browser_setup::BrowserSetupState,
     paired_browsers_return: SearchView,
@@ -289,6 +291,7 @@ impl Default for SearchState {
             settings_group: None,
             capture_pending: false,
             shortcut_setup: Default::default(),
+            shortcuts: Default::default(),
             paired_browsers: PairedBrowsersState::default(),
             browser_setup: Default::default(),
             paired_browsers_return: SearchView::Results,
@@ -518,6 +521,11 @@ impl SearchState {
         self.focus_search = true;
     }
 
+    /// Whether the quick access shortcut row is selected, for its footer hints.
+    pub fn shortcut_setup_selected(&self) -> bool {
+        self.settings_selected == SHORTCUT_ROW
+    }
+
     /// Selects the quick access shortcut row (demo screenshots).
     pub fn select_shortcut_setting(&mut self) {
         self.settings_selected = SHORTCUT_ROW;
@@ -683,39 +691,27 @@ pub fn draw_search(
             .map(|warning| (warning, t.warning))
     };
     {
-        let hints: &[(&str, &str)] = match (settings.show_keyboard_shortcuts, state.view) {
+        const HELP: (sc::Combo, &str) = (sc::HELP, "Keyboard shortcuts");
+        let hints: &[(sc::Combo, &str)] = match (settings.show_keyboard_shortcuts, state.view) {
             (false, _) => &[],
             (true, SearchView::Results) => &[
-                ("←↑↓→", "Navigate"),
-                ("⏎", "Open"),
-                ("Shift+⏎", "Copy password"),
-                ("Esc", "Hide"),
+                (sc::ENTER, "Open"),
+                (sc::Combo::shift(sc::Key::Enter), "Copy password"),
+                HELP,
             ],
-            (true, SearchView::PairedBrowsers) => &[
-                ("↑↓", "Navigate"),
-                ("⏎", "Revoke"),
-                ("Ctrl+R", "Refresh"),
-                ("Esc", "Back"),
-            ],
-            (true, SearchView::BrowserSetup) => &[
-                ("↑↓", "Select"),
-                ("Space", "Toggle"),
-                ("⏎", "Apply"),
-                ("Esc", "Back"),
-            ],
+            (true, SearchView::PairedBrowsers) => {
+                &[(sc::ENTER, "Revoke"), (sc::command("R"), "Refresh"), HELP]
+            }
+            (true, SearchView::BrowserSetup) => {
+                &[(sc::SPACE, "Toggle"), (sc::ENTER, "Apply"), HELP]
+            }
             (true, SearchView::Settings) if state.settings_selected == SHORTCUT_ROW => {
                 state.shortcut_setup.hints()
             }
-            (true, SearchView::Settings) => {
-                &[("↑↓", "Select"), ("Space", "Toggle"), ("Esc", "Back")]
+            (true, SearchView::Settings) => &[(sc::SPACE, "Toggle"), (sc::ESCAPE, "Back"), HELP],
+            (true, SearchView::Archived | SearchView::Trash) => {
+                &[(sc::ENTER, "Open"), (sc::TAB, "Sort by"), HELP]
             }
-            (true, SearchView::Archived | SearchView::Trash) => &[
-                ("←↑↓→", "Navigate"),
-                ("⏎", "Open"),
-                ("Tab", "Sort by"),
-                ("Ctrl+↑↓", "Order"),
-                ("Esc", "Back"),
-            ],
         };
         egui::Panel::bottom("footer")
             .frame(widgets::footer_frame())
@@ -765,7 +761,7 @@ pub fn draw_search(
                             .as_ref()
                             .filter(|s| s.offline)
                             .map(|s| s.offline_tooltip())
-                            .unwrap_or_else(|| "Sync vault · Ctrl+R".to_string());
+                            .unwrap_or_else(|| format!("Sync vault · {}", sc::command("R").text()));
                         if let Some(at) =
                             state.sync_status.as_ref().and_then(|s| s.last_synced_unix)
                         {
@@ -1097,9 +1093,15 @@ fn draw_sort_control(ui: &mut Ui, state: &mut SearchState) {
         t.icon("\u{f176}", "↑")
     };
     let order_hint = if sort.descending {
-        "Newest / Z first (Ctrl+↑ for ascending)"
+        format!(
+            "Newest / Z first ({} for ascending)",
+            sc::Combo::command(sc::Key::Up).text()
+        )
     } else {
-        "Oldest / A first (Ctrl+↓ for descending)"
+        format!(
+            "Oldest / A first ({} for descending)",
+            sc::Combo::command(sc::Key::Down).text()
+        )
     };
     if ui
         .add(egui::Button::new(RichText::new(arrow).color(t.accent)).frame(false))
