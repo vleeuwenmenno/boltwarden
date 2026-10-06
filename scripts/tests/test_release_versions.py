@@ -11,12 +11,12 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
-from release_versions import artifact_names, package_versions
+from release_versions import desktop_artifact_names, extension_artifact_names, package_versions
 
 
 class ReleaseVersionsTests(unittest.TestCase):
     def test_release_names_use_only_github_safe_characters(self):
-        names = artifact_names('1.0.0-rc.1', '0.5.6')
+        names = desktop_artifact_names('1.0.0-rc.1') + extension_artifact_names('0.5.6')
         self.assertIn('boltwarden_1.0.0-rc.1_amd64.deb', names)
         self.assertIn('boltwarden_1.0.0-rc.1_arm64.deb', names)
         self.assertIn('boltwarden-1.0.0-rc.1-1.x86_64.rpm', names)
@@ -48,26 +48,27 @@ class ReleaseVersionsTests(unittest.TestCase):
     def test_inventory_rejects_missing_extra_empty_and_corrupt_artifacts(self):
         version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['package']['version']
         extension = json.loads((ROOT / 'extension/package.json').read_text())['version']
-        names = artifact_names(version, extension)
-        self.assertEqual(len(names), 13)
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            for name in names:
-                content = b'synthetic artifact'
-                (directory / name).write_bytes(content)
-                (directory / (name + '.sha256')).write_text(f'{hashlib.sha256(content).hexdigest()}  {name}\n')
-            def check():
-                return subprocess.run([sys.executable, str(ROOT / 'scripts/check-release-artifacts.py'), temporary], capture_output=True).returncode
-            self.assertEqual(check(), 0)
-            first = directory / names[0]
-            first.write_bytes(b'corrupted')
-            self.assertNotEqual(check(), 0)
-            first.write_bytes(b'')
-            self.assertNotEqual(check(), 0)
-            first.write_bytes(b'synthetic artifact')
-            extra = directory / 'unintended.txt'
-            extra.write_text('not a release asset')
-            self.assertNotEqual(check(), 0)
-            extra.unlink()
-            first.unlink()
-            self.assertNotEqual(check(), 0)
+        for flags, names, count in [([], desktop_artifact_names(version), 10),
+                                    (['--extension'], extension_artifact_names(extension), 3)]:
+            self.assertEqual(len(names), count)
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                for name in names:
+                    content = b'synthetic artifact'
+                    (directory / name).write_bytes(content)
+                    (directory / (name + '.sha256')).write_text(f'{hashlib.sha256(content).hexdigest()}  {name}\n')
+                def check():
+                    return subprocess.run([sys.executable, str(ROOT / 'scripts/check-release-artifacts.py'), *flags, temporary], capture_output=True).returncode
+                self.assertEqual(check(), 0)
+                first = directory / names[0]
+                first.write_bytes(b'corrupted')
+                self.assertNotEqual(check(), 0)
+                first.write_bytes(b'')
+                self.assertNotEqual(check(), 0)
+                first.write_bytes(b'synthetic artifact')
+                extra = directory / 'unintended.txt'
+                extra.write_text('not a release asset')
+                self.assertNotEqual(check(), 0)
+                extra.unlink()
+                first.unlink()
+                self.assertNotEqual(check(), 0)

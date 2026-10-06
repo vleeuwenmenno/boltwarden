@@ -13,13 +13,16 @@ def package_versions(version):
     return stable, stable
 
 
-def artifact_names(version, extension_version):
+def desktop_artifact_names(version):
     _, arch = package_versions(version)
     names = [f'boltwarden-{version}-{cpu}-linux.tar.gz' for cpu in ('x86_64', 'aarch64')]
     names += [f'boltwarden-{arch}-1-{cpu}.pkg.tar.zst' for cpu in ('x86_64', 'aarch64')]
     # Keep '~' inside Debian metadata only: GitHub rewrites it in asset names.
     names += [f'boltwarden_{version}_{cpu}.deb' for cpu in ('amd64', 'arm64')]
     names += [f'boltwarden-{version}-1.{cpu}.rpm' for cpu in ('x86_64', 'aarch64')]
-    names += [f'boltwarden-browser-{extension_version}-{browser}.zip' for browser in ('chrome', 'firefox', 'sources')]
     names += [f'boltwarden-{version}-x86_64-windows.zip', f'boltwarden-{version}-x86_64-windows-setup.exe']
     return names
+
+
+def extension_artifact_names(extension_version):
+    return [f'boltwarden-browser-{extension_version}-{kind}.zip' for kind in ('chrome', 'firefox', 'sources')]
