@@ -30,16 +30,7 @@ const MAX_CONCURRENT_FETCHES: usize = 4;
 /// Hostname of the first http(s) website of an item, if it may be sent to the icon service.
 pub fn icon_host(uris: &[String]) -> Option<String> {
     uris.iter().find_map(|uri| {
-        let uri = uri.trim();
-        // Bitwarden stores bare domains too ("github.com"); treat them as https.
-        let parsed = url::Url::parse(uri)
-            .ok()
-            .filter(|url| matches!(url.scheme(), "http" | "https"))
-            .or_else(|| {
-                (!uri.contains("://"))
-                    .then(|| url::Url::parse(&format!("https://{uri}")).ok())
-                    .flatten()
-            })?;
+        let parsed = web_url(uri)?;
         match parsed.host()? {
             url::Host::Domain(domain) => {
                 let domain = domain.trim_end_matches('.').to_ascii_lowercase();
@@ -49,6 +40,23 @@ pub fn icon_host(uris: &[String]) -> Option<String> {
             url::Host::Ipv4(_) | url::Host::Ipv6(_) => None,
         }
     })
+}
+
+/// The http(s) address a saved website points to, or None for app links and other
+/// schemes. Bitwarden stores bare domains too ("github.com"); treat them as https.
+pub fn web_url(uri: &str) -> Option<url::Url> {
+    let uri = uri.trim();
+    url::Url::parse(uri)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+        .or_else(|| {
+            // "mailto:me@example.com" would otherwise read as user "mailto" at example.com.
+            (!uri.contains("://"))
+                .then(|| url::Url::parse(&format!("https://{uri}")).ok())
+                .flatten()
+                .filter(|url| url.username().is_empty() && url.password().is_none())
+        })
+        .filter(|url| url.host().is_some())
 }
 
 fn is_public_domain(domain: &str) -> bool {
@@ -425,6 +433,29 @@ mod tests {
 
     fn uris(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn web_url_opens_only_http_addresses() {
+        let open = |uri| web_url(uri).map(|url| url.to_string());
+        assert_eq!(open(" github.com "), Some("https://github.com/".into()));
+        assert_eq!(
+            open("http://192.168.1.1:8080/admin"),
+            Some("http://192.168.1.1:8080/admin".into())
+        );
+        assert_eq!(
+            open("localhost:3000"),
+            Some("https://localhost:3000/".into())
+        );
+        for uri in [
+            "androidapp://com.example",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "mailto:me@example.com",
+            "",
+        ] {
+            assert_eq!(open(uri), None, "{uri}");
+        }
     }
 
     fn request_cache() -> IconCache {

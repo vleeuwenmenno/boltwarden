@@ -222,12 +222,17 @@ impl AppBackend {
 
     pub fn sync(&self) -> Result<SyncStatus, BackendError> {
         match self {
-            Self::Local(local) => local
-                .lock()
-                .map_err(|_| BackendError::Message("session lock poisoned".into()))?
-                .bw
-                .sync_now()
-                .map_err(BackendError::from),
+            Self::Local(local) => {
+                let poisoned = || BackendError::Message("session lock poisoned".into());
+                let fetch = local.lock().map_err(|_| poisoned())?.bw.begin_sync()?;
+                let fetched = fetch.run();
+                local
+                    .lock()
+                    .map_err(|_| poisoned())?
+                    .bw
+                    .finish_sync(fetched)
+                    .map_err(BackendError::from)
+            }
             Self::Demo(demo) => demo
                 .list_items(ItemState::Active, "")
                 .map(|result| result.status),
@@ -242,10 +247,9 @@ impl AppBackend {
     pub fn list_items(&self, state: ItemState, query: &str) -> Result<SearchResult, BackendError> {
         match self {
             Self::Local(local) => {
-                let mut backend = local
+                let backend = local
                     .lock()
                     .map_err(|_| BackendError::Message("session lock poisoned".into()))?;
-                backend.bw.sync_if_stale();
                 let items = backend
                     .bw
                     .list_items_in(state, query)

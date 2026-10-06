@@ -19,6 +19,7 @@ pub struct SummaryState {
     pub reveal_fields: std::collections::HashSet<usize>,
     revealed_at: Option<Instant>,
     pub selected_field: usize,
+    /// Confirmation of the last copy or open, such as "Copied Password".
     pub copied_field: Option<(String, Instant)>,
     pub totp: Option<TotpCode>,
     pub totp_fetched_at: Option<Instant>,
@@ -38,6 +39,8 @@ enum FieldKind {
     Totp,
     /// Shown for reference; a passkey has nothing to copy.
     Passkey,
+    /// A web address, opened in the browser instead of copied.
+    Link,
 }
 
 struct Field<'a> {
@@ -69,7 +72,12 @@ fn fields<'a>(detail: &'a BwItemDetail) -> Vec<Field<'a>> {
         );
     }
     for uri in &detail.uris {
-        push("Website", uri.as_str().into(), FieldKind::Plain);
+        let kind = if icons::web_url(uri).is_some() {
+            FieldKind::Link
+        } else {
+            FieldKind::Plain
+        };
+        push("Website", uri.as_str().into(), kind);
     }
     if let Some(ssh_key) = &detail.ssh_key {
         push(
@@ -173,6 +181,7 @@ pub fn draw_summary(
     // Next to other inputs, letters are for typing unless nothing has focus.
     let letters_enabled = keys_enabled && !(embedded && ctx.memory(|m| m.focused().is_some()));
 
+    let mut activate_selected = false;
     let mut copy_selected = false;
     ctx.input(|input| {
         if !keys_enabled {
@@ -229,6 +238,15 @@ pub fn draw_summary(
             return;
         }
         if input.key_pressed(egui::Key::Enter) {
+            activate_selected = true;
+        }
+        // Ctrl+C copies any field, including links that Enter opens. The window
+        // integration reports it as a copy event rather than a key press.
+        if input
+            .events
+            .iter()
+            .any(|event| matches!(event, egui::Event::Copy))
+        {
             copy_selected = true;
         }
         if input.key_pressed(egui::Key::Space)
@@ -240,6 +258,20 @@ pub fn draw_summary(
         }
     });
 
+    if copy_selected
+        && let Some(field) = fields
+            .get(state.selected_field)
+            .filter(|field| field.kind != FieldKind::Passkey)
+    {
+        match copy(state.selected_field) {
+            Ok(()) => {
+                state.copied_field = Some((format!("Copied {}", field.label), Instant::now()));
+                action = Some(SummaryAction::Copied);
+            }
+            Err(error) => state.error = Some(error),
+        }
+    }
+
     let status = if let Some(error) = &state.error {
         Some((error.clone(), t.danger))
     } else if state.action_in_flight {
@@ -249,42 +281,46 @@ pub fn draw_summary(
             .copied_field
             .as_ref()
             .filter(|(_, at)| at.elapsed() < COPIED_NOTICE)
-            .map(|(label, _)| (format!("Copied {label}"), t.success))
+            .map(|(notice, _)| (notice.clone(), t.success))
     };
     if show_shortcuts || status.is_some() {
         let hints: &[(&str, &str)] = match (show_shortcuts, item_state) {
             (false, _) => &[],
             (true, Some(ItemState::Deleted)) => &[
-                ("↑↓", "Field"),
+                ("←↑↓→", "Navigate"),
                 ("⏎", "Copy"),
                 ("R", "Restore"),
                 ("Del", "Delete"),
-                ("←", "Back"),
             ],
             (true, Some(ItemState::Archived)) => &[
-                ("↑↓", "Field"),
+                ("←↑↓→", "Navigate"),
                 ("⏎", "Copy"),
                 ("E", "Edit"),
                 ("F", "Favorite"),
                 ("A", "Unarchive"),
                 ("Del", "Trash"),
-                ("←", "Back"),
             ],
             (true, _) => &[
-                ("↑↓", "Field"),
+                ("←↑↓→", "Navigate"),
                 ("⏎", "Copy"),
                 ("E", "Edit"),
                 ("F", "Favorite"),
                 ("A", "Archive"),
                 ("Del", "Trash"),
-                ("←", "Back"),
             ],
         };
+        let link_selected = fields
+            .get(state.selected_field)
+            .is_some_and(|field| field.kind == FieldKind::Link);
         // The window's list owns the arrows, and there is nothing to go back to.
         let hints = hints
             .iter()
             .copied()
-            .filter(|(key, _)| !embedded || !matches!(*key, "↑↓" | "←"))
+            .filter(|(key, _)| !embedded || *key != "←↑↓→")
+            .flat_map(|(key, label)| match (key, link_selected) {
+                ("⏎", true) => vec![(key, "Open"), ("Ctrl+C", "Copy")],
+                _ => vec![(key, label)],
+            })
             .collect::<Vec<_>>();
         egui::Panel::bottom("footer")
             .frame(widgets::footer_frame())
@@ -394,20 +430,20 @@ pub fn draw_summary(
                     ui.spacing_mut().item_spacing.y = 2.0;
                     for (idx, field) in fields.iter().enumerate() {
                         let selected = idx == state.selected_field;
-                        let (copied, rect) = draw_field(
+                        let (field_action, rect) = draw_field(
                             ui,
                             state,
                             idx,
                             field,
                             selected,
-                            selected && copy_selected,
+                            selected && activate_selected,
                             copy,
                         );
                         if scroll_to == Some(idx) {
                             ui.scroll_to_rect(rect, None);
                         }
-                        if copied {
-                            action = Some(SummaryAction::Copied);
+                        if field_action.is_some() {
+                            action = field_action;
                         }
                     }
                 });
@@ -555,9 +591,9 @@ fn draw_field(
     idx: usize,
     field: &Field<'_>,
     selected: bool,
-    copy_requested: bool,
+    activate_requested: bool,
     copy: &mut dyn FnMut(usize) -> Result<(), String>,
-) -> (bool, egui::Rect) {
+) -> (Option<SummaryAction>, egui::Rect) {
     let t = theme();
     let revealed = state.reveal_fields.contains(&idx);
     let totp = (field.kind == FieldKind::Totp)
@@ -600,20 +636,31 @@ fn draw_field(
         },
     );
 
-    // Action glyphs on the right: reveal (secrets only) and copy.
+    // Action glyphs on the right: reveal (secrets only) and copy, or open for links.
     let copy_rect = egui::Rect::from_center_size(
         egui::pos2(rect.right() - 20.0, rect.top() + 22.0),
         egui::vec2(28.0, 28.0),
     );
-    let copyable = field.kind != FieldKind::Passkey;
-    let copy_clicked = copyable
-        && glyph_button(
-            ui,
-            copy_rect,
-            t.icon("\u{f0c5}", "📋"),
-            ("copy", idx),
-            &format!("Copy {}", field.label),
-        );
+    let link = field.kind == FieldKind::Link;
+    let activatable = field.kind != FieldKind::Passkey;
+    let activate_clicked = activatable
+        && if link {
+            glyph_button(
+                ui,
+                copy_rect,
+                t.icon("\u{f08e}", "↗"),
+                ("open", idx),
+                &format!("Open {}", field.label),
+            )
+        } else {
+            glyph_button(
+                ui,
+                copy_rect,
+                t.icon("\u{f0c5}", "📋"),
+                ("copy", idx),
+                &format!("Copy {}", field.label),
+            )
+        };
     let mut value_right = copy_rect.left() - 8.0;
     if field.kind == FieldKind::Secret {
         let eye_rect = copy_rect.translate(egui::vec2(-32.0, 0.0));
@@ -703,16 +750,32 @@ fn draw_field(
     if response.clicked() {
         state.selected_field = idx;
     }
-    if copy_clicked || (copy_requested && copyable) {
-        match copy(idx) {
+    if activate_clicked || (activate_requested && activatable) {
+        let result = if link {
+            open_link(&field.value)
+        } else {
+            copy(idx)
+        };
+        match result {
             Ok(()) => {
-                state.copied_field = Some((field.label.to_string(), Instant::now()));
-                return (true, rect);
+                let verb = if link { "Opened" } else { "Copied" };
+                state.copied_field = Some((format!("{verb} {}", field.label), Instant::now()));
+                let action = if link {
+                    SummaryAction::Opened
+                } else {
+                    SummaryAction::Copied
+                };
+                return (Some(action), rect);
             }
             Err(error) => state.error = Some(error),
         }
     }
-    (false, rect)
+    (None, rect)
+}
+
+fn open_link(uri: &str) -> Result<(), String> {
+    let url = icons::web_url(uri).ok_or("This website has no web address to open")?;
+    crate::platform::open_url(&url).map_err(|error| format!("Could not open website: {error}"))
 }
 
 fn glyph_button(
@@ -784,6 +847,8 @@ fn unix_now() -> u64 {
 pub enum SummaryAction {
     Back,
     Copied,
+    /// A website was handed to the browser.
+    Opened,
     Edit,
     /// Archive, restore and friends; trash and delete arrive here only once confirmed.
     Item(ItemAction),

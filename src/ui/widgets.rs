@@ -607,6 +607,7 @@ pub fn footer(
 fn keycap_size(key: &str) -> egui::Vec2 {
     match key {
         "↑↓" => egui::vec2(30.0, 20.0),
+        "←↑↓→" => egui::vec2(46.0, 20.0),
         "⏎" => egui::vec2(26.0, 20.0),
         "←" | "→" => egui::vec2(22.0, 20.0),
         _ => egui::vec2(key.chars().count() as f32 * 7.0 + 12.0, 20.0),
@@ -636,6 +637,21 @@ fn paint_keycap(painter: &egui::Painter, rect: egui::Rect, key: &str) {
                 egui::vec2(0.0, 4.5),
                 color,
             );
+        }
+        "←↑↓→" => {
+            for (offset, direction) in [
+                (-14.0, egui::vec2(-4.5, 0.0)),
+                (-4.0, egui::vec2(0.0, -4.5)),
+                (4.0, egui::vec2(0.0, 4.5)),
+                (14.0, egui::vec2(4.5, 0.0)),
+            ] {
+                arrow(
+                    painter,
+                    rect.center() + egui::vec2(offset, 0.0),
+                    direction,
+                    color,
+                );
+            }
         }
         "⏎" => enter_glyph(painter, rect, color),
         "←" => arrow(painter, rect.center(), egui::vec2(-5.0, 0.0), color),

@@ -295,7 +295,10 @@ impl WindowApp {
             reprompt_password: String::new(),
             reprompt_at: None,
             sync_in_flight: false,
-            last_sync_attempt: Instant::now(),
+            // Items come from the in-memory vault; sync with the server on the first frame.
+            last_sync_attempt: Instant::now()
+                .checked_sub(SYNC_INTERVAL)
+                .unwrap_or_else(Instant::now),
             sync_status: None,
             notice: None,
             error: None,
@@ -892,12 +895,7 @@ impl WindowApp {
                 self.spawn_search();
             }
             if self.last_sync_attempt.elapsed() >= SYNC_INTERVAL && self.edit_state.is_none() {
-                if self.offline() {
-                    self.last_sync_attempt = Instant::now();
-                    self.spawn_search();
-                } else {
-                    self.spawn_sync();
-                }
+                self.spawn_sync();
             }
             if self.summary_state.needs_totp_refresh()
                 && let Some(id) = self.summary_state.detail_id.clone()
@@ -2342,7 +2340,7 @@ impl WindowApp {
                 self.backend.revoke_item_grants();
                 self.clear_selection();
             }
-            Some(SummaryAction::Copied) | None => {}
+            Some(SummaryAction::Copied | SummaryAction::Opened) | None => {}
         }
     }
 

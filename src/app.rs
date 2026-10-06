@@ -26,6 +26,10 @@ const UNFOCUS_HIDE_GRACE: Duration = Duration::from_millis(350);
 /// notification, Hyprland reshuffling focus while the popup maps) must not close it.
 const UNFOCUS_HIDE_DELAY: Duration = Duration::from_millis(400);
 const RESTORE_RECENT_ITEM_WINDOW: Duration = Duration::from_secs(30);
+const SYNC_INTERVAL: Duration = Duration::from_secs(60);
+/// Reopening quick access syncs again only after this long, so rapid toggling does
+/// not hit the server every time.
+const OPEN_SYNC_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq)]
 enum Screen {
@@ -879,6 +883,10 @@ impl App {
             self.summary_open = false;
             self.search_state.reset_for_reopen();
             self.restore_recent_item_on_start();
+            // The list comes from the in-memory vault; fetch server changes behind it.
+            if self.last_sync_attempt.elapsed() >= OPEN_SYNC_INTERVAL {
+                self.spawn_sync();
+            }
         }
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -1349,16 +1357,7 @@ impl eframe::App for App {
         {
             let requested =
                 ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R));
-            if self.search_state.offline()
-                && self.last_sync_attempt.elapsed() >= Duration::from_secs(60)
-            {
-                self.last_sync_attempt = Instant::now();
-                self.search_state.force_refresh();
-            }
-            if requested
-                || (!self.search_state.offline()
-                    && self.last_sync_attempt.elapsed() >= Duration::from_secs(60))
-            {
+            if requested || self.last_sync_attempt.elapsed() >= SYNC_INTERVAL {
                 self.spawn_sync();
             }
         }
@@ -1538,6 +1537,8 @@ impl App {
             Some(SummaryAction::Copied) if self.settings.close_after_copy => {
                 self.hide_quick_access(ctx);
             }
+            // The browser takes over; quick access has done its job.
+            Some(SummaryAction::Opened) => self.hide_quick_access(ctx),
             Some(SummaryAction::Back) => self.return_to_search(ctx),
             Some(SummaryAction::Edit) => {
                 if let Some(id) = self.summary_state.detail_id.clone() {
