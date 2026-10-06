@@ -37,7 +37,12 @@ export default defineConfig({
     description: 'Fill logins and use passkeys with your Boltwarden desktop vault.',
     version: packageJson.version,
     icons: { 16: 'icon/16.png', 32: 'icon/32.png', 48: 'icon/48.png', 128: 'icon/128.png' },
-    permissions: ['nativeMessaging', 'storage', 'webNavigation', 'webRequest'],
+    // Chrome's service worker writes the clipboard through an offscreen page; `offscreen` has no install warning.
+    // `alarms` (no warning either) wipes a copied 2FA code later, even after the background was suspended.
+    permissions: ['nativeMessaging', 'storage', 'webNavigation', 'webRequest', 'alarms', ...(browser === 'firefox' ? [] : ['offscreen'])],
+    // Requested from the options page: `privacy` to switch off the browser's own autofill,
+    // `clipboardWrite` to copy verification codes after a fill.
+    optional_permissions: ['privacy', 'clipboardWrite'],
     host_permissions: ['http://*/*', 'https://*/*'],
     ...(browser === 'firefox'
       ? { browser_specific_settings: { gecko: { id: identities.firefox_id, strict_min_version: '140.0',

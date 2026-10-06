@@ -43,6 +43,277 @@ beforeEach(() => {
 afterEach(() => { for (const ui of controllers.splice(0)) ui.destroy(); vi.restoreAllMocks(); });
 
 describe('isolated inline login picker', () => {
+  it('opens on a trusted click in a login field only when enabled and useful', async () => {
+    const fields = form(); fields.username.focus();
+    const { ui, request, menu } = setup();
+    trusted(fields.username, 'pointerdown');
+    ui.state({ state: 'ready', epoch: 1 });
+    ui.configure({ autoOpen: false, theme: 'system' });
+    trusted(fields.username, 'click'); await settle();
+    expect(request).not.toHaveBeenCalled();
+    ui.configure({ autoOpen: true, theme: 'system' });
+    fields.username.click(); await settle();
+    expect(request).not.toHaveBeenCalled();
+    trusted(fields.username, 'click'); await settle();
+    expect(request).toHaveBeenLastCalledWith('list', { token: expect.any(String) });
+    expect(menu.hidden).toBe(false);
+    // Without a loaded favicon each row shows a letter that stays out of the accessible text.
+    const icon = shadow.querySelector<HTMLElement>('[role=option] .site-icon')!;
+    expect(icon.dataset.letter).toBe('P');
+    expect(shadow.querySelector('[role=option]')!.textContent).toBe('Personalalice');
+    // A second click keeps the menu open instead of toggling it closed.
+    trusted(fields.username, 'click'); await settle();
+    expect(menu.hidden).toBe(false);
+  });
+  it('opens for verification-code fields even when the click lands on a decorative overlay', async () => {
+    const container = document.createElement('form'); container.innerHTML = '<input autocomplete="one-time-code" inputmode="numeric" maxlength="6"><div class="boxes"></div>';
+    document.body.append(container);
+    const code = container.querySelector('input')!;
+    code.getBoundingClientRect = () => new DOMRect(20, 30, 240, 32);
+    code.getClientRects = () => [code.getBoundingClientRect()] as unknown as DOMRectList;
+    code.focus();
+    const { ui, request } = setup();
+    ui.state({ state: 'ready', epoch: 1 });
+    ui.configure({ autoOpen: true, theme: 'system' });
+    trusted(container.querySelector('.boxes')!, 'click'); await settle();
+    expect(request).toHaveBeenCalledWith('list', { token: expect.any(String) });
+  });
+  it('stops auto-opening after the menu is dismissed with the mark or Escape', async () => {
+    for (const dismiss of ['mark', 'Escape']) {
+      document.body.replaceChildren();
+      const fields = form(); fields.username.focus();
+      const { ui, request, mark, menu } = setup();
+      ui.state({ state: 'ready', epoch: 1 });
+      ui.configure({ autoOpen: true, theme: 'system' });
+      trusted(fields.username, 'click'); await settle();
+      expect(menu.hidden).toBe(false);
+      if (dismiss === 'mark') trusted(mark, 'click'); else trusted(fields.username, 'keydown', 'Escape');
+      await settle();
+      expect(menu.hidden).toBe(true);
+      request.mockClear();
+      // Clicking the same field again does not reopen it, even if focus briefly left it
+      // (browsers move focus to the mark when it is clicked); the mark still does.
+      fields.username.blur(); await new Promise(done => requestAnimationFrame(done));
+      fields.username.focus(); trusted(fields.username, 'click'); await settle();
+      expect(request).not.toHaveBeenCalled();
+      trusted(mark, 'click'); await settle();
+      expect(menu.hidden).toBe(false);
+      trusted(mark, 'click'); await settle();
+      // Moving to another login field resets the dismissal.
+      fields.password.focus(); trusted(fields.password, 'click'); await settle();
+      expect(request).toHaveBeenLastCalledWith('list', { token: expect.any(String) });
+      expect(request.mock.calls.filter(([action]) => action === 'list')).toHaveLength(2);
+      expect(menu.hidden).toBe(false);
+      ui.destroy();
+    }
+  });
+  it('puts the mark outside verification-code fields so it does not cover digits', () => {
+    const container = document.createElement('form');
+    container.innerHTML = '<input autocomplete="one-time-code" maxlength="6">';
+    document.body.append(container);
+    const code = container.querySelector('input')!;
+    code.getBoundingClientRect = () => new DOMRect(20, 30, 240, 32);
+    code.getClientRects = () => [code.getBoundingClientRect()] as unknown as DOMRectList;
+    code.focus();
+    const { mark } = setup();
+    // Field ends at 260: the mark starts 4px after it.
+    expect(mark.style.left).toBe('264px');
+  });
+  it('moves the mark left of a site control at the end of the field', () => {
+    const fields = form();
+    const eye = document.createElement('button'); document.body.append(eye);
+    eye.getBoundingClientRect = () => new DOMRect(232, 36, 24, 20);
+    document.elementsFromPoint = (x: number) => x > 232 ? [eye, document.body] : [document.body];
+    fields.password.focus();
+    const { mark } = setup();
+    // Field 20..260: without the eye the mark sits at 230; with it, left of 232 - 4.
+    expect(mark.style.left).toBe('202px');
+    delete (document as { elementsFromPoint?: unknown }).elementsFromPoint;
+  });
+  it('filters logins by what was typed in the username field and says so', async () => {
+    const fields = form(); fields.username.focus();
+    const logins = { ...ready, frame: { ...ready.frame!, items: [
+      { ...ready.frame!.items[0]!, id: 'admin', name: 'Example', username: 'admin@example.com' },
+      { ...ready.frame!.items[0]!, id: 'user', name: 'Example', username: 'user@example.com' },
+    ] } };
+    const { ui, request, mark } = setup(vi.fn<InlineOptions['request']>().mockResolvedValue(logins));
+    ui.state({ state: 'ready', epoch: 1 });
+    const type = async (text: string) => {
+      fields.username.value = text; trusted(fields.username, 'input'); await settle();
+      return [...shadow.querySelectorAll('[role=option] .username')].map(row => row.textContent);
+    };
+    trusted(mark, 'click'); await settle();
+    expect(await type('ad')).toEqual(['admin@example.com']);
+    expect(shadow.querySelector('.filter-hint')!.textContent).toBe('Filtering by “ad” · 1 of 2');
+    expect(await type('EXAMPLE.com')).toEqual(['admin@example.com', 'user@example.com']);
+    expect(await type('user')).toEqual(['user@example.com']);
+    trusted(fields.username, 'keydown', 'Enter'); await settle();
+    expect(request).toHaveBeenLastCalledWith('fill', { token: expect.any(String), targetId: 'target-one', itemId: 'user' });
+  });
+  it('shows every login without a hint when empty and says when nothing matches', async () => {
+    const fields = form(); fields.username.focus();
+    const { mark } = setup();
+    trusted(mark, 'click'); await settle();
+    expect(shadow.querySelectorAll('[role=option]')).toHaveLength(2);
+    expect(shadow.querySelector('.filter-hint')).toBeNull();
+    fields.username.value = 'zzz'; trusted(fields.username, 'input'); await settle();
+    expect(shadow.querySelector('.filter-hint')!.textContent).toBe('No logins match “zzz”');
+    expect(shadow.querySelectorAll('[role=option]')).toHaveLength(0);
+  });
+  it('opens once for a field the page focused itself, after the connection is ready', async () => {
+    const fields = form(); fields.username.focus();
+    const { ui, request, menu } = setup();
+    ui.configure({ autoOpen: true, theme: 'system' });
+    await settle();
+    expect(request).not.toHaveBeenCalled();
+    ui.state({ state: 'ready', epoch: 1 }); await settle();
+    expect(request).toHaveBeenLastCalledWith('list', { token: expect.any(String) });
+    expect(menu.hidden).toBe(false);
+  });
+  it('leaves page-focused fields alone when the user already interacted or auto-open is off', async () => {
+    for (const variant of ['gesture', 'off']) {
+      document.body.replaceChildren();
+      const fields = form(); fields.username.focus();
+      const { ui, request } = setup();
+      if (variant === 'gesture') trusted(document.body, 'keydown', 'a');
+      ui.configure({ autoOpen: variant !== 'off', theme: 'system' });
+      ui.state({ state: 'ready', epoch: 1 }); await settle();
+      expect(request).not.toHaveBeenCalled();
+      ui.destroy();
+    }
+  });
+  it('hides browser form history on the focused login field and restores the page value', async () => {
+    const fields = form(); fields.username.focus();
+    const { ui, mark, request } = setup();
+    ui.configure({ autoOpen: false, theme: 'system', suppressFormHistory: true });
+    expect(fields.username.getAttribute('autocomplete')).toBe('off');
+    expect(fields.password.getAttribute('autocomplete')).toBe('current-password');
+    // Detection still sees the page's value, so the field stays a login field.
+    expect(mark.hidden).toBe(false);
+    trusted(mark, 'click'); await settle();
+    expect(request).toHaveBeenLastCalledWith('list', { token: expect.any(String) });
+    fields.password.focus(); await new Promise(done => requestAnimationFrame(done));
+    expect(fields.username.getAttribute('autocomplete')).toBe('username');
+    expect(fields.password.getAttribute('autocomplete')).toBe('off');
+    ui.configure({ autoOpen: false, theme: 'system', suppressFormHistory: false });
+    expect(fields.password.getAttribute('autocomplete')).toBe('current-password');
+    ui.configure({ autoOpen: false, theme: 'system', suppressFormHistory: true });
+    ui.destroy();
+    expect(fields.password.getAttribute('autocomplete')).toBe('current-password');
+  });
+  it('picks up a focused field that becomes visible shortly after the page focused it', async () => {
+    vi.useFakeTimers();
+    try {
+      const fields = form(); fields.username.style.opacity = '0'; fields.username.focus();
+      const { mark } = setup();
+      expect(mark.hidden).toBe(true);
+      fields.username.style.opacity = '1';
+      vi.advanceTimersByTime(300);
+      expect(mark.hidden).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+  it('lets Enter reach the page from an automatic menu until the user picks a row', async () => {
+    const fields = form(); fields.username.focus();
+    const { ui, request, menu } = setup();
+    trusted(fields.username, 'pointerdown');
+    ui.state({ state: 'ready', epoch: 1 }); ui.configure({ autoOpen: true, theme: 'system' });
+    trusted(fields.username, 'click'); await settle();
+    expect(menu.hidden).toBe(false);
+    expect(shadow.querySelector('[aria-selected="true"]')).toBeNull();
+    const enter = trusted(fields.username, 'keydown', 'Enter'); await settle();
+    expect(enter.defaultPrevented).toBe(false);
+    expect(menu.hidden).toBe(true);
+    expect(request.mock.calls.some(([action]) => action === 'fill')).toBe(false);
+  });
+  it('fills from an automatic menu only after the user selected a row and it has been visible briefly', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const fields = form(); fields.username.focus();
+      const { ui, request } = setup();
+      trusted(fields.username, 'pointerdown');
+      ui.state({ state: 'ready', epoch: 1 }); ui.configure({ autoOpen: true, theme: 'system' });
+      trusted(fields.username, 'click'); await settle();
+      trusted(fields.username, 'keydown', 'ArrowDown');
+      trusted(fields.username, 'keydown', 'Enter'); await settle();
+      expect(request.mock.calls.some(([action]) => action === 'fill')).toBe(false);
+      vi.advanceTimersByTime(500);
+      trusted(fields.username, 'keydown', 'Enter'); await settle();
+      expect(request).toHaveBeenLastCalledWith('fill', { token: expect.any(String), targetId: 'target-one', itemId: 'first' });
+    } finally { vi.useRealTimers(); }
+  });
+  it('keeps an automatic menu hidden when there is nothing to offer', async () => {
+    const fields = form(); fields.username.focus();
+    const { ui, menu } = setup(vi.fn<InlineOptions['request']>().mockResolvedValue({ connection: { state: 'ready', epoch: 1 }, frame: { ...ready.frame!, items: [] } }));
+    trusted(fields.username, 'pointerdown');
+    ui.state({ state: 'ready', epoch: 1 }); ui.configure({ autoOpen: true, theme: 'system' });
+    trusted(fields.username, 'click'); await settle();
+    expect(menu.hidden).toBe(true);
+  });
+  it('only prompts to unlock automatically on real login forms, not on any email field', async () => {
+    document.body.innerHTML = '<form><input type="email" name="newsletter"></form>';
+    const email = document.querySelector('input')!;
+    email.getBoundingClientRect = () => new DOMRect(20, 30, 240, 32);
+    email.getClientRects = () => [email.getBoundingClientRect()] as unknown as DOMRectList;
+    email.focus();
+    const { ui, menu } = setup();
+    trusted(email, 'pointerdown');
+    ui.state({ state: 'locked', epoch: 1 }); ui.configure({ autoOpen: true, theme: 'system' });
+    trusted(email, 'click'); await settle();
+    expect(menu.hidden).toBe(true);
+    ui.destroy();
+    const fields = form(); fields.password.focus();
+    const second = setup();
+    trusted(fields.password, 'pointerdown');
+    second.ui.state({ state: 'locked', epoch: 1 }); second.ui.configure({ autoOpen: true, theme: 'system' });
+    trusted(fields.password, 'click'); await settle();
+    expect(second.menu.hidden).toBe(false);
+    expect(shadow.textContent).toContain('Unlock Boltwarden');
+  });
+  it('closes an automatic menu when the user types a password by hand', async () => {
+    const fields = form(); fields.password.focus();
+    const { ui, menu } = setup();
+    trusted(fields.password, 'pointerdown');
+    ui.state({ state: 'ready', epoch: 1 }); ui.configure({ autoOpen: true, theme: 'system' });
+    trusted(fields.password, 'click'); await settle();
+    expect(menu.hidden).toBe(false);
+    fields.password.value = 'x'; trusted(fields.password, 'input'); await settle();
+    expect(menu.hidden).toBe(true);
+  });
+  it('opens for page focus but holds automatic opening while a fill is in progress', async () => {
+    const fields = form(); fields.username.focus();
+    const { ui } = setup();
+    ui.configure({ autoOpen: true, theme: 'system' }); ui.state({ state: 'ready', epoch: 1 }); await settle();
+    expect(shadow.querySelector('.menu')!.hasAttribute('hidden')).toBe(false);
+    ui.destroy();
+    document.body.replaceChildren();
+    const next = form(); next.username.focus();
+    const held = setup();
+    held.ui.hold(5000);
+    held.ui.configure({ autoOpen: true, theme: 'system' }); held.ui.state({ state: 'ready', epoch: 1 }); await settle();
+    expect(held.request).not.toHaveBeenCalled();
+  });
+  it('does not open unprompted while disconnected or on card fields', async () => {
+    vi.spyOn(document, 'location', 'get').mockReturnValue({ protocol: 'https:' } as Location);
+    const fields = form(); fields.username.focus();
+    const { ui, request } = setup();
+    ui.configure({ autoOpen: true, theme: 'system' });
+    ui.state({ state: 'disconnected', epoch: 1 });
+    trusted(fields.username, 'click'); await settle();
+    expect(request).not.toHaveBeenCalled();
+    ui.state({ state: 'ready', epoch: 2 });
+    fields.username.autocomplete = 'cc-number'; fields.password.autocomplete = 'cc-csc';
+    trusted(fields.username, 'click'); await settle();
+    expect(request).not.toHaveBeenCalled();
+  });
+  it('applies a theme override inside the closed shadow root', () => {
+    form().username.focus();
+    const { ui, mark, menu } = setup();
+    ui.configure({ autoOpen: true, theme: 'light' });
+    expect([mark.dataset.theme, menu.dataset.theme]).toEqual(['light', 'light']);
+    ui.configure({ autoOpen: true, theme: 'system' });
+    expect([mark.dataset.theme, menu.dataset.theme]).toEqual([undefined, undefined]);
+    expect(document.querySelector<HTMLElement>('[data-boltwarden-inline]')!.dataset.theme).toBeUndefined();
+  });
   it('offers a card picker handoff without exposing cards or filling inline', async () => {
     vi.spyOn(document, 'location', 'get').mockReturnValue({protocol: 'https:'} as Location);
     {

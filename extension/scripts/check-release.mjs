@@ -20,7 +20,8 @@ for (const browser of ['chrome', 'firefox']) {
   const manifest = await read(`.output/${browser}-mv3/manifest.json`);
   assert.equal(manifest.manifest_version, 3);
   assert.equal(manifest.version, pkg.version);
-  assert.deepEqual([...manifest.permissions].sort(), ['nativeMessaging', 'storage', 'webNavigation', 'webRequest'].sort());
+  assert.deepEqual([...manifest.permissions].sort(), ['nativeMessaging', 'storage', 'webNavigation', 'webRequest', 'alarms', ...(browser === 'chrome' ? ['offscreen'] : [])].sort());
+  assert.deepEqual(manifest.optional_permissions, ['privacy', 'clipboardWrite']);
   assert.deepEqual([...manifest.host_permissions].sort(), ['http://*/*', 'https://*/*'].sort());
   assert.equal(manifest.externally_connectable, undefined, 'No external privileged messaging');
   assert.equal(manifest.update_url, undefined, 'Store manages updates');

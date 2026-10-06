@@ -8,9 +8,9 @@ import type { NativeSnapshot } from '../lib/native';
 const h = vi.hoisted(() => {
   const event = () => ({ listeners: [] as Array<(value: any) => void>, addListener(callback: (value: any) => void) { this.listeners.push(callback); }, emit(value?: any) { this.listeners.forEach(callback => callback(value)); } });
   const port = { onMessage: event(), onDisconnect: event(), disconnect: vi.fn() };
-  return { port, runtime: { getManifest: vi.fn(() => ({ version: '9.8.7' })), connect: vi.fn(() => port), sendMessage: vi.fn(), openOptionsPage: vi.fn() } };
+  return { port, extension: { isAllowedIncognitoAccess: vi.fn(async () => true) }, runtime: { getManifest: vi.fn(() => ({ version: '9.8.7' })), connect: vi.fn(() => port), sendMessage: vi.fn(), openOptionsPage: vi.fn() } };
 });
-vi.mock('wxt/browser', () => ({ browser: { runtime: h.runtime } }));
+vi.mock('wxt/browser', () => ({ browser: { runtime: h.runtime, extension: h.extension } }));
 import { mount } from '../lib/ui';
 
 const login = { id: 'one', name: 'Work login', username: 'alice', revision: '1', reprompt: false, requires_confirmation: false };
@@ -182,8 +182,8 @@ describe('popup invalidation', () => {
 
   it('keeps setup details in options without discovering the active page', async () => {
     await open(true); expect(calls('list')).toHaveLength(0);
-    expect(app.textContent).toContain('Extension version: 9.8.7');
-    expect(app.textContent).toContain('Browser integration API: v1');
+    expect(app.textContent).toContain('Extension 9.8.7');
+    expect(app.textContent).toContain('Browser integration API v1');
     expect(app.textContent).toContain('Pending saves stay in browser session storage'); expect(app.textContent).toContain('ABCD:1234');
     expect(document.querySelector('a[href="/privacy.html"]')?.textContent).toBe('Privacy and data handling');
     expect(app.textContent).toContain('boltwarden install-browser');
@@ -203,4 +203,16 @@ it('shows retained saves while locked and exposes retry and discard without a pa
   expect(h.runtime.sendMessage).toHaveBeenCalledWith({ type: 'retry-save', id: 'pending-one' });
   await act(() => buttons.find(button => button.textContent === 'Discard')!.click());
   expect(h.runtime.sendMessage).toHaveBeenCalledWith({ type: 'discard-save', id: 'pending-one' });
+});
+
+describe('private windows notice', () => {
+  it('tells the user how to enable private windows only when they are not allowed', async () => {
+    await open(true);
+    expect(app.textContent).not.toContain('not enabled in private windows');
+    act(() => render(null, app));
+    h.extension.isAllowedIncognitoAccess.mockResolvedValueOnce(false);
+    await open(true);
+    await vi.waitFor(() => expect(app.textContent).toContain('Boltwarden is not enabled in private windows'));
+    expect(app.textContent).toContain('Allow in Incognito');
+  });
 });

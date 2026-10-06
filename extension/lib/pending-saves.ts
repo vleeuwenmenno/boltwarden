@@ -49,11 +49,13 @@ export function pendingSaves(native: NativeClient, storage: SessionStorage, chan
         if ((native.snapshot as { state: string }).state !== 'ready') return;
       }
       entry.waiting = false;
-      expect(await native.request({ type: 'SaveLogin', top_url: entry.url, frame_url: entry.url,
+      const result = expect(await native.request({ type: 'SaveLogin', top_url: entry.url, frame_url: entry.url,
         document_id: entry.documentId, login: { ...entry.login } }), 'LoginSaved');
       entry.saved = true;
       await remove(entry);
-      notice(entry, 'Password saved in Boltwarden.');
+      // `saved: false` means the vault already had this login (for example right after a fill
+      // and submit), so there is nothing to tell the user.
+      if (result.saved) notice(entry, 'Password saved in Boltwarden.');
     } catch (error) {
       // A lock may race the request. Retain the same credentials for the next unlock.
       entry.waiting = error instanceof NativeError && error.code === 'Locked';

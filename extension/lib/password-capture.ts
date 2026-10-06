@@ -1,3 +1,4 @@
+import { autocompleteOf } from './autocomplete';
 import { cardPurpose } from './cards';
 export interface SubmittedLogin { username: string; password: string }
 
@@ -14,13 +15,13 @@ function displayed(input: HTMLInputElement): boolean {
 export function submittedLogin(form: HTMLFormElement, visible = displayed): SubmittedLogin | undefined {
   const fields = Array.from(form.elements).filter((element): element is HTMLInputElement => element instanceof HTMLInputElement
     && !element.disabled && element.type !== 'hidden' && !cardPurpose(element)
-    && !element.autocomplete.toLowerCase().split(/\s+/).some(token => token.startsWith('cc-')) && visible(element));
-  const passwords = fields.filter(input => input.type === 'password' && !input.autocomplete.split(/\s+/).includes('one-time-code'));
-  const fresh = passwords.filter(input => input.autocomplete.split(/\s+/).includes('new-password') || /new[-_ ]?password|confirm|repeat/i.test(`${input.name} ${input.id}`));
+    && !autocompleteOf(element).toLowerCase().split(/\s+/).some(token => token.startsWith('cc-')) && visible(element));
+  const passwords = fields.filter(input => input.type === 'password' && !autocompleteOf(input).split(/\s+/).includes('one-time-code'));
+  const fresh = passwords.filter(input => autocompleteOf(input).split(/\s+/).includes('new-password') || /new[-_ ]?password|confirm|repeat/i.test(`${input.name} ${input.id}`));
   const selected = fresh.length ? fresh : passwords;
   if (!selected.length || selected.some(input => !input.value || input.value !== selected[0]!.value)) return;
   const usernames = fields.filter(input => ['text', 'email', 'tel'].includes(input.type)
-    && (input.autocomplete.split(/\s+/).some(value => ['username', 'email'].includes(value)) || /username|e-?mail|login|identifier/i.test(`${input.name} ${input.id}`)));
+    && (autocompleteOf(input).split(/\s+/).some(value => ['username', 'email'].includes(value)) || /username|e-?mail|login|identifier/i.test(`${input.name} ${input.id}`)));
   if (usernames.length > 1) return;
   const username = usernames[0]?.value ?? '', password = selected[0]!.value;
   if (username.length > 1024 || password.length > 4096) return;

@@ -8,6 +8,9 @@ import { clearCard, expect, HOST_NAME, NativeError, webUrl, type Match, type Pag
 import type { UiFrame, UiPage, UiResult } from '../lib/ui-types';
 import { installPasskeyBroker } from '../lib/passkey-background';
 import { PASSKEY_PORT } from '../lib/passkey-types';
+import { readSettings } from '../lib/settings';
+import { CLIPBOARD_PERMISSION, copyFromBackground } from '../lib/clipboard';
+const CLEAR_CLIPBOARD = 'clear-copied-code';
 
 type Port = ReturnType<typeof browser.runtime.connect>;
 interface DocumentState {
@@ -491,12 +494,18 @@ export default defineBackground(() => {
       if (native.snapshot.state !== 'ready' || credentials.epoch !== native.snapshot.epoch
         || credentials.document_id !== target.context.document_id) throw changed();
       if (credentials.type === 'Totp' && Date.now() >= credentials.expires_at * 1000 - 1000) throw new Error('Verification code expired. Choose the account again for a fresh code.');
-      const payload = credentials.type === 'Card' ? { kind: 'card', card: credentials.card } : credentials.type === 'Totp' ? { kind: 'totp', code: credentials.code, expiresAt: credentials.expires_at }
-        : { username: credentials.username, password: credentials.password };
+      // Never auto-submit cards or a fill the user had to confirm (insecure page or embedded frame).
+      // Only on HTTPS pages: on HTTP a network attacker could inject the form being submitted.
+      const secure = new URL(target.context.top_url).protocol === 'https:' && new URL(target.context.frame_url).protocol === 'https:';
+      const submit = credentials.type !== 'Card' && secure && !insecure && !crossOrigin && !target.crossOrigin && !item.requires_confirmation
+        && (await readSettings(browser.storage)).autoSubmit ? { submit: true } : {};
+      const payload = credentials.type === 'Card' ? { kind: 'card', card: credentials.card } : credentials.type === 'Totp' ? { kind: 'totp', code: credentials.code, expiresAt: credentials.expires_at, ...submit }
+        : { username: credentials.username, password: credentials.password, ...submit };
       const reply = await ask(target.document, { type: 'fill', token: target.token, ...(target.scope ? { scope: target.scope } : {}), ...payload })
         .finally(() => { if ('card' in payload && payload.card) clearCard(payload.card); else if ('code' in payload) payload.code = ''; else { payload.username = ''; payload.password = ''; } });
       if (reply.type !== 'filled') throw changed();
       badge('', target.document.tabId, 'Boltwarden: login filled');
+      if (target.kind === 'login' && !item.reprompt) await copyTotp(target, item, interaction);
     } finally {
       if (credentials?.type === 'Credentials') { credentials.username = ''; credentials.password = ''; }
       if (credentials?.type === 'Card') clearCard(credentials.card);
@@ -506,6 +515,31 @@ export default defineBackground(() => {
       } else clearTargets(target.document.tabId, false);
     }
   }
+  // Best effort: the login is already filled, so a missing code, declined permission,
+  // or clipboard failure must not turn the fill into an error. Protected items are
+  // skipped so the copy never causes a second master-password prompt.
+  async function copyTotp(target: Target, item: Match, interaction: 'shortcut' | 'popup') {
+    try {
+      const settings = await readSettings(browser.storage);
+      if (!settings.copyTotp || !await browser.permissions.contains(CLIPBOARD_PERMISSION)) return;
+      const response = await native.request({ type: 'FillTotp', ...target.context, item_id: item.id, revision: item.revision,
+        // Its own signal: auto-submit navigates the page, which aborts the fill target's controller.
+        interaction, confirm_insecure: false, confirm_cross_origin: false }, AbortSignal.timeout(15_000));
+      const code = expect(response, 'Totp');
+      try {
+        if (code.document_id === target.context.document_id && Date.now() < code.expires_at * 1000) {
+          await copyFromBackground(code.code);
+          // An alarm survives the background being suspended; creating it again restarts the wait.
+          await browser.alarms.create(CLEAR_CLIPBOARD, { delayInMinutes: settings.clearClipboardSeconds / 60 });
+        }
+      } finally { code.code = ''; }
+    } catch { /* No code for this login, or the copy was refused. */ }
+  }
+  // Wipes the clipboard once the copy-code wait is over. Without clipboard read access it cannot
+  // check what is there, so anything copied in the meantime is wiped too (the setting says so).
+  browser.alarms.onAlarm.addListener(alarm => {
+    if (alarm.name === CLEAR_CLIPBOARD) void copyFromBackground('').catch(() => {});
+  });
   async function openPicker(tabId: number) {
     pickerTabs.add(tabId);
     badge('!', tabId, 'Boltwarden: click the toolbar button to select a login');
