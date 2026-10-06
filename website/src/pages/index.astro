@@ -18,12 +18,13 @@ const features = [
 
 const downloads = [
   ['Linux', 'x86_64 and ARM64: tarball, .deb, Arch package, and Fedora RPM.'],
-  ['Windows 11', 'x64 preview: installer or ZIP. Unsigned.'],
+  ['Windows 11', 'x64: installer or ZIP. Unsigned.'],
+  ['macOS', 'Apple silicon and Intel: one universal app. Unsigned.'],
 ];
 ---
 <Base
   title="Boltwarden: desktop app for Vaultwarden and Bitwarden"
-  description="A free, unofficial desktop app for Vaultwarden and Bitwarden vaults with quick access, browser autofill, and an SSH agent. Linux and Windows."
+  description="A free, unofficial desktop app for Vaultwarden and Bitwarden vaults with quick access, browser autofill, and an SSH agent. Linux, Windows, and macOS."
 >
   <header class="wrap nav">
     <a class="brand" href="/">
@@ -249,15 +250,21 @@ const downloads = [
     const zip = files.find((f) => /windows\.zip$/.test(f.name));
     if (setup) { win.push(setup); winLabels.push('Installer (.exe)'); }
     if (zip) { win.push(zip); winLabels.push('Portable (.zip)'); }
-    if (win.length) groups.append(group('Windows 11 x64 (preview)', win, winLabels));
+    if (win.length) groups.append(group('Windows 11 x64', win, winLabels));
+    const mac = files.find((f) => /-macos\.zip$/.test(f.name));
+    if (mac) groups.append(group('macOS', [mac], ['Apple silicon and Intel (.zip)']));
 
     const ua = navigator.userAgent;
     const primary = document.getElementById('dl-primary') as HTMLAnchorElement;
     let pick: Asset | undefined;
     let label = '';
+    const isMac = /Macintosh|Mac OS X/i.test(ua) && navigator.maxTouchPoints < 2;
     if (/Windows/i.test(ua)) {
       pick = setup;
       label = 'Windows';
+    } else if (isMac) {
+      pick = mac;
+      label = 'macOS';
     } else if (/Linux|X11/i.test(ua) && !/Android/i.test(ua)) {
       const arm = /aarch64|arm/i.test(ua);
       pick = files.find((f) => /-linux\.tar\.gz$/.test(f.name) && isArm(f.name) === arm);
@@ -271,7 +278,8 @@ const downloads = [
       primary.href = release.html_url;
     }
     document.getElementById('dl-meta')!.textContent =
-      `${release.tag_name}${release.prerelease ? ' (pre-release)' : ''}`;
+      `${release.tag_name}${release.prerelease ? ' (pre-release)' : ''}` +
+      (isMac && !mac ? ' · the macOS app arrives with the next release' : '');
 
     root.hidden = false;
     document.getElementById('dl-fallback')?.remove();
