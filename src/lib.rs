@@ -26,6 +26,7 @@ mod platform;
 mod random;
 mod rpc;
 #[cfg_attr(windows, path = "platform/screen_capture_windows.rs")]
+#[cfg_attr(target_os = "macos", path = "platform/screen_capture_macos.rs")]
 mod screen_capture;
 mod shortcut;
 #[cfg_attr(windows, path = "platform/ssh_agent_windows.rs")]

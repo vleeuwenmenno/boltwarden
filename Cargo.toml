@@ -52,7 +52,7 @@ eframe = { version = "0.36", default-features = false, features = ["wgpu_no_defa
 wgpu = { version = "30.0", default-features = false, features = ["metal", "std", "wgsl"] }
 libc = "0.2"
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSDate", "NSObjCRuntime", "NSRunLoop", "NSString"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSDate", "NSObjCRuntime", "NSRunLoop", "NSString"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSView", "NSWindow"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFDictionary", "CFNumber", "CFString"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEventSource", "CGEventTypes", "CGSession"] }
