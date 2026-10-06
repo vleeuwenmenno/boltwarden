@@ -62,8 +62,10 @@ is globally ignored. Dependabot proposes dependency, action, and container updat
 Nix flake outputs cover both CPUs, but the distribution workflows build through
 Docker; Nix builds need separate validation if their expressions or lockfile change.
 
-The prepared desktop version is `1.0.0-rc.1`; its tag is `v1.0.0-rc.1`.
-Extension version remains `0.5.6`, independently numbered. Existing tags are never moved.
+The prepared desktop version is `1.0.0-rc.3`; its tag is `v1.0.0-rc.3`.
+`v1.0.0-rc.2` was pushed before its version bump and failed the release check; it
+has no release and is not reused. Extension version is `0.5.7`, independently
+numbered. Existing tags are never moved.
 Supported desktop versions are `X.Y.Z` and `X.Y.Z-rc.N`, with N starting at 1.
 Tarballs retain the desktop version; Debian maps RCs to `X.Y.Z~rc.N` and Arch to
 `X.Y.ZrcN-1` so final releases sort newer. Package-order regression tests exercise

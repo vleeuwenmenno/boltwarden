@@ -57,9 +57,9 @@ All screenshots show fictional data from the built-in demo vault.
 
 ## Downloads
 
-**1.0.0-rc.1 is a testing release candidate.** Passkeys remain experimental and
+**1.0.0-rc.3 is a testing release candidate.** Passkeys remain experimental and
 browser ZIPs are unsigned developer builds. See the [RC testing status](docs/rc-testing.md)
-and [release notes](docs/release-notes-1.0.0-rc.1.md) before installing.
+and [release notes](docs/release-notes-1.0.0-rc.3.md) before installing.
 
 Choose your platform and browser from the assets on the
 [Releases page](https://github.com/vleeuwenmenno/boltwarden/releases).
@@ -127,8 +127,7 @@ without opening the popup immediately.
 Install the matching release `.deb` with `sudo apt install ./boltwarden_*.deb`,
 an Arch package with `sudo pacman -U ./boltwarden-*.pkg.tar.zst`, or a Fedora `.rpm`
 with `sudo dnf install ./boltwarden-*.rpm`.
-RPM packages are available in CI builds after RC1 and will be attached to the next
-release; the published RC1 does not include them. There is no Boltwarden DNF/YUM
+RPM packages are attached from 1.0.0-rc.3; the published RC1 does not include them. There is no Boltwarden DNF/YUM
 repository yet, so updates require downloading a newer package.
 Run `boltwarden-setup` **without sudo** afterward to choose whether Boltwarden
 starts at graphical login. Packages install a user service but never enable it

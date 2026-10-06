@@ -1,6 +1,6 @@
 [package]
 name = "boltwarden"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.3"
 edition = "2024"
 rust-version = "1.95"
 license-file = "LICENSE"
