@@ -4,6 +4,9 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { browser } from 'wxt/browser';
 import type { UiFrame, UiPage, UiResult, UiState, UiStateChange } from './ui-types';
 import { PROTOCOL_VERSION, type Match } from './protocol';
+import { applyTheme, DEFAULT_SETTINGS, watchSettings, writeSettings, type Settings, type Theme } from './settings';
+import { CLIPBOARD_PERMISSION } from './clipboard';
+import { autofillState, restoreBrowserAutofill, suppressBrowserAutofill, type AutofillApi, type AutofillState } from './browser-autofill';
 import './ui.css';
 
 async function call<T>(type: string, fields: Record<string, unknown> = {}): Promise<T> {
@@ -30,7 +33,121 @@ function Symbol({ name }: { name: 'key' | 'refresh' | 'settings' | 'lock' | 'war
   return <svg class="symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
 
+const controlText = { not_controllable: 'Locked by browser policy', controlled_by_other_extensions: 'Controlled by another extension',
+  controllable_by_this_extension: '', controlled_by_this_extension: '' } as const;
+
+type Favicon = { origin: string; url: string };
+// The active tab's own favicon, as the browser already loaded it. Only used for frames on the
+// tab's origin; embedded frames and failed loads fall back to the item's first letter.
+function useTabFavicon() {
+  const [favicon, setFavicon] = useState<Favicon>();
+  useEffect(() => {
+    browser.tabs?.query({ active: true, currentWindow: true }).then(([tab]) => {
+      if (!tab?.url || !tab.favIconUrl) return;
+      // Only the site's own icon (or inline data): loading another URL from the extension page
+      // would send a cookie-bearing request the page chose.
+      const origin = new URL(tab.url).origin;
+      if (!/^data:image\//i.test(tab.favIconUrl) && new URL(tab.favIconUrl).origin !== origin) return;
+      setFavicon({ origin, url: tab.favIconUrl });
+    }).catch(() => {});
+  }, []);
+  return favicon;
+}
+
+function SiteIcon({ name, url }: { name: string; url?: string }) {
+  const [failed, setFailed] = useState(false);
+  if (url && !failed) return <img class="site-icon" src={url} alt="" referrerpolicy="no-referrer" onError={() => setFailed(true)} />;
+  return <span class="site-icon letter" aria-hidden="true">{(name.trim()[0] ?? '?').toUpperCase()}</span>;
+}
+
+// Browsers only let the user (or an admin policy) enable an extension in private windows.
+function PrivateWindows() {
+  const [allowed, setAllowed] = useState(true);
+  useEffect(() => { browser.extension?.isAllowedIncognitoAccess?.().then(setAllowed, () => {}); }, []);
+  if (allowed) return null;
+  const firefox = 'getBrowserInfo' in browser.runtime;
+  return <p class="notice warning" role="status"><strong>Boltwarden is not enabled in private windows.</strong>{' '}
+    {firefox ? 'To turn it on: about:addons → Boltwarden → Run in Private Windows → Allow.'
+      : 'To turn it on: open this extension’s details and switch on Allow in Incognito.'}</p>;
+}
+
+/** One setting per row: a short title, one line of help, and a switch on the right. */
+function Toggle({ title, help, checked, disabled, onChange }: { title: string; help: string; checked: boolean; disabled?: boolean; onChange(checked: boolean, input: HTMLInputElement): void }) {
+  return <label class="option">
+    <span class="option-text"><strong>{title}</strong><span>{help}</span></span>
+    <input type="checkbox" role="switch" class="switch" checked={checked} disabled={disabled} onChange={event => onChange(event.currentTarget.checked, event.currentTarget)} />
+  </label>;
+}
+
+function Settings({ settings }: { settings: Settings }) {
+  const [error, setError] = useState('');
+  const save = (change: Partial<Settings>) => { setError(''); writeSettings(browser.storage, change).catch(error => setError(errorMessage(error))); };
+  const themes: [Theme, string][] = [['system', 'Browser'], ['light', 'Light'], ['dark', 'Dark']];
+  return <>
+    <PrivateWindows />
+    {error && <p role="alert" class="notice error">{error}</p>}
+    <section class="card"><h2>Filling</h2>
+      <Toggle title="Show logins when I click a field" help="Opens your matching logins in username, password, and code fields."
+        checked={settings.autoOpen} onChange={autoOpen => save({ autoOpen })} />
+      <Toggle title="Log in for me" help="Presses the site’s login button after filling. Skipped when you had to confirm the page."
+        checked={settings.autoSubmit} onChange={autoSubmit => save({ autoSubmit })} />
+      <Toggle title="Copy the 2FA code after login" help="Paste it on the next page. Asks for clipboard access once."
+        checked={settings.copyTotp} onChange={(enable, input) => {
+          const refused = (message: string) => { input.checked = false; setError(message); };
+          // Request first, while the click still counts as a user gesture.
+          if (enable) browser.permissions.request(CLIPBOARD_PERMISSION).then(granted => granted ? save({ copyTotp: true }) : refused('Clipboard access was not allowed, so the 2FA code cannot be copied.'),
+            error => refused(errorMessage(error)));
+          else save({ copyTotp: false });
+        }} />
+      {settings.copyTotp && <div class="option sub"><span class="option-text"><strong id="clear-label">Wipe the copied code after</strong>
+        <span>Clears the clipboard, even if you copied something else since.</span></span>
+        <div class="segmented" role="radiogroup" aria-labelledby="clear-label">{([[30, '30 s'], [60, '1 min'], [120, '2 min'], [300, '5 min']] as const).map(([seconds, label]) =>
+          <button key={seconds} type="button" role="radio" aria-checked={settings.clearClipboardSeconds === seconds} class={settings.clearClipboardSeconds === seconds ? 'active' : ''}
+            onClick={() => save({ clearClipboardSeconds: seconds })}>{label}</button>)}</div></div>}
+    </section>
+    <BrowserAutofill />
+    <section class="card"><h2>Look</h2>
+      <div class="option"><span class="option-text"><strong id="theme-label">Theme</strong><span>“Browser” follows your browser or system.</span></span>
+        <div class="segmented" role="radiogroup" aria-labelledby="theme-label">{themes.map(([value, label]) =>
+          <button key={value} type="button" role="radio" aria-checked={settings.theme === value} class={settings.theme === value ? 'active' : ''} onClick={() => save({ theme: value })}>{label}</button>)}</div></div>
+    </section>
+    <section class="card"><h2>Advanced</h2>
+      <Toggle title="Hide the browser’s typing history" help="Stops the list of things you typed before on login fields. Turn off if a site acts up."
+        checked={settings.suppressFormHistory} onChange={suppressFormHistory => save({ suppressFormHistory })} />
+    </section>
+  </>;
+}
+
+function BrowserAutofill() {
+  const api = browser as unknown as AutofillApi;
+  const [state, setState] = useState<AutofillState>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const reload = () => autofillState(api).then(setState, error => setError(errorMessage(error)));
+  useEffect(() => { void reload(); }, []);
+  async function run(change: (api: AutofillApi) => Promise<unknown>) {
+    setBusy(true); setError('');
+    try { await change(api); } catch (error) { setError(errorMessage(error)); }
+    await reload(); setBusy(false);
+  }
+  if (!state || state.kind === 'unsupported') return null;
+  const firefox = 'getBrowserInfo' in browser.runtime;
+  const handled = state.kind === 'granted' && state.settings.every(item => !item.enabled || item.control === 'not_controllable' || item.control === 'controlled_by_other_extensions');
+  const blocked = state.kind === 'granted' ? state.settings.filter(item => item.enabled && controlText[item.control]) : [];
+  return <section class="card browser-autofill"><h2>Browser</h2>
+    <Toggle title="Turn off the browser’s own password manager" help="Stops its save prompts and suggestions on the same fields. Undone when you switch this off or remove Boltwarden."
+      checked={handled} disabled={busy} onChange={enable => void run(enable ? suppressBrowserAutofill : restoreBrowserAutofill)} />
+    {blocked.map(item => <p class="detail" key={item.key}>{item.label}: {controlText[item.control]}.</p>)}
+    {firefox && <details class="hint"><summary>Firefox still shows things you typed before?</summary>
+      <p>That list (with clock icons) is Firefox’s form history. Extensions can’t switch it off. Open <code>about:preferences#privacy</code>, under History choose “Use custom settings for history”, and untick “Remember search and form history”.</p></details>}
+    {error && <p role="alert" class="notice error">{error}</p>}
+  </section>;
+}
+
 function App({ options }: { options: boolean }) {
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const favicon = useTabFavicon();
+  useEffect(() => watchSettings(browser.storage, next => { applyTheme(document.documentElement, next.theme); setSettings(next); }), []);
   const [pending, setPending] = useState<PendingSaveSummary[]>([]);
   const [state, setState] = useState<UiState>();
   const [page, setPage] = useState<UiPage>();
@@ -250,7 +367,7 @@ function App({ options }: { options: boolean }) {
           aria-controls="matching-logins" aria-describedby="search-scope" />
         <span id="search-scope" class="visually-hidden">Filters names and usernames among loaded matches for this page.</span>
         <span class="count" aria-label={`${rows.length} matching logins`}>{busy ? <span class="spinner" /> : page ? rows.length : ''}</span>
-      </> : <h1>{options ? 'Browser connection' : 'Boltwarden'}</h1>}
+      </> : <h1>{options ? 'Boltwarden settings' : 'Boltwarden'}</h1>}
     </header>
 
     <div class="body" aria-busy={busy}>
@@ -278,7 +395,10 @@ function App({ options }: { options: boolean }) {
         {connection?.state === 'unpaired' && <section class="empty-state pairing"><div class="state-icon"><span class="brand-mark" /></div><h2>Pair this browser</h2><p>Compare this fingerprint with the request in Boltwarden desktop.</p><code class="fingerprint">{state?.fingerprint || 'Loading fingerprint…'}</code>
           <button disabled={busy || !state?.fingerprint} onClick={() => void action('pair')}>Pair with Boltwarden</button></section>}
         {connection?.state === 'locked' && <section class="empty-state"><div class="state-icon"><Symbol name="lock" /></div><h2>Vault locked</h2><p>Unlock in Boltwarden desktop to see matching logins.</p><button disabled={busy} onClick={() => void action('unlock')}>Unlock desktop vault</button></section>}
-        {ready && options && <section class="connection-details"><h2>This browser is paired</h2><p>Press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> on a login form. If more than one login matches, choose it from the toolbar popup.</p><p>Manage or revoke paired browsers in Boltwarden desktop settings.</p><h3>Browser fingerprint</h3><code class="fingerprint">{state?.fingerprint}</code></section>}
+        {ready && options && <section class="card connection"><h2>Connection</h2>
+          <p><strong>Paired with Boltwarden desktop.</strong> You can revoke it there anytime.</p>
+          <p>Tip: press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> on any login form to fill.</p>
+          <details class="hint"><summary>Browser fingerprint</summary><code class="fingerprint">{state?.fingerprint}</code></details></section>}
         {ready && !options && filled && <section class="empty-state" role="status"><div class="state-icon success"><Symbol name="check" /></div><h2>Filled</h2><p>You can return to the page.</p></section>}
         {ready && !options && !page && !filled && <section class="empty-state">{operation === 'loading' ? <><span class="spinner large" /><h2>Finding matching logins…</h2></> : operation === 'filling' ? <div class="state-icon"><Symbol name="lock" /></div> : <><div class="state-icon"><Symbol name="key" /></div><h2>Choose a login to fill</h2><p>Refresh to check this page again.</p></>}</section>}
         {page && ready && <section id="matching-logins" aria-label="Matching logins">
@@ -292,7 +412,7 @@ function App({ options }: { options: boolean }) {
               return <button id={`login-${encodeURIComponent(key)}`} class={`login${selected ? ' selected' : ''}`} key={item.id} disabled={busy}
                 aria-label={`${item.name || 'Unnamed login'}, ${item.username || 'No username'}${item.reprompt ? ', master password required' : ''}${item.requires_confirmation ? ', insecure page, confirmation required' : ''}`}
                 onFocus={() => setSelected(key)} onMouseEnter={() => setSelected(key)} onClick={() => void fill(row)}>
-                <Symbol name="key" /><span class="item-text"><strong>{item.name || 'Unnamed login'}</strong><span class="username">{item.username || 'No username'}</span></span>
+                <SiteIcon name={item.name} url={favicon?.origin === frame.origin ? favicon.url : undefined} /><span class="item-text"><strong>{item.name || 'Unnamed login'}</strong><span class="username">{item.username || 'No username'}</span></span>
                 {item.reprompt && <span class="row-hint" title="Master password required"><Symbol name="lock" /></span>}
                 {(item.requires_confirmation || frame.crossOrigin) && <span class="row-hint caution" title="Destination confirmation required"><Symbol name="warning" /></span>}
                 {selected && <span class="enter-hint" aria-hidden="true">↵</span>}
@@ -301,8 +421,14 @@ function App({ options }: { options: boolean }) {
             {frame.more && <button class="more secondary" disabled={busy} onClick={() => void more(frame)}>{frame.kind === 'card' ? 'Load more cards' : 'Load more matching logins'}</button>}
           </section>)}
         </section>}
-        {options && <section class="connection-details"><h2>Version</h2><p>Extension version: {browser.runtime.getManifest().version}</p><p>Browser integration API: v{PROTOCOL_VERSION}</p></section>}
-        {options && <section class="connection-details help"><h2>Using this extension</h2><p>The popup shows matching logins or your saved cards when a payment field is selected. Card numbers are masked until you choose a card to fill on an HTTPS page. Filtering narrows the loaded items.</p><p>Selected credentials are sent to the page when you fill. Passwords you submit can be sent to Boltwarden for saving after desktop approval. Pending saves stay in browser session storage until saved, discarded, or the browser session ends.</p><p><a href="/privacy.html" target="_blank" rel="noreferrer">Privacy and data handling</a></p><h3>Desktop setup</h3><p>Run <code>boltwarden install-browser</code>, start Boltwarden, and enable browser integration in desktop settings.</p></section>}
+        {options && <Settings settings={settings} />}
+        {options && <details class="card about"><summary>Help, privacy, and version</summary>
+          <p>The popup shows matching logins, or your saved cards when a payment field is selected. Card numbers stay masked until you choose a card on an HTTPS page.</p>
+          <p>Selected credentials are sent to the page when you fill. Passwords you submit can be sent to Boltwarden for saving after desktop approval. Pending saves stay in browser session storage until saved, discarded, or the browser session ends.</p>
+          <p>Desktop setup: run <code>boltwarden install-browser</code>, start Boltwarden, and turn on browser integration in desktop settings.</p>
+          <p><a href="/privacy.html" target="_blank" rel="noreferrer">Privacy and data handling</a></p>
+          <p class="detail">Extension {browser.runtime.getManifest().version} · Browser integration API v{PROTOCOL_VERSION}</p>
+        </details>}
       </>}
     </div>
 

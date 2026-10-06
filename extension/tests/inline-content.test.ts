@@ -11,7 +11,7 @@ vi.mock('wxt/browser', () => ({ browser: { runtime: { connect: () => ({
   onMessage: { addListener(fn: typeof harness.message) { harness.message = fn; } }, onDisconnect: { addListener(fn: typeof harness.disconnected) { harness.disconnected = fn; } },
 }) } } }));
 vi.mock('../lib/inline', () => ({ createInlineController: (_doc: Document, options: InlineOptions) => { harness.options = options; return {
-  reset() { options.release(); }, state() {}, destroy() { options.release(); },
+  reset() { options.release(); }, state() {}, configure() {}, hold() {}, destroy() { options.release(); },
 }; } }));
 function form() {
   const parent = document.createElement('form'); parent.innerHTML = '<input autocomplete="username"><input type="password">'; document.body.append(parent);

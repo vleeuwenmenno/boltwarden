@@ -1,3 +1,4 @@
+import { autocompleteOf } from './autocomplete';
 /** Generate locally; passwords are never sent to the background or vault here. */
 import { passwordWords } from './password-words';
 export interface GeneratorOptions { type: 'random' | 'memorable' | 'pin'; length: number; numbers: boolean; symbols: boolean }
@@ -8,9 +9,9 @@ function pick(size: number): number {
   do { crypto.getRandomValues(value); } while (value[0]! >= limit);
   const result = value[0]! % size; value.fill(0); return result;
 }
-const fresh = (input: HTMLInputElement) => input.autocomplete.split(/\s+/).includes('new-password')
+const fresh = (input: HTMLInputElement) => autocompleteOf(input).split(/\s+/).includes('new-password')
   || /new[-_ ]?password|confirm|repeat|retype/i.test(`${input.name} ${input.id}`);
-const old = (input: HTMLInputElement) => input.autocomplete.split(/\s+/).includes('current-password')
+const old = (input: HTMLInputElement) => autocompleteOf(input).split(/\s+/).includes('current-password')
   || /current|old[-_ ]?password/i.test(`${input.name} ${input.id}`);
 
 function editable(input: HTMLInputElement): boolean {
@@ -65,11 +66,11 @@ export function generatePassword(fields: HTMLInputElement[], options?: Generator
 
 export function fillGeneratedPassword(input: HTMLInputElement, fields: HTMLInputElement[], password: string,
   stillCurrent: () => boolean, visible = editable) {
-  const shapes = fields.map(field => ({ type: field.type, autocomplete: field.autocomplete, min: field.minLength, max: field.maxLength }));
+  const shapes = fields.map(field => ({ type: field.type, autocomplete: autocompleteOf(field), min: field.minLength, max: field.maxLength }));
   for (const [index, field] of fields.entries()) {
     const current = newPasswordFields(input, visible), shape = shapes[index]!;
     if (!stillCurrent() || !current || current.length !== fields.length || current.some((value, i) => value !== fields[i])
-      || !field.isConnected || field.type !== shape.type || field.autocomplete !== shape.autocomplete
+      || !field.isConnected || field.type !== shape.type || autocompleteOf(field) !== shape.autocomplete
       || field.minLength !== shape.min || field.maxLength !== shape.max
       || (field.maxLength >= 0 && password.length > field.maxLength) || password.length < field.minLength) throw new Error('The password form changed. Choose the field again.');
     const setter = Object.getOwnPropertyDescriptor(field.ownerDocument.defaultView!.HTMLInputElement.prototype, 'value')?.set;

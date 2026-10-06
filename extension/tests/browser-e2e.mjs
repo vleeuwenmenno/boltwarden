@@ -173,7 +173,7 @@ try {
   assert(messages.some(message => message.type === 'Cancel'), 'Navigation should cancel the native operation');
   const optionsTarget = await send('Target.createTarget', { url: `chrome-extension://${identities.chrome_id}/options.html` });
   const optionsSession = await attach(optionsTarget.targetId);
-  await until(async () => (await text(optionsSession)).includes('This browser is paired'), 'Connection settings');
+  await until(async () => (await text(optionsSession)).includes('Paired with Boltwarden desktop'), 'Settings page');
   await screenshot(optionsSession, 'options');
   console.log('Chromium e2e passed: real pairing proof, live lock/unlock, popup fill, search/keyboard picker, explicit risk confirmation, same-origin navigation cancellation.');
 } catch (error) {

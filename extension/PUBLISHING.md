@@ -34,6 +34,19 @@ and does not cover every WebAuthn option.
 - `webNavigation`: binds requests to current documents and cancels navigation races.
 - `webRequest`: checks HTTPS response Permissions-Policy for passkey eligibility;
   it is not used for advertising, tracking, or modifying traffic.
+- `privacy` (optional): requested only when the user chooses "Let Boltwarden handle
+  autofill" in the options page. Turns off the browser's own password saving and,
+  in Chrome, address and credit card autofill so they do not compete with Boltwarden
+  on the same fields. Settings controlled by policy or another extension are left
+  alone; "Restore browser autofill" or removing the extension reverts them.
+- `clipboardWrite` (optional): requested only when the user turns on "Copy the
+  verification code after filling a login" (off by default). After a login fill, the
+  current 2FA code for that login is copied once; nothing is read from the clipboard.
+- `alarms` (no install warning): wipes a copied verification code from the clipboard
+  after the delay the user chose (30 seconds by default, at most 5 minutes), even if
+  the background was suspended meanwhile.
+- `offscreen` (Chrome only, no install warning): Chrome's service worker has no DOM,
+  so that copy runs in a short-lived offscreen page that is closed right after.
 - HTTP/HTTPS host access: finds login fields and supports filling/saving across
   sites. HTTP or cross-origin filling needs confirmation; passkeys require HTTPS.
 

@@ -9,7 +9,7 @@ const h = vi.hoisted(() => {
     webRequest: { onBeforeRequest: event(), onHeadersReceived: event(), onBeforeRedirect: event(), onErrorOccurred: event() },
     webNavigation: { onBeforeNavigate: event(), onErrorOccurred: event(), onCommitted: event(), onCompleted: event(), onDOMContentLoaded: event(), onHistoryStateUpdated: event(), onReferenceFragmentUpdated: event(), getFrame: vi.fn() },
     tabs: { sendMessage: vi.fn(), query: vi.fn(), get: vi.fn(), onRemoved: event(), onActivated: event() },
-    windows: { onFocusChanged: event(), WINDOW_ID_NONE: -1 }, commands: { onCommand: event() },
+    windows: { onFocusChanged: event(), WINDOW_ID_NONE: -1 }, commands: { onCommand: event() }, alarms: { onAlarm: event(), create: vi.fn(async () => {}) },
   };
   const native = { snapshot: { state: 'ready', epoch: 1 }, connect: vi.fn(async () => {}), refreshStatus: vi.fn(async () => {}), request: vi.fn(), pair: vi.fn(), onChange: (_snapshot: any, _event?: any) => {} };
   return { browser, native, event };

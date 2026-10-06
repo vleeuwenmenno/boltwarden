@@ -105,3 +105,15 @@ it('does not resurrect discarded credentials during a concurrent save', async ()
   expect(await create().list()).toHaveLength(1);
   expect(JSON.stringify(await storage.get())).not.toContain(login.password);
 });
+it('says nothing when the vault already had the submitted login', async () => {
+  const { queue, native, notice } = fixture('ready');
+  native.request.mockResolvedValueOnce({ type: 'LoginSaved', saved: false });
+  await queue.add(1, 'https://example.test/login', 'document', login);
+  await vi.waitFor(async () => expect(await queue.list()).toHaveLength(0));
+  expect(notice).not.toHaveBeenCalledWith(expect.anything(), 'Password saved in Boltwarden.');
+});
+it('confirms a real save', async () => {
+  const { queue, notice } = fixture('ready');
+  await queue.add(1, 'https://example.test/login', 'document', login);
+  await vi.waitFor(() => expect(notice).toHaveBeenCalledWith(expect.anything(), 'Password saved in Boltwarden.'));
+});

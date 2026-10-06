@@ -2,10 +2,11 @@ import { fillCard } from '../lib/cards';
 import { isCard, clearCard } from '../lib/protocol';
 import { defineContentScript } from 'wxt/utils/define-content-script';
 import { browser } from 'wxt/browser';
-import { activeInput, autofillForms, fillForm, fillOtp, formContains, formKind, sameForm, selectForm, visibleInput, type LoginForm } from '../lib/forms';
+import { activeInput, autofillForms, fillForm, fillOtp, submitFilled, watchPasswordStep, formContains, formKind, sameForm, selectForm, visibleInput, type LoginForm } from '../lib/forms';
 import { installPasswordCapture, saveNotice } from '../lib/password-capture';
 import { createInlineController } from '../lib/inline';
 import type { InlineAction, InlineValue } from '../lib/inline-types';
+import { DEFAULT_SETTINGS, watchSettings } from '../lib/settings';
 
 export default defineContentScript({
   matches: ['http://*/*', 'https://*/*'],
@@ -20,6 +21,9 @@ export default defineContentScript({
     let reconnect: number | undefined;
     let suspended = false;
     let inline: ReturnType<typeof createInlineController> | undefined;
+    let settings = DEFAULT_SETTINGS;
+    let stopPasswordStep: (() => void) | undefined;
+    ctx.onInvalidated(watchSettings(browser.storage, next => { settings = next; inline?.configure(next); }));
     const pending = new Map<string, { generation: string; resolve(value: InlineValue): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
     const failPending = () => {
       for (const request of pending.values()) { clearTimeout(request.timer); request.reject(new Error('The page or browser connection changed. Try again.')); }
@@ -36,6 +40,29 @@ export default defineContentScript({
       try { port.postMessage({ type: 'inline-request', id, generation, action, ...fields }); }
       catch { clearTimeout(timer); pending.delete(id); reject(new Error('Boltwarden is not connected to this page.')); }
     });
+    // Give page handlers a moment to react to the filled values, then submit unless the page
+    // already did (many code forms submit after the last digit; a second submit would reuse
+    // the code) or the form went away.
+    // Code forms often verify by themselves after the last digit (sometimes with fetch, so no
+    // submit event): give them longer and skip if the fields were cleared or locked meanwhile.
+    // One box per digit almost always submits itself, so those are left to the page.
+    const submitSoon = (form: LoginForm, delay = 50, submitted_?: () => void) => {
+      if (form.otp && form.otp.length > 1) { console.info('[Boltwarden] Auto-submit: skipped: code boxes submit themselves'); return; }
+      if (form.otp) delay = Math.max(delay, 700);
+      const codeBefore = form.otp?.map(field => field.value).join('');
+      let submitted = false;
+      const mark = () => { submitted = true; };
+      const options = { capture: true, once: true };
+      document.addEventListener('submit', mark, options); window.addEventListener('beforeunload', mark, options); window.addEventListener('pagehide', mark, options);
+      setTimeout(() => {
+        document.removeEventListener('submit', mark, options); window.removeEventListener('beforeunload', mark, options); window.removeEventListener('pagehide', mark, options);
+        const codeChanged = form.otp && (form.otp.map(field => field.value).join('') !== codeBefore || form.otp.some(field => field.disabled || field.readOnly));
+        const method = submitted ? 'skipped: page already submitted' : codeChanged ? 'skipped: page is handling the code'
+          : !autofillForms(document).some(candidate => sameForm(candidate, form)) ? 'skipped: form changed' : submitFilled(form) || 'skipped: not safe or nothing to submit';
+        console.info('[Boltwarden] Auto-submit:', method);
+        if (!method.startsWith('skipped')) submitted_?.();
+      }, delay);
+    };
     const createInline = () => {
       if (inline || ctx.isInvalid || suspended) return;
       inline = createInlineController(document, {
@@ -49,6 +76,7 @@ export default defineContentScript({
         request,
         release() { inlinePin = undefined; },
       });
+      inline.configure(settings);
     };
 
     const connect = () => {
@@ -106,6 +134,21 @@ export default defineContentScript({
             } else {
               if (message.kind === 'totp' || message.kind === 'card' || typeof message.username !== 'string' || typeof message.password !== 'string') throw new Error('Expected login credentials.');
               fillForm(target.form, message.username, message.password, visibleInput, current);
+              // Username-only step: submit it, then fill and submit the password when it appears.
+              stopPasswordStep?.(); stopPasswordStep = undefined;
+            }
+            const submit = message.submit === true && !target.form.card;
+            inline?.hold(submit ? 3000 : 1000);
+            if (submit) {
+              const form = target.form, password = typeof message.password === 'string' ? message.password : '';
+              // Username-only step: once it was submitted, fill and submit the password when it appears.
+              const next = !form.password && form.username && password ? () => {
+                inline?.hold(16_000);
+                stopPasswordStep = watchPasswordStep(document, form.username!, password, step => {
+                  console.info('[Boltwarden] Password step: filled'); submitSoon(step, 300);
+                });
+              } : undefined;
+              submitSoon(form, 50, next);
             }
             if (isInline) inline?.reset();
             connection.postMessage({ type: 'filled', id: message.id, generation });
@@ -124,6 +167,7 @@ export default defineContentScript({
     };
 
     const stop = () => {
+      stopPasswordStep?.(); stopPasswordStep = undefined;
       suspended = true; clearTimeout(reconnect); selected = undefined; inlinePin = undefined; generation = ''; failPending();
       inline?.destroy(); inline = undefined;
       const old = port; port = undefined; old?.disconnect();

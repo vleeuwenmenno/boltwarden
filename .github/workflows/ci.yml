@@ -208,6 +208,23 @@ jobs:
             dist/boltwarden-browser-*-sources.zip
             dist/boltwarden-browser-*-sources.zip.sha256
           if-no-files-found: error
+  # The single check branch protection requires. Jobs skipped by path routing report under
+  # other names (a skipped matrix job never reports its matrix names), so requiring them
+  # directly leaves pull requests waiting forever. Skipped counts as passed; a failed or
+  # cancelled job fails this check.
+  ci-result:
+    name: CI result
+    if: always()
+    needs: [changes, security, linux, windows, extensions]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Fail when a needed job failed or was cancelled
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Job results: $RESULTS"
+          case " $RESULTS " in *" failure "*|*" cancelled "*) exit 1 ;; esac
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [security, linux, windows]

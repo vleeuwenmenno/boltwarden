@@ -127,6 +127,10 @@ try {
   await click(panel.session, 'Pair with Boltwarden');
   await until(async () => (await text(panel.session)).includes('Test login'), 'Paired match list');
   assert(existsSync(join(directory, 'pairing.json')), 'Native host verified pairing proof');
+  // These checks drive the menu explicitly (icon, ArrowDown); the automatic opening and
+  // submitting defaults are covered at the end.
+  const setSettings = (session, settings) => evaluate(session, `chrome.storage.local.set({ settings: ${JSON.stringify(settings)} }).then(() => true)`);
+  await setSettings(panel.session, { autoOpen: false, autoSubmit: false });
   await send('Target.closeTarget', { targetId: panel.target.targetId });
   // Keep pairing storage, but restart the extension background. No toolbar warm-up.
   await send('ServiceWorker.enable', {}, websiteSession);
@@ -256,7 +260,16 @@ try {
   const confirmationPopup = await until(async () => (await send('Target.getTargets')).targetInfos.find(target => target.url === `chrome-extension://${identities.chrome_id}/popup.html`), 'HTTP toolbar popup');
   assert.equal(await calls('FillLogin'), beforeHttp, 'HTTP inline choice must not directly release credentials');
   await send('Target.closeTarget', { targetId: confirmationPopup.targetId });
-  console.log(`${process.env.CHROMIUM_BIN ?? 'chromium'} inline e2e passed: trusted keyboard fill, email fields, dynamic forms, open shadow roots, synthetic-event refusal, field/frame focus-change cancellation, HTTP toolbar handoff.`);
+
+  // Default behaviour: a click in a login field opens the menu by itself, with nothing selected
+  // (Enter stays with the page) until the user picks a row.
+  await evaluate(workerSession, `chrome.storage.local.set({ settings: { autoOpen: true, autoSubmit: false } }).then(() => true)`);
+  await navigate('/single');
+  await clickField();
+  await until(async () => (await inlineText()).includes('Test login'), 'Automatic inline menu');
+  await delay(500);
+  await key(websiteSession, 'ArrowDown'); await key(websiteSession, 'Enter'); await checkFilled();
+  console.log(`${process.env.CHROMIUM_BIN ?? 'chromium'} inline e2e passed: trusted keyboard fill, email fields, dynamic forms, open shadow roots, synthetic-event refusal, field/frame focus-change cancellation, HTTP toolbar handoff, automatic menu on click.`);
 
 } catch (error) {
   console.error(log.join('').slice(-3000)); throw error;
