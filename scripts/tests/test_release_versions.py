@@ -11,10 +11,41 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
-from release_versions import desktop_artifact_names, extension_artifact_names, package_versions
+from release_versions import (desktop_artifact_names, extension_artifact_names, package_versions,
+                              set_version, tag_version)
 
 
 class ReleaseVersionsTests(unittest.TestCase):
+    def test_tag_names_the_release_version(self):
+        self.assertEqual(tag_version('v1.0.0-rc.3'), '1.0.0-rc.3')
+        self.assertEqual(tag_version('v2.0.0'), '2.0.0')
+        for tag in ('1.0.0', 'v1.0', 'v1.0.0-rc.0', 'v1.0.0-beta.1'):
+            with self.assertRaises(ValueError, msg=tag):
+                tag_version(tag)
+
+    def test_set_version_stamps_manifest_and_lockfile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copy(ROOT / 'Cargo.toml', root)
+            shutil.copy(ROOT / 'Cargo.lock', root)
+            set_version(root, '9.8.7-rc.6')
+            manifest = tomllib.loads((root / 'Cargo.toml').read_text())
+            self.assertEqual(manifest['package']['version'], '9.8.7-rc.6')
+            lock = tomllib.loads((root / 'Cargo.lock').read_text())
+            versions = {p['name']: p['version'] for p in lock['package']}
+            self.assertEqual(versions['boltwarden'], '9.8.7-rc.6')
+            # Only the boltwarden entries change.
+            original = tomllib.loads((ROOT / 'Cargo.lock').read_text())
+            self.assertEqual(
+                [p for p in lock['package'] if p['name'] != 'boltwarden'],
+                [p for p in original['package'] if p['name'] != 'boltwarden'],
+            )
+            self.assertEqual(
+                {k: v for k, v in manifest.items() if k != 'package'},
+                {k: v for k, v in tomllib.loads((ROOT / 'Cargo.toml').read_text()).items()
+                 if k != 'package'},
+            )
+
     def test_release_names_use_only_github_safe_characters(self):
         names = desktop_artifact_names('1.0.0-rc.1') + extension_artifact_names('0.5.6')
         self.assertIn('boltwarden_1.0.0-rc.1_amd64.deb', names)

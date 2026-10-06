@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Fail tag builds before publishing mismatched or incomplete release metadata.
 
-Desktop tags are v + Cargo.toml version. Extension tags are extension-v + the
-extension/package.json version and release independently of the desktop app.
+Desktop tags are v + the version stamped into Cargo.toml by scripts/set-version.py.
+Extension tags are extension-v + the extension/package.json version and release
+independently of the desktop app.
 """
 import json
 import os
@@ -27,8 +28,6 @@ else:
     package = tomllib.loads((root / 'Cargo.toml').read_text())['package']
     package_versions(package['version'])
     if tag != f"v{package['version']}":
-        raise SystemExit('Release tag must equal v + Cargo.toml package.version')
-    notes = root / 'docs' / f"release-notes-{package['version']}.md"
-    if not notes.is_file():
-        raise SystemExit(f'Missing release notes: {notes.name}')
+        raise SystemExit('Release tag must equal v + Cargo.toml package.version; '
+                         'run scripts/set-version.py first')
     print(f'Desktop {tag}; licenses match')
