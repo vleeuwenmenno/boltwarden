@@ -52,10 +52,11 @@ eframe = { version = "0.36", default-features = false, features = ["wgpu_no_defa
 wgpu = { version = "30.0", default-features = false, features = ["metal", "std", "wgsl"] }
 libc = "0.2"
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSString"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSDate", "NSObjCRuntime", "NSRunLoop", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSPasteboard", "NSResponder", "NSRunningApplication"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFDictionary", "CFNumber", "CFString"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEventSource", "CGEventTypes", "CGSession"] }
+tray-icon = { version = "0.26", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 eframe = { version = "0.36", default-features = false, features = ["wgpu_no_default_features"] }

@@ -252,7 +252,7 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
     if show_on_start {
         show_popup(&popup, rpc_socket.as_ref());
     }
-    while let Ok(command) = rx.recv() {
+    while let Ok(command) = next_daemon_command(&rx) {
         match command {
             DaemonCommand::Show => show_popup(&popup, rpc_socket.as_ref()),
             DaemonCommand::Hide => hide_popup(&popup),
@@ -277,6 +277,20 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
     }
 
     Ok(())
+}
+
+/// macOS delivers menu bar clicks on the main thread, so it keeps handling them while waiting.
+fn next_daemon_command(
+    rx: &mpsc::Receiver<DaemonCommand>,
+) -> Result<DaemonCommand, mpsc::RecvError> {
+    #[cfg(target_os = "macos")]
+    {
+        tray::recv(rx)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        rx.recv()
+    }
 }
 
 fn start_auto_lock_monitor(vault: Arc<Mutex<VaultState>>) {
