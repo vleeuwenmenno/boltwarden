@@ -1,0 +1,76 @@
+---
+interface Props {
+  name: string; // file stem under /img, with a matching `-light` variant
+  width: number;
+  height: number;
+  alt: string;
+  eager?: boolean;
+}
+const { name, width, height, alt, eager = false } = Astro.props;
+---
+<div class="shot" style={`aspect-ratio: ${width} / ${height}; max-width: ${width}px;`}>
+  <img class="dark" src={`/img/${name}.png`} {width} {height} {alt} loading={eager ? 'eager' : 'lazy'} />
+  <img class="light" src={`/img/${name}-light.png`} {width} {height} alt="" aria-hidden="true" loading={eager ? 'eager' : 'lazy'} />
+</div>
+
+<script>
+  // All screenshots swap together: a diagonal wipe, top-left to bottom-right, then back.
+  const HOLD_MS = 4200;
+  const SWEEP_MS = 1400;
+  const root = document.documentElement;
+
+  if (!matchMedia('(prefers-reduced-motion: reduce)').matches && document.querySelector('.shot')) {
+    root.dataset.shots = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    setInterval(() => {
+      if (document.hidden) return;
+      root.classList.add('sweeping');
+      root.dataset.shots = root.dataset.shots === 'light' ? 'dark' : 'light';
+      setTimeout(() => root.classList.remove('sweeping'), SWEEP_MS);
+    }, HOLD_MS + SWEEP_MS);
+  }
+</script>
+
+<style is:global>
+  @property --p {
+    syntax: '<number>';
+    inherits: true;
+    initial-value: 0;
+  }
+  .shot {
+    --p: 0; /* 0 = dark shown, 100 = light shown */
+    position: relative;
+    margin: 0 auto;
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, .3);
+    transition: --p 1.4s cubic-bezier(.65, 0, .35, 1);
+  }
+  .shot img { display: block; width: 100%; height: 100%; object-fit: cover; }
+  .shot .light {
+    position: absolute;
+    inset: 0;
+    -webkit-mask-image: linear-gradient(135deg, #000 calc(var(--p) * 1%), transparent calc(var(--p) * 1% + .4%));
+    mask-image: linear-gradient(135deg, #000 calc(var(--p) * 1%), transparent calc(var(--p) * 1% + .4%));
+  }
+  /* A glowing edge rides the wipe. */
+  .shot::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, transparent calc(var(--p) * 1% - 2.5%), var(--accent) calc(var(--p) * 1%), transparent calc(var(--p) * 1% + 1%));
+    opacity: 0;
+    transition: opacity .3s;
+    pointer-events: none;
+    mix-blend-mode: screen;
+  }
+  :root.sweeping .shot::after { opacity: .7; }
+  :root[data-shots='light'] .shot { --p: 100; }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-shots]) .shot { --p: 100; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .shot { transition: none; }
+  }
+</style>

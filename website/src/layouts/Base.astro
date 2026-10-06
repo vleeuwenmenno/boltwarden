@@ -1,0 +1,65 @@
+---
+interface Props {
+  title: string;
+  description: string;
+}
+const { title, description } = Astro.props;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content={new URL('/img/vault.png', Astro.site)} />
+    <meta name="color-scheme" content="dark light" />
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>
+
+<style is:global>
+  :root {
+    --bg: #13141c;
+    --surface: #1a1b26;
+    --border: #2b2d40;
+    --text: #c0caf5;
+    --muted: #8b93b8;
+    --accent: #9d7cf5;
+    --accent-strong: #7c3aed;
+    --on-accent: #fff;
+    --radius: 12px;
+    --max: 1080px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f6fb;
+      --surface: #fff;
+      --border: #dcdce8;
+      --text: #1d1e2c;
+      --muted: #55587a;
+      --accent: #6d28d9;
+      --accent-strong: #6d28d9;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.6 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  }
+  a { color: var(--accent); }
+  img { max-width: 100%; height: auto; display: block; }
+  .wrap { max-width: var(--max); margin: 0 auto; padding: 0 20px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+</style>

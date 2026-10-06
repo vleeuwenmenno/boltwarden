@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Decide which CI job groups a change needs, to save runner minutes.
 
-Prints `desktop=true|false` and `extension=true|false` lines for $GITHUB_OUTPUT.
+Prints `desktop=`, `extension=` and `website=` (`true|false`) lines for $GITHUB_OUTPUT.
 Usage: ci-changes.py [BASE_SHA]. Without a usable base, everything runs.
 """
 import re
@@ -12,34 +12,38 @@ import sys
 DESKTOP_SHARED = re.compile(r'extension/(public/|protocol/|lib/browser-identities\.json$)')
 # Files that only affect the extension build.
 EXTENSION_ONLY = re.compile(r'extension/|packaging/Dockerfile\.extension$|scripts/third-party-notices\.py$')
+WEBSITE = re.compile(r'website/')
 DOCS_ONLY = re.compile(r'docs/|[^/]+\.md$')
 EVERYTHING = re.compile(r'\.github/|LICENSE$')
 
 
 def classify(paths):
-    desktop = extension = False
+    desktop = extension = website = False
     for path in paths:
         if EVERYTHING.match(path):
-            return True, True
-        if DOCS_ONLY.match(path):
+            return True, True, True
+        if WEBSITE.match(path):
+            website = True
+        elif DOCS_ONLY.match(path):
             continue
-        if EXTENSION_ONLY.match(path):
+        elif EXTENSION_ONLY.match(path):
             extension = True
             desktop = desktop or bool(DESKTOP_SHARED.match(path))
         else:
             desktop = True
-    return desktop, extension
+    return desktop, extension, website
 
 
 def main():
     base = sys.argv[1] if len(sys.argv) > 1 else ''
-    desktop = extension = True
+    desktop = extension = website = True
     if base and not set(base) <= {'0'}:
         diff = subprocess.run(['git', 'diff', '--name-only', base, 'HEAD'], capture_output=True, text=True)
         if diff.returncode == 0:
-            desktop, extension = classify(diff.stdout.split())
+            desktop, extension, website = classify(diff.stdout.split())
     print(f'desktop={str(desktop).lower()}')
     print(f'extension={str(extension).lower()}')
+    print(f'website={str(website).lower()}')
 
 
 if __name__ == '__main__':
