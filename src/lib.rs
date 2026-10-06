@@ -157,6 +157,11 @@ pub fn run() -> eframe::Result<()> {
 }
 
 fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Result<()> {
+    std::thread::spawn(|| {
+        if let Err(error) = browser::install::repair_launcher() {
+            eprintln!("browser integration repair: {error}");
+        }
+    });
     let (tx, rx) = mpsc::channel();
     let (shortcut_tx, shortcut_rx) = mpsc::channel();
     shortcut::start(shortcut_tx);

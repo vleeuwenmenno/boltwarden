@@ -6,10 +6,11 @@ if [ "$(id -u)" -eq 0 ]; then
     exit 1
 fi
 case "${1:-}" in
-    --enable-service) enable=yes ;;
+    --enable-service) enable=yes; register=no ;;
+    --register-browsers) enable=skip; register=yes ;;
     --help|-h)
-        echo 'Usage: boltwarden-setup [--enable-service]'
-        echo 'Offers to enable Boltwarden at graphical login for the current user.'
+        echo 'Usage: boltwarden-setup [--enable-service] [--register-browsers]'
+        echo 'Offers to enable Boltwarden at graphical login and to register detected browsers.'
         exit 0 ;;
     '')
         if [ ! -t 0 ]; then
@@ -17,7 +18,9 @@ case "${1:-}" in
             exit 2
         fi
         printf 'Start Boltwarden at graphical login for your user? [y/N] '
-        read -r enable ;;
+        read -r enable
+        printf 'Connect detected browsers to Boltwarden (installs the native messaging host)? [y/N] '
+        read -r register ;;
     *) echo 'Unknown option. Use --help.' >&2; exit 2 ;;
 esac
 case "$enable" in
@@ -25,5 +28,11 @@ case "$enable" in
         systemctl --user daemon-reload
         systemctl --user enable --now boltwarden.service
         echo 'Boltwarden user service enabled.' ;;
+    skip) ;;
     *) echo 'Autostart left unchanged. Start manually with: boltwarden --daemon' ;;
+esac
+case "$register" in
+    y|Y|yes|YES)
+        /usr/bin/boltwarden install-browser --detected --path /usr/bin/boltwarden
+        echo 'Next: enable Browser integration in Boltwarden Settings, then pair from the extension.' ;;
 esac

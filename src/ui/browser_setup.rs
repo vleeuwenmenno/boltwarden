@@ -296,10 +296,11 @@ pub fn draw_browser_setup(ui: &mut Ui, state: &mut BrowserSetupState) {
         .show(ui, |ui| {
             ui.add_enabled_ui(!busy, |ui| {
                 for (index, row) in state.rows.iter().enumerate() {
-                    let description = if row.registered {
-                        "Extension connection installed"
-                    } else {
-                        "Extension connection not installed"
+                    let description = match (row.registered, state.selected[index]) {
+                        (true, true) => "Extension connection installed",
+                        (false, false) => "Extension connection not installed",
+                        (false, true) => "Will be installed when you click Apply",
+                        (true, false) => "Will be removed when you click Apply",
                     };
                     let response = widgets::toggle_row(
                         ui,
