@@ -10,19 +10,21 @@ classify = SourceFileLoader('ci_changes', str(Path(__file__).resolve().parents[1
 class CiChangesTests(unittest.TestCase):
     def test_routing(self):
         cases = [
-            (['src/vault.rs'], (True, False)),
-            (['extension/entrypoints/content.ts'], (False, True)),
-            (['extension/protocol/fixtures/list-matches.json'], (True, True)),
-            (['extension/lib/browser-identities.json'], (True, True)),
-            (['extension/lib/other.ts'], (False, True)),
-            (['docs/releasing.md', 'README.md'], (False, False)),
-            (['.github/workflows/ci.yml'], (True, True)),
-            (['LICENSE'], (True, True)),
-            (['extension/package.json', 'Cargo.lock'], (True, True)),
-            (['docs/screenshots/a.png', 'docs/badges/b.svg'], (False, False)),
-            (['PRIVACY.md', 'SECURITY.md'], (False, False)),
-            (['docs/releasing.md', 'src/main.rs'], (True, False)),
-            ([], (False, False)),
+            (['src/vault.rs'], (True, False, False)),
+            (['extension/entrypoints/content.ts'], (False, True, False)),
+            (['extension/protocol/fixtures/list-matches.json'], (True, True, False)),
+            (['extension/lib/browser-identities.json'], (True, True, False)),
+            (['extension/lib/other.ts'], (False, True, False)),
+            (['docs/releasing.md', 'README.md'], (False, False, False)),
+            (['.github/workflows/ci.yml'], (True, True, True)),
+            (['LICENSE'], (True, True, True)),
+            (['extension/package.json', 'Cargo.lock'], (True, True, False)),
+            (['docs/screenshots/a.png', 'docs/badges/b.svg'], (False, False, False)),
+            (['website/src/pages/index.astro', 'website/Dockerfile'], (False, False, True)),
+            (['PRIVACY.md', 'SECURITY.md'], (False, False, False)),
+            (['docs/releasing.md', 'src/main.rs'], (True, False, False)),
+            (['website/src/a.astro', 'src/main.rs'], (True, False, True)),
+            ([], (False, False, False)),
         ]
         for paths, expected in cases:
             with self.subTest(paths=paths):

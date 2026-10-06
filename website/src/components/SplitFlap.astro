@@ -1,0 +1,139 @@
+---
+interface Props {
+  words: string[];
+}
+const { words } = Astro.props;
+const columns = Math.max(...words.map((w) => w.length));
+const first = words[0].toUpperCase();
+const pad = (word: string) => word.padEnd(columns, ' ');
+const initial = [...pad(first)];
+---
+<span class="board" aria-hidden="true" data-words={JSON.stringify(words.map((w) => pad(w.toUpperCase())))}>
+  {initial.map((ch) => (
+    <span class={`cell${ch === ' ' ? ' blank' : ''}`}>
+      <span class="half top"><span>{ch}</span></span>
+      <span class="half bottom"><span>{ch}</span></span>
+      <span class="half flap-top"><span>{ch}</span></span>
+      <span class="half flap-bottom"><span>{ch}</span></span>
+    </span>
+  ))}
+</span>
+
+<script>
+  const CHARS = ' ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const STEP_MS = 45;
+  const HOLD_MS = 3200;
+  const board = document.querySelector<HTMLElement>('.board');
+
+  if (board && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    const words: string[] = JSON.parse(board.dataset.words ?? '[]');
+    const cells = [...board.querySelectorAll<HTMLElement>('.cell')].map((cell) => ({
+      el: cell,
+      top: cell.querySelector<HTMLElement>('.top span')!,
+      bottom: cell.querySelector<HTMLElement>('.bottom span')!,
+      flapTop: cell.querySelector<HTMLElement>('.flap-top span')!,
+      flapBottom: cell.querySelector<HTMLElement>('.flap-bottom span')!,
+      char: cell.querySelector<HTMLElement>('.top span')!.textContent ?? ' ',
+    }));
+
+    const flipTo = (cell: (typeof cells)[number], next: string) => {
+      const old = cell.char;
+      cell.top.textContent = next;
+      cell.flapTop.textContent = old;
+      cell.flapBottom.textContent = next;
+      cell.el.classList.remove('flipping');
+      void cell.el.offsetWidth; // restart the animation
+      cell.el.classList.add('flipping');
+      setTimeout(() => {
+        cell.bottom.textContent = next;
+        cell.el.classList.toggle('blank', next === ' ');
+      }, STEP_MS);
+      cell.char = next;
+    };
+
+    const settle = (cell: (typeof cells)[number], target: string, delay: number) => {
+      const tick = () => {
+        if (cell.char === target) return;
+        const at = CHARS.indexOf(cell.char);
+        flipTo(cell, CHARS[(at + 1) % CHARS.length]);
+        setTimeout(tick, STEP_MS);
+      };
+      setTimeout(tick, delay);
+    };
+
+    let current = 0;
+    setInterval(() => {
+      current = (current + 1) % words.length;
+      cells.forEach((cell, i) => settle(cell, words[current][i], i * 70));
+    }, HOLD_MS);
+  }
+</script>
+
+<style>
+  .board {
+    display: inline-flex;
+    gap: .05em;
+    padding: .14em;
+    vertical-align: middle;
+    background: #0d0e14;
+    border-radius: .16em;
+    box-shadow: 0 .1em .4em rgba(0, 0, 0, .35), inset 0 0 0 .02em #23253a;
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    font-weight: 700;
+    font-size: .86em;
+    line-height: 1;
+    perspective: 600px;
+  }
+  .cell {
+    position: relative;
+    display: block;
+    width: .64em;
+    height: 1.1em;
+    color: #f5f1e6;
+  }
+  .cell::after { /* the seam between the two flaps */
+    content: '';
+    position: absolute;
+    inset: 50% 0 auto;
+    height: .025em;
+    margin-top: -.0125em;
+    background: rgba(0, 0, 0, .75);
+    z-index: 5;
+  }
+  .blank::after { opacity: 0; }
+  .half {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 50%;
+    overflow: hidden;
+    background: #1a1c28;
+    backface-visibility: hidden;
+  }
+  .blank .half { background: transparent; }
+  .half > span {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 200%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .top, .flap-top { top: 0; border-radius: .07em .07em 0 0; }
+  .bottom, .flap-bottom { bottom: 0; border-radius: 0 0 .07em .07em; background: #151722; }
+  .blank .bottom, .blank .flap-bottom { background: transparent; }
+  .bottom > span, .flap-bottom > span { bottom: 0; }
+  .flap-top { transform-origin: bottom; z-index: 3; visibility: hidden; }
+  .flap-bottom { transform-origin: top; z-index: 3; visibility: hidden; transform: rotateX(90deg); }
+  .flipping .flap-top { animation: fall .045s ease-in forwards; }
+  .flipping .flap-bottom { animation: rise .045s ease-out .045s forwards; }
+  @keyframes fall {
+    from { visibility: visible; transform: rotateX(0); }
+    to { visibility: visible; transform: rotateX(-90deg); }
+  }
+  @keyframes rise {
+    from { visibility: visible; transform: rotateX(90deg); }
+    to { visibility: visible; transform: rotateX(0); }
+  }
+</style>

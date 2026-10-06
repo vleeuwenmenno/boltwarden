@@ -48,3 +48,12 @@ versions must remain numeric; do not copy a desktop RC suffix into them.
 GitHub release ZIPs do not publish extensions to browser stores. Chrome Web Store
 submission and Firefox submission/signing remain separate steps. Packaging RPMs
 also does not create a DNF/YUM update repository.
+
+## Website
+
+The landing page lives in `website/` (Astro) and is independent of desktop and extension
+releases. Its CI job is routed by path in `scripts/ci-changes.py`: it builds the image on
+pull requests, and pushes `ghcr.io/vleeuwenmenno/boltwarden-website` from `main`. No tag or
+version is involved. The server (dotfiles repo) pulls `:latest`, and download links read
+GitHub releases in the browser, so a release never requires a site change. Run it locally
+with `cd website && npm run dev`.

@@ -1,0 +1,339 @@
+---
+import Base from '../layouts/Base.astro';
+import SplitFlap from '../components/SplitFlap.astro';
+import Shot from '../components/Shot.astro';
+
+const repo = 'https://github.com/vleeuwenmenno/boltwarden';
+const releases = `${repo}/releases`;
+
+const features = [
+  ['Quick access', 'Open a popup from a keyboard shortcut or tray icon, search, and copy the field you need.'],
+  ['Full vault window', 'Browse and edit logins, notes, cards, and identities in a dedicated desktop window.'],
+  ['Browser autofill', 'Fill logins, verification codes, and cards in Chrome/Chromium and Firefox, using the desktop unlock.'],
+  ['SSH agent', 'Authenticate with SSH keys from your vault, with desktop approval before every signature.'],
+  ['Passkeys', 'Create and use passkeys on supported sites, stored in your own vault.'],
+  ['Great on Omarchy', 'Works very well on Omarchy and Hyprland. One click in Settings adds the quick access keybinding to your Hyprland config, with a backup.'],
+  ['Offline access', 'Unlock an encrypted local cache when your server is unreachable.'],
+];
+
+const downloads = [
+  ['Linux', 'x86_64 and ARM64: tarball, .deb, Arch package, and Fedora RPM.'],
+  ['Windows 11', 'x64 preview: installer or ZIP. Unsigned.'],
+];
+---
+<Base
+  title="Boltwarden: desktop app for Vaultwarden and Bitwarden"
+  description="A free, unofficial desktop app for Vaultwarden and Bitwarden vaults with quick access, browser autofill, and an SSH agent. Linux and Windows."
+>
+  <header class="wrap nav">
+    <a class="brand" href="/">
+      <img src="/favicon.svg" alt="" width="28" height="28" />
+      Boltwarden
+    </a>
+    <nav aria-label="Main">
+      <a href="#features">Features</a>
+      <a href="#download">Download</a>
+      <a href={repo}>GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="wrap hero">
+      <p class="pill">Free, forever · Unofficial</p>
+      <h1>
+        <span class="sr-only">Boltwarden: your Vaultwarden or Bitwarden vault on your desktop.</span>
+        <SplitFlap words={['Boltwarden', 'Vaultwarden', 'Bitwarden']} />
+        <span aria-hidden="true" class="tail">on your desktop</span>
+      </h1>
+      <p class="lead">
+        Unlock once and your browser is unlocked too. Search from a keyboard shortcut, autofill in your browser, and use vault SSH keys.
+        Works with Vaultwarden and Bitwarden servers. No account with us, no subscription, no tracking.
+      </p>
+      <p class="cta">
+        <a class="btn primary" href="#download">Download</a>
+        <a class="btn" href={repo}>View source</a>
+      </p>
+      <Shot
+        name="vault"
+        width={1200}
+        height={900}
+        eager
+        alt="Boltwarden vault window showing folders, a login with a verification code, and a passkey. Fictional demo data."
+      />
+    </section>
+
+    <section class="wrap section highlight">
+      <p class="eyebrow">Unlock once</p>
+      <h2>One vault. One unlock. Desktop and browser.</h2>
+      <p class="lead-sm">
+        The browser extension talks to the desktop app instead of running its own vault. Unlock
+        Boltwarden and your browser is unlocked too. Lock it, and both lock together.
+      </p>
+      <ol class="steps">
+        <li><strong>Unlock the desktop app.</strong> Your vault lives there and nowhere else.</li>
+        <li><strong>Pair each browser profile once.</strong> You approve it on the desktop.</li>
+        <li><strong>Autofill just works.</strong> Logins, codes, cards, and passkeys, with nothing stored or unlocked separately in the browser.</li>
+      </ol>
+    </section>
+
+    <section id="features" class="wrap section">
+      <h2>Built for your desktop</h2>
+      <ul class="grid">
+        {features.map(([name, text]) => (
+          <li>
+            <h3>{name}</h3>
+            <p>{text}</p>
+          </li>
+        ))}
+      </ul>
+    </section>
+
+    <section class="wrap section split">
+      <div>
+        <h2>Quick access</h2>
+        <p>Hit your shortcut, type a few letters, copy the password or code. Gone again in seconds.</p>
+      </div>
+      <Shot
+        name="quick-access"
+        width={680}
+        height={460}
+        alt="Quick access popup searching fictional GitHub, GitLab, and Gitea entries."
+      />
+    </section>
+
+    <section class="wrap section split reverse">
+      <div>
+        <h2>Vault health</h2>
+        <p>The action center flags weak and reused passwords and suggests account security fixes.</p>
+      </div>
+      <Shot
+        name="action-center"
+        width={1200}
+        height={1120}
+        alt="Action center listing weak and reused passwords in a fictional demo vault."
+      />
+    </section>
+
+    <section id="download" class="wrap section">
+      <h2>Download</h2>
+      <p class="note">
+        <strong>1.0.0 release candidates are for testing.</strong> Passkeys are experimental and
+        browser ZIPs are unsigned developer builds.
+      </p>
+      <div id="dl" hidden>
+        <p><a id="dl-primary" class="btn primary" href={releases}>Download</a> <span id="dl-meta" class="muted"></span></p>
+        <div id="dl-groups" class="dl-groups"></div>
+      </div>
+      <ul class="grid two" id="dl-fallback">
+        {downloads.map(([name, text]) => (
+          <li>
+            <h3>{name}</h3>
+            <p>{text}</p>
+          </li>
+        ))}
+      </ul>
+      <p id="dl-all"><a class="btn" href={releases}>All releases on GitHub</a></p>
+      <p class="muted">Every file ships with a SHA-256 checksum.</p>
+
+      <h3>Browser extension</h3>
+      <p>Requires the desktop app.</p>
+      <p class="badges">
+        <a href="https://addons.mozilla.org/en-US/firefox/addon/boltwarden/">
+          <img src="/img/firefox-addon.svg" width="172" height="60" alt="Get Boltwarden for Firefox" />
+        </a>
+        <a href="https://chromewebstore.google.com/detail/pomlcbogekpcooppkmjhdjalddakgmlo">
+          <img src="/img/chrome-web-store.svg" width="206" height="60" alt="Get Boltwarden from the Chrome Web Store" />
+        </a>
+      </p>
+    </section>
+
+    <section class="wrap section">
+      <h2>Free, and staying free</h2>
+      <p>
+        Boltwarden is a hobby project with no paid tier, no ads, and no telemetry. The source is
+        public under MIT with Commons Clause: use it, modify it, run it at work, but don't sell it.
+        Read the <a href={`${repo}/blob/main/PRIVACY.md`}>privacy policy</a> and the
+        <a href={`${repo}/blob/main/SECURITY.md`}>security policy</a>.
+      </p>
+    </section>
+  </main>
+
+  <footer class="wrap footer">
+    <p>
+      Boltwarden is an independent community project. It is not affiliated with, endorsed by, or
+      sponsored by Bitwarden, Inc. or the Vaultwarden project. "Bitwarden" is a trademark of
+      Bitwarden, Inc.; both names are used only to describe compatibility.
+    </p>
+    <p>
+      <a href={repo}>GitHub</a> ·
+      <a href={`${repo}/blob/main/LICENSE`}>License</a> ·
+      <a href={`${repo}/blob/main/PRIVACY.md`}>Privacy</a> ·
+      <a href={`${repo}/blob/main/SECURITY.md`}>Security</a>
+    </p>
+  </footer>
+</Base>
+
+<script>
+  const API = 'https://api.github.com/repos/vleeuwenmenno/boltwarden/releases?per_page=30';
+  const CACHE_KEY = 'bw-releases-v1';
+  const CACHE_MS = 10 * 60 * 1000;
+
+  type Asset = { name: string; size: number; browser_download_url: string };
+  type Release = { tag_name: string; prerelease: boolean; draft: boolean; html_url: string; assets: Asset[] };
+
+  const FORMATS: [string, RegExp][] = [
+    ['Debian / Ubuntu (.deb)', /\.deb$/],
+    ['Fedora (.rpm)', /\.rpm$/],
+    ['Arch (.pkg.tar.zst)', /\.pkg\.tar\.zst$/],
+    ['Tarball (.tar.gz)', /-linux\.tar\.gz$/],
+  ];
+  const isArm = (n: string) => /aarch64|arm64/.test(n);
+
+  const load = async (): Promise<Release[]> => {
+    try {
+      const hit = JSON.parse(localStorage.getItem(CACHE_KEY) ?? 'null');
+      if (hit && Date.now() - hit.at < CACHE_MS) return hit.data;
+    } catch {}
+    const res = await fetch(API, { headers: { Accept: 'application/vnd.github+json' } });
+    if (!res.ok) throw new Error(String(res.status));
+    const data: Release[] = await res.json();
+    try {
+      localStorage.setItem(CACHE_KEY, JSON.stringify({ at: Date.now(), data }));
+    } catch {}
+    return data;
+  };
+
+  const mb = (n: number) => `${(n / 1048576).toFixed(1)} MB`;
+  const link = (a: Asset, label: string) => {
+    const el = document.createElement('a');
+    el.href = a.browser_download_url;
+    el.textContent = `${label} · ${mb(a.size)}`;
+    return el;
+  };
+  const group = (title: string, assets: Asset[], labels: string[]) => {
+    const box = document.createElement('div');
+    box.className = 'dl-group';
+    const h = document.createElement('h4');
+    h.textContent = title;
+    box.append(h);
+    const ul = document.createElement('ul');
+    assets.forEach((a, i) => {
+      const li = document.createElement('li');
+      li.append(link(a, labels[i]));
+      ul.append(li);
+    });
+    box.append(ul);
+    return box;
+  };
+
+  const run = async () => {
+    const root = document.getElementById('dl');
+    if (!root) return;
+    const release = (await load()).find((r) => !r.draft && /^v\d/.test(r.tag_name));
+    if (!release) return;
+    const files = release.assets.filter((a) => !a.name.endsWith('.sha256'));
+
+    const groups = document.getElementById('dl-groups')!;
+    for (const [title, arm] of [['Linux x86_64', false], ['Linux ARM64', true]] as const) {
+      const picked: Asset[] = [];
+      const labels: string[] = [];
+      for (const [label, re] of FORMATS) {
+        const a = files.find((f) => re.test(f.name) && isArm(f.name) === arm);
+        if (a) { picked.push(a); labels.push(label); }
+      }
+      if (picked.length) groups.append(group(title, picked, labels));
+    }
+    const win: Asset[] = [];
+    const winLabels: string[] = [];
+    const setup = files.find((f) => /windows-setup\.exe$/.test(f.name));
+    const zip = files.find((f) => /windows\.zip$/.test(f.name));
+    if (setup) { win.push(setup); winLabels.push('Installer (.exe)'); }
+    if (zip) { win.push(zip); winLabels.push('Portable (.zip)'); }
+    if (win.length) groups.append(group('Windows 11 x64 (preview)', win, winLabels));
+
+    const ua = navigator.userAgent;
+    const primary = document.getElementById('dl-primary') as HTMLAnchorElement;
+    let pick: Asset | undefined;
+    let label = '';
+    if (/Windows/i.test(ua)) {
+      pick = setup;
+      label = 'Windows';
+    } else if (/Linux|X11/i.test(ua) && !/Android/i.test(ua)) {
+      const arm = /aarch64|arm/i.test(ua);
+      pick = files.find((f) => /-linux\.tar\.gz$/.test(f.name) && isArm(f.name) === arm);
+      label = arm ? 'Linux ARM64' : 'Linux x86_64';
+    }
+    if (pick) {
+      primary.href = pick.browser_download_url;
+      primary.textContent = `Download for ${label}`;
+    } else {
+      primary.textContent = 'Download';
+      primary.href = release.html_url;
+    }
+    document.getElementById('dl-meta')!.textContent =
+      `${release.tag_name}${release.prerelease ? ' (pre-release)' : ''}`;
+
+    root.hidden = false;
+    document.getElementById('dl-fallback')?.remove();
+  };
+
+  run().catch(() => {});
+</script>
+
+<style>
+  .nav { display: flex; align-items: center; justify-content: space-between; padding-top: 20px; padding-bottom: 20px; }
+  .brand { display: flex; align-items: center; gap: 10px; color: var(--text); font-weight: 700; font-size: 1.15rem; text-decoration: none; }
+  .brand img { color: var(--accent); }
+  nav a { margin-left: 20px; color: var(--muted); text-decoration: none; }
+  nav a:hover { color: var(--text); }
+
+  .hero { text-align: center; padding-top: 56px; padding-bottom: 40px; }
+  .pill { display: inline-block; margin: 0 0 20px; padding: 4px 14px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: .875rem; }
+  h1 { font-size: clamp(1.9rem, 5.2vw, 3.25rem); line-height: 1.25; margin: 0 auto 20px; letter-spacing: -.02em; display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: .2em .35em; }
+  .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .lead { max-width: 60ch; margin: 0 auto 28px; color: var(--muted); font-size: 1.125rem; }
+  .cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin: 0 0 48px; }
+  .btn { display: inline-block; padding: 10px 22px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); text-decoration: none; font-weight: 600; background: var(--surface); }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent-strong); border-color: var(--accent-strong); color: var(--on-accent); }
+  .btn.primary:hover { filter: brightness(1.1); }
+  .shot { margin: 0 auto; border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 24px 60px rgba(0, 0, 0, .35); }
+
+  .section { padding-top: 48px; padding-bottom: 48px; }
+  .highlight { margin-top: 24px; padding: 40px 32px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); border-top: 3px solid var(--accent); }
+  .eyebrow { margin: 0 0 8px; color: var(--accent); font-weight: 700; font-size: .85rem; letter-spacing: .08em; text-transform: uppercase; }
+  .lead-sm { max-width: 62ch; color: var(--muted); margin: 0 0 24px; font-size: 1.05rem; }
+  .steps { margin: 0; padding: 0; list-style: none; counter-reset: step; display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+  .steps li { counter-increment: step; color: var(--muted); }
+  .steps li::before { content: counter(step); display: grid; place-items: center; width: 28px; height: 28px; margin-bottom: 10px; border-radius: 50%; background: var(--accent-strong); color: var(--on-accent); font-weight: 700; font-size: .9rem; }
+  .steps strong { display: block; color: var(--text); margin-bottom: 4px; }
+  h2 { font-size: 1.75rem; margin: 0 0 16px; letter-spacing: -.01em; }
+  h3 { margin: 0 0 6px; font-size: 1.05rem; }
+  .grid { list-style: none; margin: 0 0 24px; padding: 0; display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  .grid.two { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .grid li { padding: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+  .grid p { margin: 0; color: var(--muted); }
+
+  .split { display: grid; gap: 32px; align-items: center; grid-template-columns: 1fr 1.2fr; }
+  .split img { border: 1px solid var(--border); border-radius: var(--radius); }
+  .split.reverse > div { order: 2; }
+  .split.reverse img { max-height: 420px; width: auto; justify-self: start; }
+  .split p { color: var(--muted); }
+
+  .note { padding: 12px 16px; border-left: 3px solid var(--accent); background: var(--surface); border-radius: 0 8px 8px 0; }
+  .muted { color: var(--muted); font-size: .9rem; }
+  .dl-groups { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin: 16px 0 24px; }
+  :global(.dl-group) { padding: 16px 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+  :global(.dl-group h4) { margin: 0 0 8px; font-size: 1rem; }
+  :global(.dl-group ul) { margin: 0; padding: 0; list-style: none; }
+  :global(.dl-group li) { padding: 3px 0; }
+  .badges { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+
+  .footer { padding-top: 32px; padding-bottom: 48px; border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem; }
+
+  @media (max-width: 720px) {
+    .split, .split.reverse { grid-template-columns: 1fr; }
+    .split.reverse > div { order: 0; }
+    nav a { margin-left: 14px; }
+  }
+</style>

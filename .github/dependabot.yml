@@ -29,3 +29,15 @@ updates:
     directory: /packaging
     schedule:
       interval: weekly
+  - package-ecosystem: npm
+    directory: /website
+    schedule:
+      interval: weekly
+    groups:
+      compatible-website:
+        patterns: ['*']
+        update-types: [minor, patch]
+  - package-ecosystem: docker
+    directory: /website
+    schedule:
+      interval: weekly

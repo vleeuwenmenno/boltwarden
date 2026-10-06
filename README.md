@@ -29,7 +29,7 @@ The browser extension requires the Boltwarden desktop app.
   or browse and edit your vault in a dedicated desktop window.
 - **Browser autofill** — fill logins, verification codes, and credit cards in
   Chrome/Chromium and Firefox using your desktop vault.
-- **Passkeys (experimental)** — create and use passkeys on supported websites,
+- **Passkeys** — create and use passkeys on supported websites,
   stored in your Bitwarden or Vaultwarden vault.
 - **SSH agent** — authenticate with SSH keys from your vault, with desktop approval
   before signing.
@@ -946,3 +946,10 @@ Boltwarden is source-available under [MIT with Commons Clause v1.0](LICENSE).
 Internal business use is permitted; selling products or services based substantially
 on Boltwarden is restricted. Forks and distributions must retain Menno van Leeuwen’s
 copyright notice and the complete license. Third-party dependencies keep their own licenses.
+
+## Disclaimer
+
+Boltwarden is an independent, community project. It is not affiliated with,
+endorsed by, or sponsored by Bitwarden, Inc. or the Vaultwarden project.
+"Bitwarden" is a trademark of Bitwarden, Inc.; "Vaultwarden" is the name of an
+independent open-source server. Both names are used only to describe compatibility.
