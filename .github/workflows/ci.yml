@@ -34,7 +34,9 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: python3 scripts/check-release.py
+        run: |
+          python3 scripts/set-version.py
+          python3 scripts/check-release.py
   linux:
     strategy:
       fail-fast: false
@@ -50,6 +52,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Set version from release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 scripts/set-version.py
       - name: Test and build distribution packages
         run: |
           docker buildx build --file packaging/Dockerfile \
@@ -82,6 +89,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Set version from release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/set-version.py
       - name: Install Rust tools
         run: rustup toolchain install 1.98.1 --profile minimal
       - name: Test Windows platform and shared vault behavior
@@ -174,9 +186,15 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          python3 scripts/set-version.py
           python3 scripts/check-release.py
           python3 scripts/check-release-artifacts.py dist
           version="${RELEASE_TAG#v}"
+          # Curated notes are optional; otherwise GitHub lists the merged pull requests.
+          notes=(--generate-notes)
+          if [ -f "docs/release-notes-${version}.md" ]; then
+            notes=(--notes-file "docs/release-notes-${version}.md")
+          fi
           prerelease=false
           flags=()
           if [[ "$version" == *-rc.* ]]; then
@@ -185,14 +203,18 @@ jobs:
           fi
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --verify-tag --draft "${flags[@]}" \
-              --title "Boltwarden $version" --notes-file "docs/release-notes-${version}.md"
+              --title "Boltwarden $version" "${notes[@]}"
           fi
           if [ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" != true ]; then
             echo "Refusing to replace assets of an already published release" >&2
             exit 1
           fi
+          edit_notes=()
+          if [ "${notes[0]}" = --notes-file ]; then
+            edit_notes=("${notes[@]}")
+          fi
           gh release edit "$RELEASE_TAG" --prerelease="$prerelease" \
-            --title "Boltwarden $version" --notes-file "docs/release-notes-${version}.md"
+            --title "Boltwarden $version" "${edit_notes[@]}"
           gh release upload "$RELEASE_TAG" dist/* --clobber
           gh release download "$RELEASE_TAG" --dir downloaded-release
           python3 scripts/check-release-artifacts.py downloaded-release

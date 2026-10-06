@@ -1,5 +1,6 @@
 """Map supported release versions to package-manager ordering conventions."""
 import re
+from pathlib import Path
 
 
 def package_versions(version):
@@ -23,3 +24,39 @@ def artifact_names(version, extension_version):
     names += [f'boltwarden-browser-{extension_version}-{browser}.zip' for browser in ('chrome', 'firefox', 'sources')]
     names += [f'boltwarden-{version}-x86_64-windows.zip', f'boltwarden-{version}-x86_64-windows-setup.exe']
     return names
+
+
+def tag_version(tag):
+    """The desktop version a release tag names, such as 1.0.0-rc.3 for v1.0.0-rc.3."""
+    if not tag.startswith('v'):
+        raise ValueError(f'Release tag must start with v: {tag}')
+    version = tag[1:]
+    package_versions(version)
+    return version
+
+
+def set_version(root, version):
+    """Stamp the desktop version into Cargo.toml and Cargo.lock of a build checkout."""
+    package_versions(version)
+    root = Path(root)
+    manifest = root / 'Cargo.toml'
+    text, count = re.subn(
+        r'(\[package\][^\[]*?^version = )"[^"]*"',
+        rf'\1"{version}"',
+        manifest.read_text(encoding='utf-8'),
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if count != 1:
+        raise ValueError('Cargo.toml has no [package] version')
+    manifest.write_text(text, encoding='utf-8')
+    lock = root / 'Cargo.lock'
+    text, count = re.subn(
+        r'(\[\[package\]\]\nname = "boltwarden"\nversion = )"[^"]*"',
+        rf'\1"{version}"',
+        lock.read_text(encoding='utf-8'),
+        count=1,
+    )
+    if count != 1:
+        raise ValueError('Cargo.lock has no boltwarden package entry')
+    lock.write_text(text, encoding='utf-8')
