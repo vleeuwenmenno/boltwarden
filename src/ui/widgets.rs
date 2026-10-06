@@ -95,6 +95,30 @@ pub fn paint_row_content(
     trailing: Option<&str>,
     selected: bool,
 ) {
+    paint_row_content_with_badge(
+        ui, rect, icon, image, title, secondary, None, trailing, selected,
+    );
+}
+
+/// A small rounded status label for list rows.
+pub struct RowBadge<'a> {
+    pub text: &'a str,
+    pub color: Color32,
+}
+
+/// Like [`paint_row_content`], with a status badge between the text and `trailing`.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_row_content_with_badge(
+    ui: &Ui,
+    rect: egui::Rect,
+    icon: &str,
+    image: Option<&egui::TextureHandle>,
+    title: &str,
+    secondary: Option<&str>,
+    badge: Option<RowBadge<'_>>,
+    trailing: Option<&str>,
+    selected: bool,
+) {
     let t = theme();
     let painter = ui.painter_at(rect);
     let title_color = if selected {
@@ -143,6 +167,24 @@ pub fn paint_row_content(
             width + 24.0
         })
         .unwrap_or(12.0);
+    let trailing_width = trailing_width
+        + badge
+            .map(|badge| {
+                let galley =
+                    painter.layout_no_wrap(badge.text.to_owned(), t.font(t.small()), badge.color);
+                let size = galley.size() + egui::vec2(16.0, 4.0);
+                let pill = egui::Rect::from_min_size(
+                    egui::pos2(
+                        rect.right() - trailing_width - size.x,
+                        rect.center().y - size.y / 2.0,
+                    ),
+                    size,
+                );
+                painter.rect_filled(pill, size.y / 2.0, badge.color.gamma_multiply(0.14));
+                painter.galley(pill.center() - galley.size() / 2.0, galley, badge.color);
+                size.x + 12.0
+            })
+            .unwrap_or(0.0);
 
     let max_width = (rect.right() - trailing_width - text_left).max(40.0);
     let mut job = egui::text::LayoutJob {

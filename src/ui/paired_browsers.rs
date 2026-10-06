@@ -213,16 +213,26 @@ pub fn draw_paired_browsers(
                     widgets::empty_state(ui, "", "Refresh to load paired browsers", false);
                 }
             }
+            let now = unix_now();
             ui.add_enabled_ui(!state.is_busy() && !state.has_confirmation(), |ui| {
                 for (index, record) in state.records.iter().enumerate() {
                     let (rect, response) = widgets::row(ui, index == selected, widgets::ROW_HEIGHT);
-                    widgets::paint_row_content(
+                    let status = status(record, now);
+                    widgets::paint_row_content_with_badge(
                         ui,
                         rect,
                         t.icon("\u{f26c}", "◎"),
                         None,
                         label(record),
                         Some(&short_fingerprint(&record.fingerprint)),
+                        status.as_deref().map(|text| widgets::RowBadge {
+                            text,
+                            color: if record.connected {
+                                t.success
+                            } else {
+                                t.text_muted
+                            },
+                        }),
                         Some("Revoke"),
                         index == selected,
                     );
@@ -232,9 +242,13 @@ pub fn draw_paired_browsers(
                             ui.is_enabled(),
                             index == selected,
                             format!(
-                                "{} · {} · Revoke browser access",
+                                "{} · {}{} · Revoke browser access",
                                 label(record),
-                                record.fingerprint
+                                record.fingerprint,
+                                status
+                                    .as_deref()
+                                    .map(|status| format!(" · {status}"))
+                                    .unwrap_or_default(),
                             ),
                         )
                     });
@@ -315,9 +329,33 @@ fn pairing_dates(record: &PairingRecord) -> String {
     let paired = format_timestamp(record.created_at).unwrap_or_else(|| "Unknown".into());
     let mut dates = format!("Paired {paired}");
     if let Some(seen) = format_timestamp(record.last_seen_at) {
-        dates.push_str(&format!("\nLast authenticated {seen}"));
+        dates.push_str(&format!("\nLast used {seen}"));
     }
     dates
+}
+
+/// Live connection wins; otherwise the age of the last recorded use, if known.
+fn status(record: &PairingRecord, now: u64) -> Option<String> {
+    if record.connected {
+        return Some("Connected".into());
+    }
+    if record.last_seen_at == 0 {
+        return None;
+    }
+    let age = now.saturating_sub(record.last_seen_at);
+    Some(match age {
+        0..60 => "Used just now".into(),
+        60..3_600 => format!("Used {}m ago", age / 60),
+        3_600..86_400 => format!("Used {}h ago", age / 3_600),
+        _ => format!("Used {}d ago", age / 86_400),
+    })
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn browser_name_unavailable(record: &PairingRecord) -> bool {
@@ -421,6 +459,7 @@ mod tests {
                     .into(),
             created_at: 1_759_276_800,
             last_seen_at: 1_759_363_260,
+            connected: false,
         }
     }
 
@@ -582,11 +621,7 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("Paired 1 Oct 2025, 00:00 UTC"))
         );
-        assert!(
-            texts
-                .iter()
-                .any(|text| text.contains("Last authenticated "))
-        );
+        assert!(texts.iter().any(|text| text.contains("Last used ")));
         assert!(
             !texts
                 .iter()
@@ -703,6 +738,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn rows_show_connection_or_last_use() {
+        let mut item = record("one");
+        let seen = item.last_seen_at;
+        assert_eq!(status(&item, seen + 30).as_deref(), Some("Used just now"));
+        assert_eq!(status(&item, seen + 300).as_deref(), Some("Used 5m ago"));
+        assert_eq!(status(&item, seen + 7_200).as_deref(), Some("Used 2h ago"));
+        assert_eq!(
+            status(&item, seen + 259_200).as_deref(),
+            Some("Used 3d ago")
+        );
+        assert_eq!(status(&item, seen - 10).as_deref(), Some("Used just now"));
+        item.last_seen_at = 0;
+        assert_eq!(status(&item, seen), None);
+        item.connected = true;
+        assert_eq!(status(&item, seen).as_deref(), Some("Connected"));
+
+        let ctx = egui::Context::default();
+        let mut state = loaded();
+        state.records[0].connected = true;
+        let (_, texts) = frame(&ctx, &mut state, vec![]);
+        assert!(texts.iter().any(|text| text == "Connected"));
+        assert!(texts.iter().any(|text| text.starts_with("Used ")));
     }
 
     #[test]

@@ -238,11 +238,22 @@ impl BrowserHub {
         Ok(Self { inner })
     }
     pub fn list_pairings(&self) -> Result<Vec<PairingRecord>, String> {
-        self.inner
+        let mut records = self
+            .inner
             .pairings
             .lock()
             .map(|p| p.list())
-            .map_err(|_| "Pairing store unavailable".into())
+            .map_err(|_| "Pairing store unavailable".to_string())?;
+        let connected: Vec<String> = self
+            .connections()
+            .into_iter()
+            .filter(|connection| !connection.closed.load(Ordering::Acquire))
+            .filter_map(|connection| connection.state.lock().ok()?.pairing_id.clone())
+            .collect();
+        for record in &mut records {
+            record.connected = connected.contains(&record.id);
+        }
+        Ok(records)
     }
     pub fn revoke(&self, id: &str) -> Result<(), String> {
         self.inner
@@ -561,11 +572,14 @@ fn read_loop(inner: &Arc<Inner>, connection: &Arc<Connection>, mut socket: UnixS
                     );
                     continue;
                 };
-                if inner
-                    .pairings
-                    .lock()
-                    .map_or(true, |p| p.get(pairing).is_none())
-                {
+                let known = inner.pairings.lock().is_ok_and(|mut p| {
+                    // Activity time is informational; a failed write never blocks the request.
+                    p.get(pairing).is_some() && {
+                        let _ = p.record_used(pairing);
+                        true
+                    }
+                });
+                if !known {
                     connection.close();
                     break;
                 }
@@ -1105,6 +1119,43 @@ mod tests {
             },
         );
         assert_eq!(replay["code"], "Unauthorized");
+    }
+
+    #[test]
+    fn listed_pairings_report_live_connections_and_recent_use() {
+        let mut h = Harness::new();
+        let (id, key) = h.pair();
+        assert!(h.hub.list_pairings().unwrap()[0].connected);
+        for connection in h.hub.connections() {
+            connection.close();
+        }
+        assert!(!h.hub.list_pairings().unwrap()[0].connected);
+
+        let path = h.directory.join("browsers.json");
+        let mut records = h.hub.list_pairings().unwrap();
+        records[0].last_seen_at = 1;
+        std::fs::write(&path, serde_json::to_vec(&records).unwrap()).unwrap();
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("connected")
+        );
+        *h.hub.inner.pairings.lock().unwrap() = PairingStore::load_at(path.clone()).unwrap();
+        let mut client = h.connect();
+        assert_eq!(
+            Harness::authenticate(&mut client, &id, &key)["type"],
+            "Authenticated"
+        );
+        let authenticated = h.hub.list_pairings().unwrap()[0].last_seen_at;
+        std::fs::write(&path, serde_json::to_vec(&records).unwrap()).unwrap();
+        *h.hub.inner.pairings.lock().unwrap() = PairingStore::load_at(path.clone()).unwrap();
+        assert_eq!(
+            Harness::request_on(&mut client, "status", BrowserRequest::Status)["type"],
+            "Status"
+        );
+        let record = h.hub.list_pairings().unwrap().remove(0);
+        assert!(record.connected);
+        assert!(record.last_seen_at >= authenticated);
     }
 
     #[test]
