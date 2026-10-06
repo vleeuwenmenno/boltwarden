@@ -246,6 +246,10 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
         if let Err(error) = apply_browser_settings(&mut state) {
             eprintln!("browser integration: {error}");
         }
+        // Also moves the agent to this executable after the app was moved.
+        if let Err(error) = apply_login_item(&config::load_settings()) {
+            eprintln!("{error}");
+        }
         apply_ssh_agent_settings(&mut state);
     }
 
@@ -832,6 +836,7 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
             let result = config::save_settings(&settings)
                 .map_err(|e| e.to_string())
                 .and_then(|_| apply_browser_settings(&mut state))
+                .and_then(|_| apply_login_item(&settings))
                 .and_then(|_| state.bw.apply_offline_setting().map_err(|e| e.to_string()))
                 .map(|_| apply_ssh_agent_settings(&mut state));
             RpcResponse::SettingsApplied(result)
@@ -1054,6 +1059,20 @@ fn apply_browser_settings(state: &mut VaultState) -> Result<(), String> {
         state.browser_enabled = true;
     }
     Ok(())
+}
+
+/// Starts the daemon at login when the setting asks for it; macOS only for now.
+fn apply_login_item(settings: &config::AppSettings) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        platform::login_item::apply(settings.start_at_login)
+            .map_err(|error| format!("Start at login: {error}"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = settings;
+        Ok(())
+    }
 }
 
 /// Turning on browser integration registers the detected browsers, unless the user already

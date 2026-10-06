@@ -659,6 +659,7 @@ impl WindowApp {
         use crate::ui::search::SearchAction;
         self.refresh_settings(true);
         match action {
+            SearchAction::SetStartAtLogin(value) => self.settings.start_at_login = value,
             SearchAction::SetStartList(value) => {
                 self.settings.start_list = value;
                 if value != config::StartList::RecentlyUsed && !crate::demo::enabled() {

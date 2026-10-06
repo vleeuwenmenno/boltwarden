@@ -110,6 +110,9 @@ pub struct AppSettings {
     pub obscure_screen_capture: bool,
     #[serde(default)]
     pub start_list: StartList,
+    /// Open the daemon in the menu bar at login (macOS LaunchAgent).
+    #[serde(default)]
+    pub start_at_login: bool,
 }
 
 impl Default for AppSettings {
@@ -130,6 +133,7 @@ impl Default for AppSettings {
             show_website_icons: true,
             obscure_screen_capture: true,
             start_list: StartList::None,
+            start_at_login: false,
         }
     }
 }

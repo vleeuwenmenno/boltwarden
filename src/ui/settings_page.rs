@@ -5,8 +5,8 @@ use crate::config::{AppSettings, PasskeyVerification, StartList};
 use crate::model::SshAgentStatus;
 use crate::ui::search::{
     self, BROWSER_SETUP_ROW, DEFAULT_URI_MATCH_ROW, IDLE_TIMEOUT_ROW, PAIRED_BROWSERS_ROW,
-    PASSKEY_VERIFICATION_ROW, SCREEN_CAPTURE_ROW, SETTING_TEXT, SHORTCUT_ROW, START_LIST_ROW,
-    SearchAction, SearchState, SettingsGroup,
+    PASSKEY_VERIFICATION_ROW, SCREEN_CAPTURE_ROW, SETTING_TEXT, SHORTCUT_ROW, START_AT_LOGIN_ROW,
+    START_LIST_ROW, SearchAction, SearchState, SettingsGroup,
 };
 use crate::ui::{theme::theme, widgets};
 use crate::uri_match::UriMatchType;
@@ -290,6 +290,18 @@ pub fn draw_page(
         };
         match group {
             SettingsGroup::General => {
+                if search::row_supported(START_AT_LOGIN_ROW) {
+                    section(ui, "Startup");
+                    take(switch(
+                        ui,
+                        state,
+                        settings,
+                        START_AT_LOGIN_ROW,
+                        settings.start_at_login,
+                        true,
+                        None,
+                    ));
+                }
                 section(ui, "Quick access");
                 take(switch(
                     ui,

@@ -9,7 +9,11 @@ use egui::{Context, RichText, Ui};
 
 const SEARCH_INPUT_ID: &str = "vault-search-input";
 const SSH_PATH_INPUT_ID: &str = "settings-ssh-socket-path";
-const SETTINGS_ROWS: usize = 17;
+const SETTINGS_ROWS: usize = 18;
+/// Shown on macOS only; other platforms start at login through their packages.
+pub(crate) const START_AT_LOGIN_ROW: usize = 17;
+/// Rows 0 to 10 except the start list are plain switches, drawn from one table.
+const TOGGLE_ROWS: usize = 10;
 pub(crate) const SHORTCUT_ROW: usize = 16;
 pub(crate) const ACKNOWLEDGEMENTS_ROW: usize = 15;
 pub(crate) const BROWSER_SETUP_ROW: usize = 14;
@@ -86,10 +90,22 @@ pub(crate) const SETTING_TEXT: [(&str, &str); SETTINGS_ROWS] = [
         "Quick access shortcut",
         "Global keyboard shortcut to show or hide quick access",
     ),
+    (
+        "Start at login",
+        "Open Boltwarden in the menu bar when you log in",
+    ),
 ];
+
+/// Rows this platform offers; the others are hidden and skipped by the keyboard.
+pub(crate) fn row_supported(row: usize) -> bool {
+    row != START_AT_LOGIN_ROW || cfg!(target_os = "macos")
+}
 
 /// Whether every word of `query` appears in the row's title or description.
 fn setting_matches(row: usize, query: &str) -> bool {
+    if !row_supported(row) {
+        return false;
+    }
     let Some((title, description)) = SETTING_TEXT.get(row) else {
         return false;
     };
@@ -113,6 +129,9 @@ impl SettingsGroup {
     /// The category's rows in display order, which keyboard selection follows.
     pub(crate) fn rows(self) -> &'static [usize] {
         match self {
+            Self::General if cfg!(target_os = "macos") => {
+                &[START_AT_LOGIN_ROW, 1, 2, START_LIST_ROW, SHORTCUT_ROW, 0, 4]
+            }
             Self::General => &[1, 2, START_LIST_ROW, SHORTCUT_ROW, 0, 4],
             Self::Security => &[6, IDLE_TIMEOUT_ROW, 9, SCREEN_CAPTURE_ROW],
             Self::Browser => &[
@@ -1361,6 +1380,9 @@ pub(crate) fn toggle_setting(row: usize, settings: &AppSettings) -> Option<Searc
         PASSKEY_VERIFICATION_ROW => {
             SearchAction::SetPasskeyVerification(settings.passkey_verification.next())
         }
+        START_AT_LOGIN_ROW if row_supported(START_AT_LOGIN_ROW) => {
+            SearchAction::SetStartAtLogin(!settings.start_at_login)
+        }
         _ => return None,
     })
 }
@@ -1386,7 +1408,7 @@ pub fn draw_settings(
         state.settings_scrolled_to = None;
     }
     // The start list row (a choice, not a toggle) is drawn separately at START_LIST_ROW.
-    let rows: [(bool, &str, &str); SETTINGS_ROWS - 7] = [
+    let rows: [(bool, &str, &str); TOGGLE_ROWS] = [
         (
             settings.show_keyboard_shortcuts,
             "Show keyboard shortcuts",
@@ -1617,6 +1639,25 @@ pub fn draw_settings(
                     action = Some(SearchAction::OpenAcknowledgements);
                 }
             }
+            if visible(START_AT_LOGIN_ROW) {
+                let response = widgets::toggle_row(
+                    ui,
+                    state.settings_selected == START_AT_LOGIN_ROW,
+                    settings.start_at_login,
+                    SETTING_TEXT[START_AT_LOGIN_ROW].0,
+                    SETTING_TEXT[START_AT_LOGIN_ROW].1,
+                );
+                if state.settings_selected == START_AT_LOGIN_ROW
+                    && state.settings_scrolled_to != Some(START_AT_LOGIN_ROW)
+                {
+                    response.scroll_to_me(None);
+                    state.settings_scrolled_to = Some(START_AT_LOGIN_ROW);
+                }
+                if response.clicked() {
+                    state.settings_selected = START_AT_LOGIN_ROW;
+                    action = toggle_setting(START_AT_LOGIN_ROW, settings);
+                }
+            }
             if visible(SHORTCUT_ROW) {
                 let response = state
                     .shortcut_setup
@@ -1741,6 +1782,7 @@ pub enum SearchAction {
     SetSshAgentEnabled(bool),
     SetSshAgentSocketPath(String),
     SetStartList(StartList),
+    SetStartAtLogin(bool),
     SetBrowserIntegrationEnabled(bool),
     SetDefaultUriMatch(crate::uri_match::UriMatchType),
     SetPasskeyVerification(PasskeyVerification),
@@ -1943,9 +1985,14 @@ mod tests {
             }
             (state.settings_selected, offset)
         };
+        let rows = (0..SETTINGS_ROWS).filter(|row| row_supported(*row)).count();
+        let last = (0..SETTINGS_ROWS)
+            .rev()
+            .find(|row| row_supported(*row))
+            .unwrap();
         assert_eq!(frame(None), (0, 0.0));
         let (selected, bottom) = frame(Some(egui::Key::ArrowUp));
-        assert_eq!(selected, SETTINGS_ROWS - 1);
+        assert_eq!(selected, last);
         assert!(
             bottom > 200.,
             "last setting must scroll into view: {bottom}"
@@ -1956,12 +2003,12 @@ mod tests {
             top < 1.,
             "wrapping to first setting must scroll back: {top}"
         );
-        for _ in 0..SETTINGS_ROWS - 1 {
+        for _ in 0..rows - 1 {
             frame(Some(egui::Key::ArrowDown));
         }
         let (_, offset) = frame(Some(egui::Key::ArrowUp));
         assert!(offset > 0.);
-        for _ in 0..SETTINGS_ROWS - 2 {
+        for _ in 0..rows - 2 {
             frame(Some(egui::Key::ArrowUp));
         }
         assert!(frame(None).1 < 1.);
@@ -2056,7 +2103,17 @@ mod tests {
     fn passkey_verification_setting_cycles_after_existing_browser_rows() {
         let mut settings = AppSettings::default();
         assert_eq!(PASSKEY_VERIFICATION_ROW, PAIRED_BROWSERS_ROW + 1);
-        assert_eq!(SHORTCUT_ROW, SETTINGS_ROWS - 1);
+        assert_eq!(START_AT_LOGIN_ROW, SETTINGS_ROWS - 1);
+        assert_eq!(SHORTCUT_ROW, START_AT_LOGIN_ROW - 1);
+        if cfg!(target_os = "macos") {
+            assert!(matches!(
+                toggle_setting(START_AT_LOGIN_ROW, &settings),
+                Some(SearchAction::SetStartAtLogin(true))
+            ));
+        } else {
+            assert!(toggle_setting(START_AT_LOGIN_ROW, &settings).is_none());
+            assert!(!setting_matches(START_AT_LOGIN_ROW, ""));
+        }
         assert_eq!(ACKNOWLEDGEMENTS_ROW, SHORTCUT_ROW - 1);
         // The shortcut row records inline instead of toggling.
         assert!(toggle_setting(SHORTCUT_ROW, &settings).is_none());
@@ -2131,7 +2188,11 @@ mod tests {
 
     #[test]
     fn settings_search_matches_every_word_in_titles_and_descriptions() {
-        assert!((0..SETTINGS_ROWS).all(|row| setting_matches(row, "")));
+        assert!(
+            (0..SETTINGS_ROWS)
+                .filter(|row| row_supported(*row))
+                .all(|row| setting_matches(row, ""))
+        );
         assert!(setting_matches(SHORTCUT_ROW, "shortcut"));
         assert!(setting_matches(SHORTCUT_ROW, "KEYBOARD quick"));
         assert!(setting_matches(IDLE_TIMEOUT_ROW, "lock idle"));

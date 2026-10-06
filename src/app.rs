@@ -1668,6 +1668,10 @@ impl App {
             }
             SearchAction::Sync => self.spawn_sync(),
             SearchAction::OpenResult(idx) => self.open_result(idx),
+            SearchAction::SetStartAtLogin(enabled) => {
+                self.settings.start_at_login = enabled;
+                self.save_and_apply_settings();
+            }
             SearchAction::SetStartList(list) => {
                 self.settings.start_list = list;
                 self.search_state.start_list = list;
