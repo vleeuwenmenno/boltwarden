@@ -452,6 +452,9 @@ Registration lets a browser find Boltwarden; it does not grant vault access.
 Each extension profile still needs pairing approval. Turning a browser off prevents
 new native-host launches; revoke its pairing to end an existing authenticated session.
 
+Package installs can run `boltwarden-setup`, which offers to register the browsers it finds
+(`boltwarden install-browser --detected`). The daemon also repairs a stale launcher at startup.
+
 Alternatively, register the native messaging host for the current user:
 
 ```bash

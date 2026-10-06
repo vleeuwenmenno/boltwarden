@@ -450,15 +450,76 @@ fn is_registered_at(native_host_dir: &Path, launcher: &Path) -> Result<bool> {
     Ok(validate_executable(&binary).is_ok() && executable_file(launcher))
 }
 
+/// Rewrite the shared launcher when a registered browser would otherwise be left pointing at a
+/// missing Boltwarden binary, for example after a move from `/usr/local/bin` to a package install.
+/// Does nothing unless one of our manifests exists, so integration stays opt-in. Returns whether
+/// the launcher was rewritten.
+pub fn repair_launcher() -> Result<bool> {
+    let binary = std::env::current_exe()
+        .ok()
+        .filter(|path| validate_executable(path).is_ok())
+        .or_else(find_binary);
+    repair_launcher_at(&Paths::from_env()?, binary)
+}
+
+fn repair_launcher_at(paths: &Paths, binary: Option<PathBuf>) -> Result<bool> {
+    let launcher = paths.launcher();
+    if let Some(bytes) = read_owned(&launcher)? {
+        match launcher_binary(&bytes) {
+            Some(existing) if validate_executable(&existing).is_ok() => return Ok(false),
+            Some(_) => {}
+            None => return Ok(false),
+        }
+    }
+    let registered = destinations(paths, Browser::All)
+        .iter()
+        .any(|(directory, _)| {
+            matches!(
+                check_managed_manifest(&manifest_path(directory), &launcher),
+                Ok(true)
+            )
+        });
+    let Some(binary) = binary.filter(|_| registered) else {
+        return Ok(false);
+    };
+    validate_executable(&binary)?;
+    let script = format!(
+        "{LAUNCHER_PREFIX}{}{LAUNCHER_SUFFIX}",
+        shell_quote(binary.to_str().context("Binary path must be valid UTF-8")?)
+    );
+    write_atomic(&launcher, script.as_bytes(), 0o700)?;
+    Ok(true)
+}
+
 struct Options {
     browser: Browser,
     uninstall: bool,
+    detected: bool,
     binary: Option<PathBuf>,
 }
 
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
     let options = parse(args)?;
     let paths = Paths::from_env().map_err(|error| error.to_string())?;
+    if options.detected {
+        if options.uninstall {
+            return Err("--detected cannot be combined with --uninstall".into());
+        }
+        let found = discover_at(&paths, &search_paths()).map_err(|error| error.to_string())?;
+        if found.is_empty() {
+            println!("No supported browsers found in PATH.");
+            return Ok(());
+        }
+        let targets: Vec<_> = found
+            .iter()
+            .map(|row| (row.native_host_dir.clone(), row.family))
+            .collect();
+        install_at(&paths, &targets, options.binary).map_err(|error| error.to_string())?;
+        for row in &found {
+            println!("Registered {}", row.label);
+        }
+        return Ok(());
+    }
     let destinations = destinations(&paths, options.browser);
     if options.uninstall {
         for (directory, _) in destinations {
@@ -519,6 +580,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
     let mut result = Options {
         browser: Browser::All,
         uninstall: false,
+        detected: false,
         binary: None,
     };
     let mut args = args.into_iter();
@@ -545,6 +607,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
                 }
             }
             "--uninstall" => result.uninstall = true,
+            "--detected" => result.detected = true,
             "--path" => {
                 result.binary = Some(PathBuf::from(
                     args.next().ok_or("--path requires a binary path")?,
@@ -787,6 +850,42 @@ mod tests {
     fn executable(path: &Path) {
         fs::write(path, "#!/bin/sh\nexit 89\n").unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn repair_rewrites_stale_or_missing_launcher_only_when_registered() {
+        let fixture = Fixture::new();
+        let directory = fixture.paths.home.join(".mozilla/native-messaging-hosts");
+        let launcher = fixture.paths.launcher();
+        let current = Some(fixture.boltwarden.clone());
+
+        // Not registered: stay opt-in.
+        assert!(!repair_launcher_at(&fixture.paths, current.clone()).unwrap());
+        assert!(!launcher.exists());
+
+        let gone = fixture.binaries.join("gone");
+        executable(&gone);
+        install_at(
+            &fixture.paths,
+            &[(directory.clone(), BrowserFamily::Firefox)],
+            Some(gone.clone()),
+        )
+        .unwrap();
+        assert!(!repair_launcher_at(&fixture.paths, current.clone()).unwrap());
+
+        fs::remove_file(&gone).unwrap();
+        assert!(repair_launcher_at(&fixture.paths, current.clone()).unwrap());
+        assert_eq!(
+            launcher_binary(&fs::read(&launcher).unwrap()),
+            Some(fixture.boltwarden.clone())
+        );
+        assert!(
+            is_registered_at(&normalize_native_host_dir(&directory).unwrap(), &launcher).unwrap()
+        );
+
+        fs::remove_file(&launcher).unwrap();
+        assert!(repair_launcher_at(&fixture.paths, current).unwrap());
+        assert!(launcher.exists());
     }
 
     #[test]
