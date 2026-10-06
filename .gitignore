@@ -9,3 +9,4 @@
 __pycache__/
 /THIRD_PARTY_NOTICES.txt
 /extension/public/THIRD_PARTY_NOTICES.txt
+.DS_Store
