@@ -646,6 +646,20 @@ pub fn footer(
     status_rect
 }
 
+/// Draws `keys` as keycaps, right-aligned so the last one ends at `right_center`.
+pub fn keycaps(painter: &egui::Painter, right_center: egui::Pos2, keys: &[&str]) {
+    let mut right = right_center.x;
+    for key in keys.iter().rev() {
+        let size = keycap_size(key);
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(right - size.x, right_center.y - size.y / 2.0),
+            size,
+        );
+        paint_keycap(painter, rect, key);
+        right = rect.left() - 4.0;
+    }
+}
+
 fn keycap_size(key: &str) -> egui::Vec2 {
     match key {
         "↑↓" => egui::vec2(30.0, 20.0),

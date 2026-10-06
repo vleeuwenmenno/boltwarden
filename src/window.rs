@@ -314,7 +314,7 @@ impl WindowApp {
                 app.settings_licenses = mode == "licenses";
                 app.focus_search = false;
                 if mode == "shortcut" {
-                    app.settings_state.shortcut_setup.open();
+                    app.settings_state.select_shortcut_setting();
                 }
             }
         }
@@ -629,10 +629,6 @@ impl WindowApp {
                 if value != config::StartList::RecentlyUsed && !crate::demo::enabled() {
                     let _ = config::clear_item_usage();
                 }
-            }
-            SearchAction::OpenShortcutSetup => {
-                self.settings_state.shortcut_setup.open();
-                return;
             }
             SearchAction::SetKeepOfflineCopy(value) => self.settings.keep_offline_copy = value,
             SearchAction::SetKeyboardShortcuts(value) => {
@@ -1260,10 +1256,8 @@ impl eframe::App for WindowApp {
                 return;
             }
         }
-        if self.settings_state.shortcut_setup.open {
-            self.settings_state.shortcut_setup.show(root, &self.backend);
-            return;
-        }
+        // Before other key handling, so a shortcut being recorded is not also acted on.
+        self.settings_state.shortcut_setup.poll(ctx, &self.backend);
         self.icons.poll(ctx);
         if let Some(warning) = &self.security_warning {
             egui::Panel::top("vault-security-warning").show(root, |ui| {

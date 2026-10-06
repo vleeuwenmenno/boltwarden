@@ -18,6 +18,87 @@ const DEFAULT_URI_MATCH_ROW: usize = 11;
 const SCREEN_CAPTURE_ROW: usize = 5;
 const START_LIST_ROW: usize = 3;
 const IDLE_TIMEOUT_ROW: usize = 7;
+/// Title and description of each settings row, for filtering by the search field.
+const SETTING_TEXT: [(&str, &str); SETTINGS_ROWS] = [
+    (
+        "Show keyboard shortcuts",
+        "Show the hint bar at the bottom of the window",
+    ),
+    (
+        "Close after copying",
+        "Hide quick access after a value is copied",
+    ),
+    (
+        "Restore recent item",
+        "Reopen the last item for 30 seconds after hiding",
+    ),
+    ("Start with", "What the empty search shows"),
+    (
+        "Show website icons",
+        "Fetch icons from your server's icon service",
+    ),
+    (
+        "Obscure in screen captures",
+        "Hide this window in screenshots and screen sharing",
+    ),
+    (
+        "Lock when the screen locks",
+        "Lock the vault when the desktop session locks",
+    ),
+    (
+        "Lock after idle timeout",
+        "Lock the vault after the session has been idle",
+    ),
+    (
+        "Enable SSH agent",
+        "Serve SSH keys from the vault over a local agent socket",
+    ),
+    (
+        "Keep offline copy",
+        "Keep an encrypted copy for read-only access without a connection",
+    ),
+    (
+        "Enable browser integration",
+        "Allow paired browser extensions to fill logins",
+    ),
+    (
+        "Default URI matching",
+        "Applies only when an item has no explicit match rule",
+    ),
+    (
+        "Paired browsers",
+        "View paired extensions and revoke access",
+    ),
+    (
+        "Passkey verification",
+        "When browser passkeys ask for your password",
+    ),
+    (
+        "Browser setup",
+        "Choose installed or custom browsers for the extension",
+    ),
+    (
+        "Licenses and acknowledgements",
+        "Project license and third-party software",
+    ),
+    (
+        "Quick access shortcut",
+        "Global keyboard shortcut to show or hide quick access",
+    ),
+];
+
+/// Whether every word of `query` appears in the row's title or description.
+fn setting_matches(row: usize, query: &str) -> bool {
+    let Some((title, description)) = SETTING_TEXT.get(row) else {
+        return false;
+    };
+    let text = format!("{title} {description}").to_lowercase();
+    query
+        .to_lowercase()
+        .split_whitespace()
+        .all(|word| text.contains(word))
+}
+
 /// Sections used by the full-window settings view. Quick access keeps its compact list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsGroup {
@@ -229,9 +310,10 @@ impl SearchState {
     }
 
     pub fn reset_results_for_empty_query(&mut self) {
+        // In settings the field filters rows, so an empty query keeps them open.
         if matches!(
             self.view,
-            SearchView::PairedBrowsers | SearchView::BrowserSetup
+            SearchView::Settings | SearchView::PairedBrowsers | SearchView::BrowserSetup
         ) {
             return;
         }
@@ -380,7 +462,10 @@ impl SearchState {
         match self.display_entry(self.selected) {
             Some(DisplayEntry::VersionCommand) => OpenSelectedAction::OpenAcknowledgements,
             Some(DisplayEntry::SettingsCommand) => {
+                // The search field now filters settings, so start it empty.
                 self.view = SearchView::Settings;
+                self.query.clear();
+                self.focus_search = true;
                 self.selected = 0;
                 self.settings_selected = 0;
                 self.settings_scrolled_to = None;
@@ -433,15 +518,17 @@ impl SearchState {
         self.focus_search = true;
     }
 
+    /// Selects the quick access shortcut row (demo screenshots).
+    pub fn select_shortcut_setting(&mut self) {
+        self.settings_selected = SHORTCUT_ROW;
+    }
+
     pub fn close_settings_panel(&mut self) {
         self.view = SearchView::Results;
+        self.query.clear();
         self.selected = 0;
         self.ssh_agent_path_input = None;
         self.focus_search = true;
-    }
-
-    fn settings_command_visible(&self) -> bool {
-        settings_command_matches(&self.query)
     }
 
     /// Command rows shown above the vault items, in display order. The archived and
@@ -581,9 +668,6 @@ pub fn draw_search(
     let mut action = None;
     let t = theme();
 
-    if state.view == SearchView::Settings && !state.settings_command_visible() {
-        state.close_settings_panel();
-    }
     // Keys are consumed before the search field is drawn so it does not also receive them.
     handle_keys(ctx, state, settings, &mut action);
 
@@ -615,6 +699,9 @@ pub fn draw_search(
             ],
             (true, SearchView::BrowserSetup) => {
                 &[("↑↓", "Select"), ("Space", "Toggle"), ("Esc", "Back")]
+            }
+            (true, SearchView::Settings) if state.settings_selected == SHORTCUT_ROW => {
+                state.shortcut_setup.hints()
             }
             (true, SearchView::Settings) => {
                 &[("↑↓", "Select"), ("Space", "Toggle"), ("Esc", "Back")]
@@ -789,8 +876,19 @@ pub fn handle_keys(
                     state
                         .settings_group
                         .is_none_or(|group| group.contains(*row))
+                        && setting_matches(*row, &state.query)
                 })
                 .collect();
+            if input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                || (state.query.is_empty()
+                    && input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft))
+            {
+                state.close_settings_panel();
+                return;
+            }
+            if visible.is_empty() {
+                return;
+            }
             let mut selected = visible
                 .iter()
                 .position(|row| *row == state.settings_selected)
@@ -802,16 +900,22 @@ pub fn handle_keys(
                 selected = (selected + visible.len() - 1) % visible.len();
             }
             state.settings_selected = visible[selected];
-            if (input.consume_key(egui::Modifiers::NONE, egui::Key::Space)
+            if state.settings_selected == SHORTCUT_ROW {
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::Space)
+                    || input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                {
+                    state.shortcut_setup.activate();
+                }
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
+                    || input.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
+                {
+                    state.shortcut_setup.clear();
+                }
+            } else if (input.consume_key(egui::Modifiers::NONE, egui::Key::Space)
                 || input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
                 && (state.settings_selected != SCREEN_CAPTURE_ROW || !state.capture_pending)
             {
                 *action = toggle_setting(state.settings_selected, settings);
-            }
-            if input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
-                || input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)
-            {
-                state.close_settings_panel();
             }
         }
         SearchView::Results | SearchView::Archived | SearchView::Trash => {
@@ -947,7 +1051,14 @@ fn draw_search_field(ui: &mut Ui, state: &mut SearchState) {
             .id(egui::Id::new(SEARCH_INPUT_ID))
             .font(t.font(t.input()))
             .text_color(t.text_strong)
-            .hint_text(RichText::new("Search vault").color(t.text_faint))
+            .hint_text(
+                RichText::new(if state.view == SearchView::Settings {
+                    "Search settings"
+                } else {
+                    "Search vault"
+                })
+                .color(t.text_faint),
+            )
             .frame(egui::Frame::NONE)
             .vertical_align(egui::Align::Center);
         if state.focus_search {
@@ -961,7 +1072,9 @@ fn draw_search_field(ui: &mut Ui, state: &mut SearchState) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if state.in_flight {
                 ui.add(egui::Spinner::new().color(t.text_muted));
-            } else if !state.query.trim().is_empty() || state.view.is_item_list() {
+            } else if state.view != SearchView::Settings
+                && (!state.query.trim().is_empty() || state.view.is_item_list())
+            {
                 ui.label(RichText::new(state.results.len().to_string()).color(t.text_faint));
             }
             if state.view.is_item_list() {
@@ -1204,7 +1317,6 @@ fn toggle_setting(row: usize, settings: &AppSettings) -> Option<SearchAction> {
         0 => SearchAction::SetKeyboardShortcuts(!settings.show_keyboard_shortcuts),
         1 => SearchAction::SetCloseAfterCopy(!settings.close_after_copy),
         2 => SearchAction::SetRestoreRecentItem(!settings.restore_recent_item),
-        SHORTCUT_ROW => SearchAction::OpenShortcutSetup,
         START_LIST_ROW => SearchAction::SetStartList(settings.start_list.next()),
         4 => SearchAction::SetShowWebsiteIcons(!settings.show_website_icons),
         SCREEN_CAPTURE_ROW if crate::screen_capture::available() => {
@@ -1243,7 +1355,14 @@ pub fn draw_settings(
 ) -> Option<SearchAction> {
     let t = theme();
     let mut action = None;
-    let visible = |row| state.settings_group.is_none_or(|group| group.contains(row));
+    let query = state.query.clone();
+    let visible = |row| {
+        state.settings_group.is_none_or(|group| group.contains(row)) && setting_matches(row, &query)
+    };
+    if !(0..SETTINGS_ROWS).any(visible) {
+        widgets::empty_state(ui, t.icon("\u{f002}", "🔍"), "No matching settings", false);
+        return None;
+    }
     if !visible(state.settings_selected) {
         state.settings_selected = (0..SETTINGS_ROWS).find(|row| visible(*row)).unwrap_or(0);
         state.settings_scrolled_to = None;
@@ -1494,13 +1613,9 @@ pub fn draw_settings(
                 }
             }
             if visible(SHORTCUT_ROW) {
-                let response = widgets::choice_row(
-                    ui,
-                    state.settings_selected == SHORTCUT_ROW,
-                    "Quick access shortcut",
-                    "Record, change, or clear the global shortcut",
-                    "Configure",
-                );
+                let response = state
+                    .shortcut_setup
+                    .draw_row(ui, state.settings_selected == SHORTCUT_ROW);
                 if state.settings_selected == SHORTCUT_ROW
                     && state.settings_scrolled_to != Some(SHORTCUT_ROW)
                 {
@@ -1509,7 +1624,7 @@ pub fn draw_settings(
                 }
                 if response.clicked() {
                     state.settings_selected = SHORTCUT_ROW;
-                    action = Some(SearchAction::OpenShortcutSetup);
+                    state.shortcut_setup.activate();
                 }
             }
             if !cfg!(windows) && visible(8) && settings.ssh_agent_enabled {
@@ -1567,7 +1682,6 @@ pub enum SearchAction {
     OpenResult(usize),
     OpenWindow,
     OpenAcknowledgements,
-    OpenShortcutSetup,
     SetKeepOfflineCopy(bool),
     SetKeyboardShortcuts(bool),
     SetCloseAfterCopy(bool),
@@ -1895,10 +2009,8 @@ mod tests {
         assert_eq!(PASSKEY_VERIFICATION_ROW, PAIRED_BROWSERS_ROW + 1);
         assert_eq!(SHORTCUT_ROW, SETTINGS_ROWS - 1);
         assert_eq!(ACKNOWLEDGEMENTS_ROW, SHORTCUT_ROW - 1);
-        assert!(matches!(
-            toggle_setting(SHORTCUT_ROW, &settings),
-            Some(SearchAction::OpenShortcutSetup)
-        ));
+        // The shortcut row records inline instead of toggling.
+        assert!(toggle_setting(SHORTCUT_ROW, &settings).is_none());
         assert!(matches!(
             toggle_setting(ACKNOWLEDGEMENTS_ROW, &settings),
             Some(SearchAction::OpenAcknowledgements)
@@ -1952,13 +2064,35 @@ mod tests {
         assert_eq!(state.display_entry_count(), 3);
         assert_eq!(state.open_selected_entry(), OpenSelectedAction::None);
         assert_eq!(state.view, SearchView::Settings);
-
+        // The field filters settings from here, and returns empty to the vault search.
+        assert!(state.query.is_empty());
+        state.reset_results_for_empty_query();
+        assert_eq!(state.view, SearchView::Settings, "settings must stay open");
+        state.query = "lock".into();
         state.close_settings_panel();
+        assert!(state.query.is_empty());
+
+        state.query = "set".into();
         state.move_selection(1);
         assert_eq!(
             state.open_selected_entry(),
             OpenSelectedAction::OpenResult(0)
         );
+    }
+
+    #[test]
+    fn settings_search_matches_every_word_in_titles_and_descriptions() {
+        assert!((0..SETTINGS_ROWS).all(|row| setting_matches(row, "")));
+        assert!(setting_matches(SHORTCUT_ROW, "shortcut"));
+        assert!(setting_matches(SHORTCUT_ROW, "KEYBOARD quick"));
+        assert!(setting_matches(IDLE_TIMEOUT_ROW, "lock idle"));
+        assert!(!setting_matches(SHORTCUT_ROW, "lock idle"));
+        let matches: Vec<usize> = (0..SETTINGS_ROWS)
+            .filter(|row| setting_matches(*row, "browser"))
+            .collect();
+        assert!(matches.contains(&BROWSER_SETUP_ROW));
+        assert!(matches.contains(&PAIRED_BROWSERS_ROW));
+        assert!(!matches.contains(&SHORTCUT_ROW));
     }
 
     #[test]
