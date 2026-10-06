@@ -47,6 +47,11 @@ libc = "0.2"
 zbus = { version = "5.19", default-features = false, features = ["blocking-api", "tokio"] }
 ksni = { version = "0.3", features = ["blocking"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+eframe = { version = "0.36", default-features = false, features = ["wgpu_no_default_features"] }
+wgpu = { version = "30.0", default-features = false, features = ["metal", "std", "wgsl"] }
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 eframe = { version = "0.36", default-features = false, features = ["wgpu_no_default_features"] }
 wgpu = { version = "30.0", default-features = false, features = ["dx12", "std", "wgsl"] }

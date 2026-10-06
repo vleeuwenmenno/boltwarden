@@ -816,7 +816,7 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let root =
-                std::env::temp_dir().join(format!("boltwarden-install-{}", uuid::Uuid::new_v4()));
+                crate::test_temp_dir().join(format!("boltwarden-install-{}", uuid::Uuid::new_v4()));
             let binaries = root.join("bin");
             fs::create_dir_all(&binaries).unwrap();
             let boltwarden = binaries.join("boltwarden");

@@ -1,5 +1,6 @@
 mod app;
 #[cfg_attr(windows, path = "platform/auto_lock_windows.rs")]
+#[cfg_attr(target_os = "macos", path = "platform/auto_lock_macos.rs")]
 mod auto_lock;
 mod backend;
 mod browser;
@@ -29,9 +30,10 @@ mod shortcut;
 #[cfg_attr(windows, path = "platform/ssh_agent_windows.rs")]
 mod ssh_agent;
 #[cfg_attr(windows, path = "platform/tray_windows.rs")]
+#[cfg_attr(target_os = "macos", path = "platform/tray_macos.rs")]
 mod tray;
 mod ui;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod unix_socket;
 mod uri_match;
 mod version;
@@ -52,6 +54,17 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tray::TrayCommand;
+
+/// Base for test directories. The macOS per-user temp dir is long enough to push socket
+/// paths past the 104-byte limit, and sits behind the `/var` -> `/private/var` symlink.
+#[cfg(test)]
+pub(crate) fn test_temp_dir() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/private/tmp")
+    } else {
+        std::env::temp_dir()
+    }
+}
 
 const POPUP_TOKEN_PREFIX: &str = "token ";
 /// Internal flag that starts the vault window process; users run `boltwarden window`.

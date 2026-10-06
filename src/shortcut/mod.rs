@@ -3,10 +3,14 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, OnceLock, mpsc};
 #[cfg(target_os = "linux")]
 mod hyprland;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(windows)]
 mod windows;
 #[cfg(target_os = "linux")]
 use hyprland::Runtime;
+#[cfg(target_os = "macos")]
+use macos::Runtime;
 #[cfg(windows)]
 use windows::Runtime;
 
@@ -185,6 +189,10 @@ pub fn binding(shortcut: &Shortcut) -> Result<String, String> {
     #[cfg(target_os = "linux")]
     {
         hyprland::copy_binding(shortcut)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Err("Global shortcuts are not supported on macOS yet".into())
     }
     #[cfg(windows)]
     {

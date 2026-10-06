@@ -49,15 +49,57 @@ pub fn open_url(url: &url::Url) -> std::io::Result<()> {
     #[cfg(not(windows))]
     {
         use std::process::{Command, Stdio};
-        let mut child = Command::new("xdg-open")
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        let mut child = Command::new(opener)
             .arg(url.as_str())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?;
-        // Reap xdg-open once it hands the address to the browser.
+        // Reap the opener once it hands the address to the browser.
         std::thread::spawn(move || child.wait());
         Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub mod ipc {
+    pub use crate::unix_socket::*;
+    pub use std::os::unix::net::{UnixListener as Listener, UnixStream as Stream};
+
+    pub fn peer_pid(stream: &Stream) -> std::io::Result<u32> {
+        use std::os::fd::AsRawFd;
+        if peer_uid(stream)? != current_uid() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Peer is not allowed",
+            ));
+        }
+        let mut pid: libc::pid_t = 0;
+        let mut length = std::mem::size_of_val(&pid) as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                (&mut pid as *mut libc::pid_t).cast(),
+                &mut length,
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if pid <= 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Peer is not allowed",
+            ));
+        }
+        Ok(pid as u32)
     }
 }
 
@@ -94,5 +136,8 @@ pub mod ipc {
 #[cfg(windows)]
 #[path = "ipc_windows.rs"]
 pub mod ipc;
+#[cfg(target_os = "macos")]
+#[path = "process_macos.rs"]
+pub mod process;
 #[cfg(windows)]
 pub mod windows;

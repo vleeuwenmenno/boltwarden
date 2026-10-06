@@ -446,6 +446,10 @@ pub fn start(
             }
             match listener.accept() {
                 Ok((stream, _)) => {
+                    // BSD sockets inherit O_NONBLOCK from the listener; Linux ones do not.
+                    if stream.set_nonblocking(false).is_err() {
+                        continue;
+                    }
                     let key_store = thread_key_store.clone();
                     let approvals = thread_approvals.clone();
                     thread::spawn(move || handle_stream(stream, key_store, approvals));
@@ -779,6 +783,7 @@ fn remember_duration(scope: SshApprovalRemember) -> Duration {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn peer_client_info(stream: &UnixStream) -> Result<SshAgentClientInfo, String> {
     let mut credentials = libc::ucred {
         pid: 0,
@@ -808,6 +813,38 @@ fn peer_client_info(stream: &UnixStream) -> Result<SshAgentClientInfo, String> {
     Ok(info)
 }
 
+#[cfg(target_os = "macos")]
+fn peer_client_info(stream: &UnixStream) -> Result<SshAgentClientInfo, String> {
+    let mut uid = 0;
+    let mut gid = 0;
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    let rc = unsafe {
+        if libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) != 0 {
+            -1
+        } else {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                (&mut pid as *mut libc::pid_t).cast(),
+                &mut len,
+            )
+        }
+    };
+    if rc != 0 {
+        return Err(format!(
+            "could not inspect SSH agent peer credentials: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    let pid = u32::try_from(pid).map_err(|_| "invalid peer pid".to_string())?;
+    let mut info = process_info(pid);
+    info.uid = uid;
+    info.gid = gid;
+    Ok(info)
+}
+
 fn process_info(pid: u32) -> SshAgentClientInfo {
     let ppid = read_ppid(pid);
     let parent_pid = ppid.filter(|ppid| *ppid > 1);
@@ -819,18 +856,35 @@ fn process_info(pid: u32) -> SshAgentClientInfo {
         start_time_ticks: read_start_time_ticks(pid),
         process_name: read_comm(pid),
         command_line: read_cmdline(pid),
-        executable: fs::read_link(format!("/proc/{pid}/exe"))
-            .ok()
-            .map(|path| path.display().to_string()),
-        cwd: fs::read_link(format!("/proc/{pid}/cwd"))
-            .ok()
-            .map(|path| path.display().to_string()),
+        executable: read_executable(pid),
+        cwd: read_cwd(pid),
         parent_pid,
         parent_name: parent_pid.and_then(read_comm),
         parent_start_time_ticks: parent_pid.and_then(read_start_time_ticks),
     }
 }
 
+#[cfg(target_os = "linux")]
+fn read_executable(pid: u32) -> Option<String> {
+    fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .map(|path| path.display().to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn read_cwd(pid: u32) -> Option<String> {
+    fs::read_link(format!("/proc/{pid}/cwd"))
+        .ok()
+        .map(|path| path.display().to_string())
+}
+
+#[cfg(target_os = "macos")]
+use crate::platform::process::{
+    command_line as read_cmdline, cwd as read_cwd, executable as read_executable,
+    name as read_comm, ppid as read_ppid, start_time as read_start_time_ticks,
+};
+
+#[cfg(target_os = "linux")]
 fn read_comm(pid: u32) -> Option<String> {
     fs::read_to_string(format!("/proc/{pid}/comm"))
         .ok()
@@ -838,6 +892,7 @@ fn read_comm(pid: u32) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+#[cfg(target_os = "linux")]
 fn read_cmdline(pid: u32) -> Option<String> {
     let bytes = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
     let parts = bytes
@@ -852,14 +907,17 @@ fn read_cmdline(pid: u32) -> Option<String> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn read_ppid(pid: u32) -> Option<u32> {
     read_stat_field(pid, 1).and_then(|value| value.parse().ok())
 }
 
+#[cfg(target_os = "linux")]
 fn read_start_time_ticks(pid: u32) -> Option<u64> {
     read_stat_field(pid, 19).and_then(|value| value.parse().ok())
 }
 
+#[cfg(target_os = "linux")]
 fn read_stat_field(pid: u32, index_after_comm: usize) -> Option<String> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let end = stat.rfind(") ")?;
@@ -1018,7 +1076,7 @@ mod tests {
     #[test]
     fn socket_lists_identities_and_signs() {
         // Unix socket paths have a small fixed limit; worktree paths can exceed it.
-        let socket_dir = std::env::temp_dir().join(format!("bw-ssh-{}", uuid::Uuid::new_v4()));
+        let socket_dir = crate::test_temp_dir().join(format!("bw-ssh-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&socket_dir).unwrap();
         let socket_path = socket_dir.join("agent.sock");
         let settings = AppSettings {
