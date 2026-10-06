@@ -3,8 +3,8 @@
 The macOS build is **unsigned** and runs on macOS 11 or later, as one universal app
 for Apple silicon and Intel Macs. It is signed ad hoc rather than with an Apple
 Developer ID, so macOS asks you to approve it once. Evaluate it with a test vault.
-Browser integration, start at login, and hiding quick access from screen capture are
-not available on macOS yet.
+Start at login and hiding quick access from screen capture are not available on
+macOS yet.
 
 ## Download and installation
 
@@ -36,6 +36,35 @@ is locked. A combination another app already uses shows an error and keeps the
 previous shortcut. Keys are matched by their position on a US keyboard layout.
 
 Quick access opens over full-screen apps on the current Space.
+
+## Browser integration
+
+Open **Settings → Browser integration**, enable it, and choose **Browser setup**.
+Boltwarden finds these browsers in `/Applications` and `~/Applications`:
+
+| Browsers | Native-host folder in `~/Library/Application Support` |
+| --- | --- |
+| Firefox, Firefox Developer Edition | `Mozilla/NativeMessagingHosts` |
+| LibreWolf | `LibreWolf/NativeMessagingHosts` |
+| Google Chrome, Beta, Dev | `Google/Chrome…/NativeMessagingHosts` |
+| Chromium | `Chromium/NativeMessagingHosts` |
+| Microsoft Edge, Beta, Dev | `Microsoft Edge…/NativeMessagingHosts` |
+| Brave, Beta, Nightly | `BraveSoftware/Brave-Browser…/NativeMessagingHosts` |
+| Vivaldi | `Vivaldi/NativeMessagingHosts` |
+
+Select browsers and apply, then install the extension and pair each browser profile.
+For other browsers, such as Arc, Opera, or Zen, choose **Add browser** and enter the
+executable inside the app (for example
+`/Applications/Arc.app/Contents/MacOS/Arc`) and the browser's native-host folder.
+
+Registration writes a manifest per browser and a launcher at
+`~/.local/libexec/boltwarden-native-host`. The launcher points at the app; after moving
+Boltwarden.app, start it once and it updates the launcher. From Terminal:
+
+```bash
+/Applications/Boltwarden.app/Contents/MacOS/boltwarden install-browser --detected
+/Applications/Boltwarden.app/Contents/MacOS/boltwarden uninstall-browser --browser all
+```
 
 ## Security behavior
 
