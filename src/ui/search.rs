@@ -10,17 +10,17 @@ use egui::{Context, RichText, Ui};
 const SEARCH_INPUT_ID: &str = "vault-search-input";
 const SSH_PATH_INPUT_ID: &str = "settings-ssh-socket-path";
 const SETTINGS_ROWS: usize = 17;
-const SHORTCUT_ROW: usize = 16;
-const ACKNOWLEDGEMENTS_ROW: usize = 15;
-const BROWSER_SETUP_ROW: usize = 14;
-const PASSKEY_VERIFICATION_ROW: usize = 13;
-const PAIRED_BROWSERS_ROW: usize = 12;
-const DEFAULT_URI_MATCH_ROW: usize = 11;
-const SCREEN_CAPTURE_ROW: usize = 5;
-const START_LIST_ROW: usize = 3;
-const IDLE_TIMEOUT_ROW: usize = 7;
+pub(crate) const SHORTCUT_ROW: usize = 16;
+pub(crate) const ACKNOWLEDGEMENTS_ROW: usize = 15;
+pub(crate) const BROWSER_SETUP_ROW: usize = 14;
+pub(crate) const PASSKEY_VERIFICATION_ROW: usize = 13;
+pub(crate) const PAIRED_BROWSERS_ROW: usize = 12;
+pub(crate) const DEFAULT_URI_MATCH_ROW: usize = 11;
+pub(crate) const SCREEN_CAPTURE_ROW: usize = 5;
+pub(crate) const START_LIST_ROW: usize = 3;
+pub(crate) const IDLE_TIMEOUT_ROW: usize = 7;
 /// Title and description of each settings row, for filtering by the search field.
-const SETTING_TEXT: [(&str, &str); SETTINGS_ROWS] = [
+pub(crate) const SETTING_TEXT: [(&str, &str); SETTINGS_ROWS] = [
     (
         "Show keyboard shortcuts",
         "Show the hint bar at the bottom of the window",
@@ -100,21 +100,34 @@ fn setting_matches(row: usize, query: &str) -> bool {
         .all(|word| text.contains(word))
 }
 
-/// Sections used by the full-window settings view. Quick access keeps its compact list.
+/// Categories of the vault window's settings. Quick access keeps its compact list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsGroup {
     General,
+    Security,
     Browser,
     Ssh,
 }
 
 impl SettingsGroup {
-    fn contains(self, row: usize) -> bool {
+    /// The category's rows in display order, which keyboard selection follows.
+    pub(crate) fn rows(self) -> &'static [usize] {
         match self {
-            Self::General => matches!(row, 0..=7 | 9 | SHORTCUT_ROW),
-            Self::Browser => matches!(row, 10..=14),
-            Self::Ssh => row == 8,
+            Self::General => &[1, 2, START_LIST_ROW, SHORTCUT_ROW, 0, 4],
+            Self::Security => &[6, IDLE_TIMEOUT_ROW, 9, SCREEN_CAPTURE_ROW],
+            Self::Browser => &[
+                10,
+                DEFAULT_URI_MATCH_ROW,
+                PASSKEY_VERIFICATION_ROW,
+                PAIRED_BROWSERS_ROW,
+                BROWSER_SETUP_ROW,
+            ],
+            Self::Ssh => &[8],
         }
+    }
+
+    fn contains(self, row: usize) -> bool {
+        self.rows().contains(&row)
     }
 }
 
@@ -260,7 +273,7 @@ pub struct SearchState {
     pub paired_browsers: PairedBrowsersState,
     pub browser_setup: crate::ui::browser_setup::BrowserSetupState,
     paired_browsers_return: SearchView,
-    settings_scrolled_to: Option<usize>,
+    pub(crate) settings_scrolled_to: Option<usize>,
     /// Short success message for the footer, such as "Moved to trash".
     pub notice: Option<(String, std::time::Instant)>,
     /// Order of the archived and trash lists; the main search keeps relevance order.
@@ -870,13 +883,13 @@ pub fn handle_keys(
             if path_focused {
                 return;
             }
-            let visible: Vec<usize> = (0..SETTINGS_ROWS)
-                .filter(|row| {
-                    state
-                        .settings_group
-                        .is_none_or(|group| group.contains(*row))
-                        && setting_matches(*row, &state.query)
-                })
+            let order: Vec<usize> = match state.settings_group {
+                Some(group) => group.rows().to_vec(),
+                None => (0..SETTINGS_ROWS).collect(),
+            };
+            let visible: Vec<usize> = order
+                .into_iter()
+                .filter(|row| setting_matches(*row, &state.query))
                 .collect();
             if input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                 || (state.query.is_empty()
@@ -1317,7 +1330,7 @@ fn draw_results(
     action
 }
 
-fn toggle_setting(row: usize, settings: &AppSettings) -> Option<SearchAction> {
+pub(crate) fn toggle_setting(row: usize, settings: &AppSettings) -> Option<SearchAction> {
     Some(match row {
         0 => SearchAction::SetKeyboardShortcuts(!settings.show_keyboard_shortcuts),
         1 => SearchAction::SetCloseAfterCopy(!settings.close_after_copy),
@@ -1361,9 +1374,9 @@ pub fn draw_settings(
     let t = theme();
     let mut action = None;
     let query = state.query.clone();
-    let visible = |row| {
-        state.settings_group.is_none_or(|group| group.contains(row)) && setting_matches(row, &query)
-    };
+    let group = state.settings_group;
+    let visible =
+        |row| group.is_none_or(|group| group.contains(row)) && setting_matches(row, &query);
     if !(0..SETTINGS_ROWS).any(visible) {
         widgets::empty_state(ui, t.icon("\u{f002}", "🔍"), "No matching settings", false);
         return None;
@@ -1491,23 +1504,10 @@ pub fn draw_settings(
                     state.settings_selected = idx;
                     action = toggle_setting(idx, settings);
                 }
-                if idx == IDLE_TIMEOUT_ROW && settings.lock_after_idle_timeout {
-                    ui.horizontal(|ui| {
-                        ui.add_space(54.0);
-                        ui.label(RichText::new("Idle timeout").color(t.text_muted));
-                        let mut minutes = settings.idle_lock_timeout_minutes.clamp(1, 1440);
-                        let response = ui.add(
-                            egui::DragValue::new(&mut minutes)
-                                .range(1..=1440)
-                                .speed(1)
-                                .suffix(" min"),
-                        );
-                        // Save once a drag ends instead of on every intermediate value.
-                        if response.changed() && !response.dragged() || response.drag_stopped() {
-                            action = Some(SearchAction::SetIdleLockTimeoutMinutes(minutes));
-                        }
-                    });
-                    ui.add_space(4.0);
+                if idx == IDLE_TIMEOUT_ROW
+                    && let Some(timeout) = draw_idle_timeout(ui, settings)
+                {
+                    action = Some(timeout);
                 }
             }
 
@@ -1632,52 +1632,94 @@ pub fn draw_settings(
                     state.shortcut_setup.activate();
                 }
             }
-            if !cfg!(windows) && visible(8) && settings.ssh_agent_enabled {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(54.0);
-                    ui.vertical(|ui| {
-                        let path = state
-                            .ssh_agent_path_input
-                            .get_or_insert_with(|| settings.ssh_agent_socket_path.clone());
-                        widgets::field_label(ui, "Socket path (Enter to apply)");
-                        let response = widgets::text_input(
-                            ui,
-                            egui::Id::new(SSH_PATH_INPUT_ID),
-                            path,
-                            "$HOME/.bitwarden-ssh.sock",
-                            false,
-                            t.body(),
-                        );
-                        let commit =
-                            response.lost_focus() && *path != settings.ssh_agent_socket_path;
-                        match config::expand_ssh_agent_socket_path(path) {
-                            Ok(expanded) => {
-                                if commit {
-                                    action =
-                                        Some(SearchAction::SetSshAgentSocketPath(path.clone()));
-                                }
-                                ui.label(
-                                    RichText::new(format!("SSH_AUTH_SOCK={}", expanded.display()))
-                                        .size(t.small())
-                                        .color(t.text_muted),
-                                );
-                            }
-                            Err(e) => widgets::error_line(ui, &e),
-                        }
-                        ui.label(
-                            RichText::new(&ssh_agent_status.message)
-                                .size(t.small())
-                                .color(if ssh_agent_status.active {
-                                    t.success
-                                } else {
-                                    t.text_muted
-                                }),
-                        );
-                    });
-                });
+            if visible(8)
+                && let Some(path) = draw_ssh_socket_path(ui, state, settings, ssh_agent_status)
+            {
+                action = Some(path);
             }
         });
+    action
+}
+
+/// The idle timeout field under "Lock after idle timeout", shown while that is on.
+pub(crate) fn draw_idle_timeout(ui: &mut Ui, settings: &AppSettings) -> Option<SearchAction> {
+    if !settings.lock_after_idle_timeout {
+        return None;
+    }
+    let t = theme();
+    let mut action = None;
+    ui.horizontal(|ui| {
+        ui.add_space(54.0);
+        ui.label(RichText::new("Idle timeout").color(t.text_muted));
+        let mut minutes = settings.idle_lock_timeout_minutes.clamp(1, 1440);
+        let response = ui.add(
+            egui::DragValue::new(&mut minutes)
+                .range(1..=1440)
+                .speed(1)
+                .suffix(" min"),
+        );
+        // Save once a drag ends instead of on every intermediate value.
+        if response.changed() && !response.dragged() || response.drag_stopped() {
+            action = Some(SearchAction::SetIdleLockTimeoutMinutes(minutes));
+        }
+    });
+    ui.add_space(4.0);
+    action
+}
+
+/// The SSH agent socket path and status, shown while the agent is enabled.
+pub(crate) fn draw_ssh_socket_path(
+    ui: &mut Ui,
+    state: &mut SearchState,
+    settings: &AppSettings,
+    ssh_agent_status: &SshAgentStatus,
+) -> Option<SearchAction> {
+    if cfg!(windows) || !settings.ssh_agent_enabled {
+        return None;
+    }
+    let t = theme();
+    let mut action = None;
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(54.0);
+        ui.vertical(|ui| {
+            let path = state
+                .ssh_agent_path_input
+                .get_or_insert_with(|| settings.ssh_agent_socket_path.clone());
+            widgets::field_label(ui, "Socket path (Enter to apply)");
+            let response = widgets::text_input(
+                ui,
+                egui::Id::new(SSH_PATH_INPUT_ID),
+                path,
+                "$HOME/.bitwarden-ssh.sock",
+                false,
+                t.body(),
+            );
+            let commit = response.lost_focus() && *path != settings.ssh_agent_socket_path;
+            match config::expand_ssh_agent_socket_path(path) {
+                Ok(expanded) => {
+                    if commit {
+                        action = Some(SearchAction::SetSshAgentSocketPath(path.clone()));
+                    }
+                    ui.label(
+                        RichText::new(format!("SSH_AUTH_SOCK={}", expanded.display()))
+                            .size(t.small())
+                            .color(t.text_muted),
+                    );
+                }
+                Err(e) => widgets::error_line(ui, &e),
+            }
+            ui.label(
+                RichText::new(&ssh_agent_status.message)
+                    .size(t.small())
+                    .color(if ssh_agent_status.active {
+                        t.success
+                    } else {
+                        t.text_muted
+                    }),
+            );
+        });
+    });
     action
 }
 
@@ -1775,11 +1817,13 @@ mod tests {
 
     #[test]
     fn settings_tabs_keep_keyboard_actions_within_visible_rows() {
-        for (group, first, last) in [
-            (SettingsGroup::General, 0, SHORTCUT_ROW),
-            (SettingsGroup::Browser, 10, 14),
-            (SettingsGroup::Ssh, 8, 8),
+        for group in [
+            SettingsGroup::General,
+            SettingsGroup::Security,
+            SettingsGroup::Browser,
+            SettingsGroup::Ssh,
         ] {
+            let (first, last) = (group.rows()[0], *group.rows().last().unwrap());
             let ctx = Context::default();
             let mut state = SearchState {
                 view: SearchView::Settings,

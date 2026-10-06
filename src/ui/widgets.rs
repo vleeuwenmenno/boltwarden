@@ -247,6 +247,93 @@ pub fn text_input(
         .inner
 }
 
+/// A search field styled like [`text_input`], with a magnifier inside on the left and a
+/// clear button on the right while it has text. Clearing marks the response as changed.
+pub fn search_input(ui: &mut Ui, id: egui::Id, value: &mut String, hint: &str) -> Response {
+    let t = theme();
+    let focused = ui.memory(|m| m.has_focus(id));
+    let clearable = !value.is_empty() && ui.is_enabled();
+    let frame = egui::Frame::new()
+        .fill(t.surface)
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            if focused { t.accent } else { t.border },
+        ))
+        .corner_radius(t.rounding)
+        .inner_margin(egui::Margin {
+            left: 32,
+            right: if clearable { 32 } else { 10 },
+            top: 7,
+            bottom: 7,
+        })
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::singleline(value)
+                    .id(id)
+                    .font(t.font(t.body()))
+                    .text_color(t.text_strong)
+                    .hint_text(RichText::new(hint).color(t.text_faint))
+                    .frame(egui::Frame::NONE)
+                    .margin(egui::Margin::ZERO)
+                    .desired_width(f32::INFINITY),
+            )
+        });
+    let mut response = frame.inner;
+    let rect = frame.response.rect;
+    let painter = ui.painter_at(rect);
+    let lens = egui::pos2(rect.left() + 15.0, rect.center().y - 1.0);
+    let stroke = egui::Stroke::new(1.6_f32, if focused { t.accent } else { t.text_muted });
+    painter.circle_stroke(lens, 5.0, stroke);
+    painter.line_segment(
+        [lens + egui::vec2(3.6, 3.6), lens + egui::vec2(7.0, 7.0)],
+        stroke,
+    );
+    if clearable {
+        let button = egui::Rect::from_center_size(
+            egui::pos2(rect.right() - 16.0, rect.center().y),
+            egui::vec2(20.0, 20.0),
+        );
+        let clear = ui
+            .interact(button, id.with("clear"), egui::Sense::click())
+            .on_hover_text("Clear search")
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        clear.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Clear search")
+        });
+        painter.circle_filled(
+            button.center(),
+            8.0,
+            if clear.hovered() {
+                t.text_muted
+            } else {
+                t.text_faint
+            },
+        );
+        let cross = egui::Stroke::new(1.5_f32, t.surface);
+        let arm = 3.0;
+        painter.line_segment(
+            [
+                button.center() - egui::vec2(arm, arm),
+                button.center() + egui::vec2(arm, arm),
+            ],
+            cross,
+        );
+        painter.line_segment(
+            [
+                button.center() + egui::vec2(-arm, arm),
+                button.center() + egui::vec2(arm, -arm),
+            ],
+            cross,
+        );
+        if clear.clicked() {
+            value.clear();
+            response.mark_changed();
+            ui.memory_mut(|m| m.request_focus(id));
+        }
+    }
+    response
+}
+
 /// A bordered multi-line input, styled like [`text_input`].
 pub fn text_area(
     ui: &mut Ui,
