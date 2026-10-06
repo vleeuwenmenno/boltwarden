@@ -10,6 +10,7 @@ mod browser_backend;
 mod browser_backend_tests;
 mod bw;
 #[cfg_attr(windows, path = "platform/clipboard_windows.rs")]
+#[cfg_attr(target_os = "macos", path = "platform/clipboard_macos.rs")]
 mod clipboard;
 mod config;
 mod demo;
