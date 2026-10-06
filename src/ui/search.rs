@@ -602,7 +602,7 @@ pub fn draw_search(
         let hints: &[(&str, &str)] = match (settings.show_keyboard_shortcuts, state.view) {
             (false, _) => &[],
             (true, SearchView::Results) => &[
-                ("↑↓", "Navigate"),
+                ("←↑↓→", "Navigate"),
                 ("⏎", "Open"),
                 ("Shift+⏎", "Copy password"),
                 ("Esc", "Hide"),
@@ -620,7 +620,7 @@ pub fn draw_search(
                 &[("↑↓", "Select"), ("Space", "Toggle"), ("Esc", "Back")]
             }
             (true, SearchView::Archived | SearchView::Trash) => &[
-                ("↑↓", "Navigate"),
+                ("←↑↓→", "Navigate"),
                 ("⏎", "Open"),
                 ("Tab", "Sort by"),
                 ("Ctrl+↑↓", "Order"),

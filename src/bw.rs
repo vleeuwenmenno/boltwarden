@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use sha1::Sha1;
 use sha2::Sha256;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
@@ -63,6 +64,9 @@ pub struct BwClient {
     sync_warning: Option<String>,
     sync_status: SyncStatus,
     last_sync_attempt: Option<Instant>,
+    /// Changes whenever vault contents or session may have changed, so a sync fetched
+    /// without the vault lock can tell that it raced with something newer.
+    generation: u64,
     /// The last action center report and the vault state it was computed for. Strength
     /// checks are slow enough to matter on every sync of a big vault.
     health_cache: Option<(u64, HealthReport)>,
@@ -435,6 +439,7 @@ impl BwClient {
             sync_warning: None,
             sync_status: SyncStatus::default(),
             last_sync_attempt: None,
+            generation: next_generation(),
             health_cache: None,
         }
     }
@@ -464,6 +469,7 @@ impl BwClient {
         ));
         self.refresh_token = Some(saved_session_token(saved, &user_key)?);
         self.user_key = Some(user_key);
+        self.generation = next_generation();
         let result = match self.refresh_session().and_then(|_| self.sync()) {
             Err(error @ BwError::Network(_)) => {
                 self.last_sync_attempt = Some(Instant::now());
@@ -534,6 +540,7 @@ impl BwClient {
         self.refresh_token = token.refresh_token;
         self.access_token = Some(token.access_token);
         self.user_key = Some(user_key);
+        self.generation = next_generation();
         self.sync()?;
         self.verified_unlock = true;
         Ok(())
@@ -591,6 +598,7 @@ impl BwClient {
         self.refresh_token = token.refresh_token;
         self.access_token = Some(token.access_token);
         self.user_key = Some(user_key);
+        self.generation = next_generation();
         self.sync()?;
         self.verified_unlock = true;
         Ok(())
@@ -621,8 +629,31 @@ impl BwClient {
     }
 
     pub fn sync_now(&mut self) -> Result<SyncStatus, BwError> {
+        let fetch = self.begin_sync()?;
+        let fetched = fetch.run();
+        self.finish_sync(fetched)
+    }
+
+    /// Takes what a sync needs from the server, so the caller can release the vault
+    /// lock while [`SyncFetch::run`] waits on the network.
+    pub fn begin_sync(&mut self) -> Result<SyncFetch, BwError> {
         self.require_unlocked()?;
-        match self.sync() {
+        self.last_sync_attempt = Some(Instant::now());
+        Ok(self.sync_fetch())
+    }
+
+    /// Applies a sync fetched by [`SyncFetch::run`]. A fetch that started before the
+    /// session changed (lock, unlock, token refresh, a write, or a newer sync) is
+    /// dropped and the current vault is reported unchanged.
+    pub fn finish_sync(&mut self, fetched: SyncFetched) -> Result<SyncStatus, BwError> {
+        if fetched.generation != self.generation
+            || fetched.access_token.as_deref().map(String::as_str) != self.access_token.as_deref()
+            || fetched.refresh_token.as_deref().map(String::as_str) != self.refresh_token.as_deref()
+        {
+            self.require_unlocked()?;
+            return Ok(self.sync_status());
+        }
+        match self.apply_fetched_sync(fetched) {
             Ok(()) => Ok(self.sync_status()),
             Err(error) => {
                 if matches!(error, BwError::Network(_)) {
@@ -638,6 +669,38 @@ impl BwClient {
                 }
                 Err(error)
             }
+        }
+    }
+
+    fn sync_fetch(&self) -> SyncFetch {
+        SyncFetch {
+            generation: self.generation,
+            client: self.client.clone(),
+            base_url: self.base_url.clone(),
+            access_token: self.access_token.clone().map(Zeroizing::new),
+            refresh_token: self.refresh_token.clone().map(Zeroizing::new),
+        }
+    }
+
+    fn apply_fetched_sync(&mut self, fetched: SyncFetched) -> Result<(), BwError> {
+        let SyncFetched {
+            refreshed, outcome, ..
+        } = fetched;
+        if let Some(token) = refreshed {
+            self.apply_refreshed_tokens(token)?;
+        }
+        match outcome {
+            SyncOutcome::Body(body) => {
+                self.apply_sync_body(&body)?;
+                self.retry_seconds = 60;
+                self.persist_offline_cache();
+                Ok(())
+            }
+            SyncOutcome::Revoked(error) => {
+                self.invalidate_session();
+                Err(error)
+            }
+            SyncOutcome::Failed(error) => Err(error),
         }
     }
 
@@ -659,41 +722,18 @@ impl BwClient {
             .refresh_token
             .as_deref()
             .ok_or_else(|| BwError::Cli("no refresh token available".into()))?;
-        let url = format!("{}/identity/connect/token", self.base_url);
-        let params = [
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-            ("client_id", "web"),
-        ];
-        let response = self
-            .client
-            .post(url)
-            .form(&params)
-            .send()
-            .map_err(|e| transport_error(e, "refresh request"))?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().unwrap_or_default();
-            if status.as_u16() == 401
-                || serde_json::from_str::<Value>(&body)
-                    .ok()
-                    .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_owned))
-                    .as_deref()
-                    == Some("invalid_grant")
-            {
+        match request_token_refresh(&self.client, &self.base_url, refresh_token) {
+            Ok(token) => self.apply_refreshed_tokens(token),
+            Err(RefreshError::Rejected(error)) => {
                 self.invalidate_session();
+                Err(error)
             }
-            return Err(BwError::Cli(format!(
-                "refresh failed with HTTP {status}: {body}"
-            )));
+            Err(RefreshError::Failed(error)) => Err(error),
         }
-        let body = Zeroizing::new(
-            response
-                .text()
-                .map_err(|e| transport_error(e, "refresh response body"))?,
-        );
-        let token: RefreshTokenResponse = serde_json::from_str(&body)
-            .map_err(|e| BwError::Parse(format!("refresh response: {e}")))?;
+    }
+
+    fn apply_refreshed_tokens(&mut self, token: RefreshTokenResponse) -> Result<(), BwError> {
+        self.generation = next_generation();
         let old_refresh = zeroize::Zeroizing::new(self.refresh_token.clone().unwrap_or_default());
         self.access_token.zeroize();
         self.access_token = Some(token.access_token);
@@ -1753,6 +1793,7 @@ impl BwClient {
     ) -> Result<Response, BwError> {
         if method != Method::GET {
             self.require_online()?;
+            self.generation = next_generation();
         }
         if self.access_token.is_none() && self.refresh_token.is_some() {
             self.refresh_session()?;
@@ -1804,6 +1845,7 @@ impl BwClient {
     }
 
     fn invalidate_session(&mut self) {
+        self.generation = next_generation();
         self.verified_unlock = false;
         // A confirmed revocation must also prevent subsequent offline unlocks.
         let _ = config::clear_saved_session();
@@ -1981,26 +2023,12 @@ impl BwClient {
 
     fn sync(&mut self) -> Result<(), BwError> {
         self.last_sync_attempt = Some(Instant::now());
-        let response = self.send_authed(Method::GET, "/api/sync?excludeDomains=true", None)?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().unwrap_or_default();
-            return Err(BwError::Cli(format!(
-                "sync failed with HTTP {status}: {body}"
-            )));
-        }
-
-        let body = response
-            .text()
-            .map_err(|e| transport_error(e, "sync response body"))?;
-        self.apply_sync_body(&body)?;
-        self.retry_seconds = 60;
-        self.persist_offline_cache();
-        Ok(())
+        self.apply_fetched_sync(self.sync_fetch().run())
     }
 
     fn apply_sync_body(&mut self, body: &str) -> Result<(), BwError> {
         let user_key = self.user_key.as_deref().ok_or(BwError::NotUnlocked)?;
+        self.generation = next_generation();
         let raw_body: Value =
             serde_json::from_str(body).map_err(|e| BwError::Parse(e.to_string()))?;
         let sync: SyncResponse = serde_json::from_str(body).map_err(|e| {
@@ -2062,6 +2090,181 @@ impl BwClient {
         self.sync_warning = decrypt_skip_warning(skipped, first_error);
         Ok(())
     }
+}
+
+fn next_generation() -> u64 {
+    // Shared by all clients, so a new client after a lock never reuses a number.
+    static GENERATION: AtomicU64 = AtomicU64::new(0);
+    GENERATION.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// Server round trip of a vault sync, detached from [`BwClient`] so it runs without
+/// the vault lock. Created by [`BwClient::begin_sync`].
+pub struct SyncFetch {
+    generation: u64,
+    client: Client,
+    base_url: String,
+    access_token: Option<Zeroizing<String>>,
+    refresh_token: Option<Zeroizing<String>>,
+}
+
+/// Result of [`SyncFetch::run`], applied by [`BwClient::finish_sync`].
+pub struct SyncFetched {
+    generation: u64,
+    access_token: Option<Zeroizing<String>>,
+    refresh_token: Option<Zeroizing<String>>,
+    refreshed: Option<RefreshTokenResponse>,
+    outcome: SyncOutcome,
+}
+
+enum SyncOutcome {
+    Body(Zeroizing<String>),
+    /// The server rejected the session; the client must be signed out.
+    Revoked(BwError),
+    Failed(BwError),
+}
+
+enum RefreshError {
+    Rejected(BwError),
+    Failed(BwError),
+}
+
+impl SyncFetch {
+    /// Mirrors `send_authed`: refresh a missing access token, and on HTTP 401
+    /// refresh once and retry before treating the session as revoked.
+    pub fn run(self) -> SyncFetched {
+        let mut refreshed = None;
+        let outcome = self.fetch(&mut refreshed);
+        SyncFetched {
+            generation: self.generation,
+            access_token: self.access_token,
+            refresh_token: self.refresh_token,
+            refreshed,
+            outcome,
+        }
+    }
+
+    fn fetch(&self, refreshed: &mut Option<RefreshTokenResponse>) -> SyncOutcome {
+        if self.access_token.is_none()
+            && self.refresh_token.is_some()
+            && let Err(outcome) = self.refresh(refreshed)
+        {
+            return outcome;
+        }
+        let response = match self.get(refreshed) {
+            Ok(response) => response,
+            Err(error) => return SyncOutcome::Failed(error),
+        };
+        let response = if response.status().as_u16() == 401 && self.refresh_token.is_some() {
+            if let Err(outcome) = self.refresh(refreshed) {
+                return outcome;
+            }
+            match self.get(refreshed) {
+                Ok(response) if response.status().as_u16() == 401 => {
+                    return SyncOutcome::Revoked(BwError::Cli(
+                        "sync failed with HTTP 401 Unauthorized".into(),
+                    ));
+                }
+                Ok(response) => response,
+                Err(error) => return SyncOutcome::Failed(error),
+            }
+        } else {
+            response
+        };
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            return SyncOutcome::Failed(BwError::Cli(format!(
+                "sync failed with HTTP {status}: {body}"
+            )));
+        }
+        match response.text() {
+            Ok(body) => SyncOutcome::Body(Zeroizing::new(body)),
+            Err(error) => SyncOutcome::Failed(transport_error(error, "sync response body")),
+        }
+    }
+
+    fn refresh(&self, refreshed: &mut Option<RefreshTokenResponse>) -> Result<(), SyncOutcome> {
+        let refresh_token = refreshed
+            .as_ref()
+            .and_then(|token| token.refresh_token.as_deref())
+            .or(self.refresh_token.as_deref().map(String::as_str))
+            .unwrap_or_default();
+        match request_token_refresh(&self.client, &self.base_url, refresh_token) {
+            Ok(mut token) => {
+                // Keep a rotated refresh token from an earlier refresh in this fetch.
+                if token.refresh_token.is_none() {
+                    token.refresh_token = refreshed.take().and_then(|old| old.refresh_token);
+                }
+                *refreshed = Some(token);
+                Ok(())
+            }
+            Err(RefreshError::Rejected(error)) => Err(SyncOutcome::Revoked(error)),
+            Err(RefreshError::Failed(error)) => Err(SyncOutcome::Failed(error)),
+        }
+    }
+
+    fn get(&self, refreshed: &Option<RefreshTokenResponse>) -> Result<Response, BwError> {
+        let token = refreshed
+            .as_ref()
+            .map(|token| token.access_token.as_str())
+            .or(self.access_token.as_deref().map(String::as_str))
+            .ok_or(BwError::NotUnlocked)?;
+        let path = "/api/sync?excludeDomains=true";
+        self.client
+            .get(format!("{}{path}", self.base_url))
+            .bearer_auth(token)
+            .header(sync_client_name_header().0, sync_client_name_header().1)
+            .header(
+                sync_client_version_header().0,
+                sync_client_version_header().1,
+            )
+            .send()
+            .map_err(|e| transport_error(e, &format!("request to {path}")))
+    }
+}
+
+fn request_token_refresh(
+    client: &Client,
+    base_url: &str,
+    refresh_token: &str,
+) -> Result<RefreshTokenResponse, RefreshError> {
+    let url = format!("{base_url}/identity/connect/token");
+    let params = [
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("client_id", "web"),
+    ];
+    let response = client
+        .post(url)
+        .form(&params)
+        .send()
+        .map_err(|e| RefreshError::Failed(transport_error(e, "refresh request")))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().unwrap_or_default();
+        let error = BwError::Cli(format!("refresh failed with HTTP {status}: {body}"));
+        return Err(
+            if status.as_u16() == 401
+                || serde_json::from_str::<Value>(&body)
+                    .ok()
+                    .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_owned))
+                    .as_deref()
+                    == Some("invalid_grant")
+            {
+                RefreshError::Rejected(error)
+            } else {
+                RefreshError::Failed(error)
+            },
+        );
+    }
+    let body = Zeroizing::new(
+        response
+            .text()
+            .map_err(|e| RefreshError::Failed(transport_error(e, "refresh response body")))?,
+    );
+    serde_json::from_str(&body)
+        .map_err(|e| RefreshError::Failed(BwError::Parse(format!("refresh response: {e}"))))
 }
 
 fn transport_error(error: reqwest::Error, context: &str) -> BwError {
@@ -5686,6 +5889,58 @@ mod tests {
     }
 
     #[test]
+    fn sync_fetched_without_lock_is_dropped_after_session_changes() {
+        config::with_test_config(|_| {
+            let body =
+                json!({"profile": {"organizations": []}, "folders": [], "ciphers": []}).to_string();
+            let (mut client, _) = offline_fixture();
+            let (url, thread) = serve_responses(vec![(200, body.clone())]);
+            client.base_url = url;
+            client.access_token = Some("access".into());
+            client.sync_status.offline = false;
+            let items = client.items.len();
+            let fetched = client.begin_sync().unwrap().run();
+            thread.join().unwrap();
+            // A write or another sync applied while the fetch was in flight.
+            client.generation = next_generation();
+            let status = client.finish_sync(fetched).unwrap();
+            assert_eq!(client.items.len(), items);
+            assert_eq!(status.last_synced_unix, client.sync_status.last_synced_unix);
+
+            let (url, thread) = serve_responses(vec![(200, body)]);
+            client.base_url = url;
+            let fetched = client.begin_sync().unwrap().run();
+            thread.join().unwrap();
+            // Locking replaces the client; the fetch must not unlock or fill it.
+            let mut locked = BwClient::new();
+            assert!(matches!(
+                locked.finish_sync(fetched),
+                Err(BwError::NotUnlocked)
+            ));
+            assert!(locked.items.is_empty());
+        });
+    }
+
+    #[test]
+    fn sync_fetched_without_lock_applies_when_session_is_unchanged() {
+        config::with_test_config(|_| {
+            let (mut client, _) = offline_fixture();
+            let (url, thread) = serve_responses(vec![(
+                200,
+                json!({"profile": {"organizations": []}, "folders": [], "ciphers": []}).to_string(),
+            )]);
+            client.base_url = url;
+            client.access_token = Some("access".into());
+            client.sync_status.offline = true;
+            let fetched = client.begin_sync().unwrap().run();
+            thread.join().unwrap();
+            let status = client.finish_sync(fetched).unwrap();
+            assert!(!status.offline);
+            assert!(client.items.is_empty());
+        });
+    }
+
+    #[test]
     fn confirmed_revocation_clears_cache_session_and_unlocked_keys() {
         config::with_test_config(|_| {
             for responses in [
@@ -5888,6 +6143,7 @@ mod tests {
             sync_warning: None,
             sync_status: SyncStatus::default(),
             last_sync_attempt: None,
+            generation: next_generation(),
             health_cache: None,
         };
         client.verify_master_password("correct").unwrap();

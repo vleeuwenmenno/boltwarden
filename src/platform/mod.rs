@@ -34,6 +34,33 @@ pub fn native_options() -> eframe::NativeOptions {
     }
     options
 }
+/// Opens an http(s) address in the default browser without waiting for it.
+pub fn open_url(url: &url::Url) -> std::io::Result<()> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Only web addresses can be opened",
+        ));
+    }
+    #[cfg(windows)]
+    {
+        windows::open_url(url.as_str())
+    }
+    #[cfg(not(windows))]
+    {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("xdg-open")
+            .arg(url.as_str())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        // Reap xdg-open once it hands the address to the browser.
+        std::thread::spawn(move || child.wait());
+        Ok(())
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub mod ipc {
     pub use crate::unix_socket::*;

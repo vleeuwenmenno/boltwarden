@@ -15,6 +15,30 @@ use windows_sys::Win32::{
 pub fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {
     value.as_ref().encode_wide().chain(Some(0)).collect()
 }
+/// Hands an http(s) address to the default browser.
+pub fn open_url(url: &str) -> io::Result<()> {
+    let operation = wide("open");
+    let url = wide(url);
+    let result = unsafe {
+        windows_sys::Win32::UI::Shell::ShellExecuteW(
+            null_mut(),
+            operation.as_ptr(),
+            url.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecuteW reports success with a value above 32.
+    if result as usize > 32 {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "Could not open the browser (error {})",
+            result as usize
+        )))
+    }
+}
 pub fn handle(raw: HANDLE) -> io::Result<OwnedHandle> {
     if raw.is_null() || raw == INVALID_HANDLE_VALUE {
         Err(io::Error::last_os_error())

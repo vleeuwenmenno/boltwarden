@@ -593,6 +593,7 @@ fn handle_rpc_request(
                     .map_err(rpc_error_from_bw),
             );
         }
+        RpcRequest::Sync => return RpcResponse::Synced(sync_vault(vault)),
         RpcRequest::GetSshApproval => {
             return RpcResponse::SshApproval(ssh_approvals.active_request());
         }
@@ -680,14 +681,6 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
                 });
             RpcResponse::Copied(result)
         }
-        RpcRequest::Sync => {
-            let result = state.bw.sync_now().map_err(rpc_error_from_bw);
-            refresh_ssh_key_store_from_vault(&mut state);
-            if result.is_ok() {
-                notify_browser_matches(&state);
-            }
-            RpcResponse::Synced(result)
-        }
         RpcRequest::SecurityWarning => {
             RpcResponse::SecurityWarning(state.auto_lock_warning.clone())
         }
@@ -730,11 +723,7 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
             query,
             state: item_state,
         } => {
-            let before = state.bw.sync_status().last_synced_unix;
-            state.bw.sync_if_stale();
-            if state.bw.sync_status().last_synced_unix != before {
-                notify_browser_matches(&state);
-            }
+            // Answer from memory; windows request a background sync when they open.
             refresh_ssh_key_store_from_vault(&mut state);
             let result = state
                 .bw
@@ -860,6 +849,7 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
         | RpcRequest::SetShortcut(_)
         | RpcRequest::ShortcutBinding(_)
         | RpcRequest::OpenWindow
+        | RpcRequest::Sync
         | RpcRequest::VaultHealth => unreachable!("handled before taking the vault lock"),
     };
     if was_unlocked && !state.bw.has_session() && !explicit_lock {
@@ -1049,6 +1039,29 @@ fn lock_vault_state(state: &mut VaultState, reason: &str) {
     state.ssh_approvals.clear_all(reason);
     apply_ssh_agent_settings(state);
     let _ = config::clear_recent_item();
+}
+
+/// Syncs with the server while other requests keep using the cached vault: the
+/// vault lock is released for the network round trip.
+fn sync_vault(vault: &Arc<Mutex<VaultState>>) -> Result<crate::model::SyncStatus, RpcError> {
+    let poisoned = || RpcError::Message("vault state lock poisoned".into());
+    let fetch = vault
+        .lock()
+        .map_err(|_| poisoned())?
+        .bw
+        .begin_sync()
+        .map_err(rpc_error_from_bw)?;
+    let fetched = fetch.run();
+    let mut state = vault.lock().map_err(|_| poisoned())?;
+    let was_unlocked = state.bw.has_session();
+    let result = state.bw.finish_sync(fetched).map_err(rpc_error_from_bw);
+    refresh_ssh_key_store_from_vault(&mut state);
+    if was_unlocked && !state.bw.has_session() {
+        lock_vault_state(&mut state, "session revoked");
+    } else if result.is_ok() {
+        notify_browser_matches(&state);
+    }
+    result
 }
 
 fn refresh_ssh_key_store_from_vault(state: &mut VaultState) {
