@@ -9,9 +9,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def license_files(directory):
-    for base in [directory, directory / 'LICENSES', directory / 'licenses']:
-        if not base.is_dir():
-            continue
+    # List the real directory names: on case-insensitive filesystems (macOS),
+    # 'LICENSES' and 'licenses' name the same directory and would repeat notices.
+    licenses = [d for d in sorted(directory.iterdir()) if d.is_dir() and d.name.lower() == 'licenses']
+    for base in [directory, *licenses]:
         for file in sorted(base.iterdir()):
             if file.is_file() and file.name.lower().startswith(('license', 'licence', 'copying', 'copyright', 'notice')):
                 yield file
