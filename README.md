@@ -17,11 +17,11 @@ and copy the field you need. Use the full vault window to browse and edit entrie
 <a href="https://addons.mozilla.org/en-US/firefox/addon/boltwarden/">
   <img src="docs/badges/firefox-addon.svg" alt="Get Boltwarden for Firefox" width="172" height="60">
 </a>
+<a href="https://chromewebstore.google.com/detail/pomlcbogekpcooppkmjhdjalddakgmlo">
+  <img src="docs/badges/chrome-web-store.svg" alt="Get Boltwarden from the Chrome Web Store" width="206" height="60">
+</a>
 
 The browser extension requires the Boltwarden desktop app.
-[Chrome Web Store listing](https://chromewebstore.google.com/detail/pomlcbogekpcooppkmjhdjalddakgmlo/)
-is pending review and publication. The Chrome download badge will be added when
-the extension is available.
 
 ## Features
 
