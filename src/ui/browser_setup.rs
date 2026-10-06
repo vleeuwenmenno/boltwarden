@@ -272,6 +272,11 @@ pub fn draw_browser_setup(ui: &mut Ui, state: &mut BrowserSetupState) {
                 }
             }
         });
+        if !state.rows.is_empty()
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+        {
+            state.apply();
+        }
     }
     ui.label(
         RichText::new("Choose browsers that can connect to Boltwarden.")

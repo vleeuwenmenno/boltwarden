@@ -2020,7 +2020,7 @@ impl WindowApp {
         let t = theme();
         if self.section == Section::PairedBrowsers && self.browser_setup_open {
             let hints: &[(&str, &str)] = if self.settings.show_keyboard_shortcuts {
-                &[("↑↓", "Select"), ("Space", "Toggle")]
+                &[("↑↓", "Select"), ("Space", "Toggle"), ("⏎", "Apply")]
             } else {
                 &[]
             };

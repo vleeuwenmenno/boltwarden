@@ -697,9 +697,12 @@ pub fn draw_search(
                 ("Ctrl+R", "Refresh"),
                 ("Esc", "Back"),
             ],
-            (true, SearchView::BrowserSetup) => {
-                &[("↑↓", "Select"), ("Space", "Toggle"), ("Esc", "Back")]
-            }
+            (true, SearchView::BrowserSetup) => &[
+                ("↑↓", "Select"),
+                ("Space", "Toggle"),
+                ("⏎", "Apply"),
+                ("Esc", "Back"),
+            ],
             (true, SearchView::Settings) if state.settings_selected == SHORTCUT_ROW => {
                 state.shortcut_setup.hints()
             }
