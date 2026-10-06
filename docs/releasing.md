@@ -173,7 +173,9 @@ URL, genuine screenshots, and final listing review. Never put store signing keys
 refresh tokens, vault credentials, or browser profiles in the repository.
 
 Enable GitHub private vulnerability reporting and protect the default branch with
-the security, extension, and both architecture checks. Inspect a successful workflow
+the single `CI result` check. It waits for every other job and passes when they passed
+or were skipped by path routing; requiring the individual jobs instead blocks pull
+requests whose skipped matrix jobs never report their matrix names. Inspect a successful workflow
 and download/test its exact artifacts before publishing the draft release. The
 maintainer must configure the GitHub repository and account permissions; this
 working-tree change does not make that external configuration.
