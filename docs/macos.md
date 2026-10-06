@@ -105,4 +105,6 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin
 make package-macos
 ```
 
-This writes the universal ZIP and checksum to `dist/`.
+This writes the universal ZIP and checksum to `dist/`, the same artifact CI builds and
+smoke-tests (`python3 scripts/macos-smoke.py dist`) for every desktop change and
+release.

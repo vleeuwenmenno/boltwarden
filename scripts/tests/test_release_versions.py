@@ -52,6 +52,7 @@ class ReleaseVersionsTests(unittest.TestCase):
         self.assertIn('boltwarden_1.0.0-rc.1_arm64.deb', names)
         self.assertIn('boltwarden-1.0.0-rc.1-1.x86_64.rpm', names)
         self.assertIn('boltwarden-1.0.0-rc.1-1.aarch64.rpm', names)
+        self.assertIn('boltwarden-1.0.0-rc.1-universal-macos.zip', names)
         for name in names:
             self.assertIsNotNone(re.fullmatch(r'[A-Za-z0-9_.-]+', name), name)
 
@@ -79,7 +80,7 @@ class ReleaseVersionsTests(unittest.TestCase):
     def test_inventory_rejects_missing_extra_empty_and_corrupt_artifacts(self):
         version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['package']['version']
         extension = json.loads((ROOT / 'extension/package.json').read_text())['version']
-        for flags, names, count in [([], desktop_artifact_names(version), 10),
+        for flags, names, count in [([], desktop_artifact_names(version), 11),
                                     (['--extension'], extension_artifact_names(extension), 3)]:
             self.assertEqual(len(names), count)
             with self.subTest(flags=flags), tempfile.TemporaryDirectory() as temporary:
