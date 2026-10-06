@@ -484,6 +484,26 @@ pub fn draw_page(
                     settings,
                     ssh_agent_status,
                 ));
+                if !cfg!(windows)
+                    && settings.ssh_agent_enabled
+                    && let Ok(socket) =
+                        crate::config::expand_ssh_agent_socket_path(&settings.ssh_agent_socket_path)
+                {
+                    section(ui, "Use with SSH");
+                    ui.label(
+                        RichText::new(
+                            "Add the first snippet to ~/.ssh/config so every ssh command, \
+                             including apps not started from a terminal, uses Boltwarden's keys. \
+                             The shell lines cover only programs started from that shell.",
+                        )
+                        .size(theme().small())
+                        .color(theme().text_muted),
+                    );
+                    ui.add_space(6.0);
+                    for (label, code) in ssh_snippets(&socket) {
+                        widgets::code_block(ui, label, &code);
+                    }
+                }
             }
         }
     });
@@ -618,4 +638,42 @@ fn link(
         state.settings_selected = row;
         open
     })
+}
+
+/// Configuration that points SSH clients at the agent socket.
+fn ssh_snippets(socket: &std::path::Path) -> [(&'static str, String); 3] {
+    let path = socket.display().to_string();
+    let config_path = path.replace('\\', "\\\\").replace('"', "\\\"");
+    let shell_path = format!("'{}'", path.replace('\'', "'\\''"));
+    [
+        (
+            "~/.ssh/config",
+            format!("Host *\n    IdentityAgent \"{config_path}\""),
+        ),
+        ("bash or zsh", format!("export SSH_AUTH_SOCK={shell_path}")),
+        ("fish", format!("set -gx SSH_AUTH_SOCK {shell_path}")),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssh_snippets_quote_the_socket_path_for_each_format() {
+        let [config, posix, fish] =
+            ssh_snippets(std::path::Path::new("/Users/me/My Keys/it's.sock"));
+        assert_eq!(
+            config.1,
+            "Host *\n    IdentityAgent \"/Users/me/My Keys/it's.sock\""
+        );
+        assert_eq!(
+            posix.1,
+            "export SSH_AUTH_SOCK='/Users/me/My Keys/it'\\''s.sock'"
+        );
+        assert_eq!(
+            fish.1,
+            "set -gx SSH_AUTH_SOCK '/Users/me/My Keys/it'\\''s.sock'"
+        );
+    }
 }

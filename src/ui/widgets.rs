@@ -334,6 +334,56 @@ pub fn search_input(ui: &mut Ui, id: egui::Id, value: &mut String, hint: &str) -
     response
 }
 
+/// A labelled monospace snippet with a Copy button, for configuration to paste elsewhere.
+pub fn code_block(ui: &mut Ui, label: &str, code: &str) {
+    let t = theme();
+    let id = ui.make_persistent_id(("code-block", label));
+    field_label(ui, label);
+    egui::Frame::new()
+        .fill(t.surface)
+        .stroke(egui::Stroke::new(1.0_f32, t.border))
+        .corner_radius(t.rounding)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(code)
+                            .font(t.mono(t.small() + 1.0))
+                            .color(t.text_strong),
+                    )
+                    .selectable(true),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                    let copied_at = ui.data(|data| data.get_temp::<f64>(id));
+                    let now = ui.input(|input| input.time);
+                    let copied = copied_at.is_some_and(|at| now - at < 2.0);
+                    if copied {
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(250));
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(if copied { "Copied" } else { "Copy" })
+                                    .size(t.small())
+                                    .color(if copied { t.success } else { t.accent }),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text(format!("Copy {label}"))
+                        .clicked()
+                    {
+                        ui.ctx().copy_text(code.to_owned());
+                        ui.data_mut(|data| data.insert_temp(id, now));
+                    }
+                });
+            });
+        });
+    ui.add_space(6.0);
+}
+
 /// A bordered multi-line input, styled like [`text_input`].
 pub fn text_area(
     ui: &mut Ui,
