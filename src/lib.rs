@@ -1045,6 +1045,7 @@ fn apply_browser_settings(state: &mut VaultState) -> Result<(), String> {
             hub.shutdown();
         }
     } else if state.browser_hub.is_none() {
+        register_detected_browsers();
         let handler = state
             .browser_handler
             .clone()
@@ -1053,6 +1054,56 @@ fn apply_browser_settings(state: &mut VaultState) -> Result<(), String> {
         state.browser_enabled = true;
     }
     Ok(())
+}
+
+/// Turning on browser integration registers the detected browsers, unless the user already
+/// chose browsers in Browser setup. Failures are logged and retried on the next start.
+fn register_detected_browsers() {
+    let result = config::load_browser_setup()
+        .map_err(|e| e.to_string())
+        .and_then(|mut preferences| {
+            if preferences.configured {
+                return Ok(());
+            }
+            let rows = browser::install::discover().map_err(|e| e.to_string())?;
+            let errors = auto_register_browsers(&mut preferences, rows, |row| {
+                browser::install::register(row.executable, row.family, row.native_host_dir)
+                    .map_err(|e| e.to_string())
+            });
+            if preferences.configured {
+                config::save_browser_setup(&preferences).map_err(|e| e.to_string())?;
+            }
+            if errors.is_empty() {
+                Ok(())
+            } else {
+                Err(errors.join("; "))
+            }
+        });
+    if let Err(error) = result {
+        eprintln!("browser registration: {error}");
+    }
+}
+
+/// Registers the unregistered `rows` while browser setup is unconfigured, and marks it
+/// configured once all succeeded. Returns the failures.
+fn auto_register_browsers(
+    preferences: &mut config::BrowserSetupPreferences,
+    rows: Vec<browser::install::BrowserRegistration>,
+    mut register: impl FnMut(browser::install::BrowserRegistration) -> Result<(), String>,
+) -> Vec<String> {
+    if preferences.configured {
+        return Vec::new();
+    }
+    let errors: Vec<String> = rows
+        .into_iter()
+        .filter(|row| !row.registered)
+        .filter_map(|row| {
+            let label = row.label.clone();
+            register(row).err().map(|error| format!("{label}: {error}"))
+        })
+        .collect();
+    preferences.configured = errors.is_empty();
+    errors
 }
 
 fn apply_browser_request_preferences(state: &mut VaultState, settings: &config::AppSettings) {
@@ -1491,4 +1542,60 @@ fn debug_log(message: &str) {
 /// Browser-launched stdio entry point. Never write diagnostics to stdout.
 pub fn native_host_main() -> std::io::Result<()> {
     browser::native_host::run_native_host()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use browser::install::{BrowserFamily, BrowserRegistration};
+
+    fn row(id: &str, registered: bool) -> BrowserRegistration {
+        BrowserRegistration {
+            id: id.into(),
+            label: id.into(),
+            executable: PathBuf::from(format!("/apps/{id}")),
+            family: BrowserFamily::Chromium,
+            native_host_dir: PathBuf::from(format!("/hosts/{id}")),
+            registered,
+        }
+    }
+
+    #[test]
+    fn enabling_registers_unregistered_browsers_once() {
+        let mut preferences = config::BrowserSetupPreferences::default();
+        let mut registered = Vec::new();
+        let errors = auto_register_browsers(
+            &mut preferences,
+            vec![row("chrome", false), row("firefox", true)],
+            |row| {
+                registered.push(row.id);
+                Ok(())
+            },
+        );
+        assert!(errors.is_empty());
+        assert_eq!(registered, ["chrome"]);
+        assert!(preferences.configured);
+        let errors = auto_register_browsers(&mut preferences, vec![row("vivaldi", false)], |_| {
+            panic!("a configured setup must not be changed")
+        });
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn failed_registration_is_reported_and_retried() {
+        let mut preferences = config::BrowserSetupPreferences::default();
+        let errors = auto_register_browsers(
+            &mut preferences,
+            vec![row("chrome", false), row("vivaldi", false)],
+            |row| {
+                if row.id == "chrome" {
+                    Err("read-only folder".into())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(errors, ["chrome: read-only folder"]);
+        assert!(!preferences.configured, "the next start should try again");
+    }
 }
