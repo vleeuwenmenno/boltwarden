@@ -503,6 +503,41 @@ pub fn draw_page(
                     for (label, code) in ssh_snippets(&socket) {
                         widgets::code_block(ui, label, &code);
                     }
+                    ui.add_space(6.0);
+                    egui::CollapsingHeader::new(
+                        RichText::new("Sign Git commits with SSH").color(theme().text_strong),
+                    )
+                    .id_salt("git-ssh-signing")
+                    .show(ui, |ui| {
+                        let note = |ui: &mut Ui, text: &str| {
+                            ui.label(
+                                RichText::new(text)
+                                    .size(theme().small())
+                                    .color(theme().text_muted),
+                            );
+                            ui.add_space(4.0);
+                        };
+                        note(
+                            ui,
+                            "Git can sign commits and tags with an SSH key from your vault. \
+                             Each signature asks for approval like other SSH use, and Remember \
+                             this terminal covers further commits from the same terminal.",
+                        );
+                        let [list, configure, verify] = git_signing_snippets(&socket);
+                        widgets::code_block(ui, list.0, &list.1);
+                        note(
+                            ui,
+                            "Pick the public key to sign with and paste it after key:: below.",
+                        );
+                        widgets::code_block(ui, configure.0, &configure.1);
+                        note(
+                            ui,
+                            "Git signs through SSH_AUTH_SOCK, not ~/.ssh/config, so set it with \
+                             the bash, zsh or fish line above. Add the same public key to GitHub, \
+                             GitLab or Forgejo as a signing key to show commits as verified there.",
+                        );
+                        widgets::code_block(ui, verify.0, &verify.1);
+                    });
                 }
             }
         }
@@ -655,9 +690,52 @@ fn ssh_snippets(socket: &std::path::Path) -> [(&'static str, String); 3] {
     ]
 }
 
+/// Git configuration for signing commits and tags with a key from the agent.
+fn git_signing_snippets(socket: &std::path::Path) -> [(&'static str, String); 3] {
+    let shell_path = format!("'{}'", socket.display().to_string().replace('\'', "'\\''"));
+    [
+        (
+            "List the keys Boltwarden serves",
+            format!("SSH_AUTH_SOCK={shell_path} ssh-add -L"),
+        ),
+        (
+            "Configure Git",
+            [
+                "git config --global gpg.format ssh",
+                "git config --global gpg.ssh.program ssh-keygen",
+                "git config --global user.signingkey 'key::ssh-ed25519 AAAA… your public key'",
+                "git config --global commit.gpgsign true",
+                "git config --global tag.gpgsign true",
+            ]
+            .join("\n"),
+        ),
+        (
+            "Optional: verify signatures locally",
+            [
+                "echo \"$(git config user.email) $(git config user.signingkey | sed 's/^key:://')\" >> ~/.ssh/allowed_signers",
+                "git config --global gpg.ssh.allowedSignersFile ~/.ssh/allowed_signers",
+            ]
+            .join("\n"),
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_signing_uses_the_agent_socket_and_the_key_prefix() {
+        let [list, configure, verify] =
+            git_signing_snippets(std::path::Path::new("/Users/me/.bitwarden-ssh.sock"));
+        assert_eq!(
+            list.1,
+            "SSH_AUTH_SOCK='/Users/me/.bitwarden-ssh.sock' ssh-add -L"
+        );
+        assert!(configure.1.contains("gpg.format ssh"));
+        assert!(configure.1.contains("user.signingkey 'key::"));
+        assert!(verify.1.contains("gpg.ssh.allowedSignersFile"));
+    }
 
     #[test]
     fn ssh_snippets_quote_the_socket_path_for_each_format() {
