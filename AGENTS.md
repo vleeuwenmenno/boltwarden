@@ -26,11 +26,10 @@ the tests and builds; CI creates and populates the GitHub release draft.
 4. Wait for the tagged workflow to finish successfully. It runs security and
    browser checks, builds native x86_64 and ARM64 Linux packages plus the Windows
    x64 installer/ZIP, and creates a draft release. RC tags are marked as prereleases.
-   Expected attachments are thirteen
-   artifacts plus their thirteen SHA-256 checksum files: tarballs, Debian packages,
-   Arch packages, and Fedora RPMs for both CPUs; separate Chrome and Firefox ZIPs;
-   the extension reviewer source ZIP; and the Windows installer and ZIP. CI verifies
-   downloads after upload.
+   Expected attachments are ten
+   artifacts plus their ten SHA-256 checksum files: tarballs, Debian packages,
+   Arch packages, and Fedora RPMs for both CPUs, and the Windows installer and ZIP.
+   CI verifies downloads after upload.
 5. Review the draft, release notes, artifacts, and applicable manual testing before
    publishing. Do not publish the release before CI finishes: the workflow refuses
    to replace assets on an already published release. Do not modify published
@@ -40,7 +39,10 @@ the tests and builds; CI creates and populates the GitHub release draft.
 
 The extension version is independent of the desktop version. When shipping
 extension changes, update `extension/package.json` and its lockfile consistently
-and follow [extension/PUBLISHING.md](extension/PUBLISHING.md). Browser manifest
+and follow [extension/PUBLISHING.md](extension/PUBLISHING.md). Push an annotated
+`extension-vX.Y.Z` tag (exact `package.json` version, numeric only) from `main`;
+CI runs only the extension job and creates a draft release with the Chrome ZIP,
+Firefox ZIP and reviewer source ZIP plus checksums. Browser manifest
 versions must remain numeric; do not copy a desktop RC suffix into them.
 
 GitHub release ZIPs do not publish extensions to browser stores. Chrome Web Store

@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
-"""Verify the exact release inventory and each checksum before uploading."""
+"""Verify the exact release inventory and each checksum before uploading.
+
+Usage: check-release-artifacts.py [--extension] DIRECTORY
+Desktop tags (v*) and extension tags (extension-v*) publish separate inventories.
+"""
 import hashlib
 import json
 import sys
 import tomllib
 from pathlib import Path
-from release_versions import artifact_names
+from release_versions import desktop_artifact_names, extension_artifact_names
 
 root = Path(__file__).resolve().parents[1]
-version = tomllib.loads((root / 'Cargo.toml').read_text())['package']['version']
-extension = json.loads((root / 'extension/package.json').read_text())['version']
-directory = Path(sys.argv[1])
-names = artifact_names(version, extension)
+args = sys.argv[1:]
+extension_release = args[0] == '--extension'
+directory = Path(args[-1])
+if extension_release:
+    version = json.loads((root / 'extension/package.json').read_text())['version']
+    names = extension_artifact_names(version)
+else:
+    version = tomllib.loads((root / 'Cargo.toml').read_text())['package']['version']
+    names = desktop_artifact_names(version)
 expected = set(names) | {name + '.sha256' for name in names}
 actual = {path.name for path in directory.iterdir()}
 if actual != expected:
