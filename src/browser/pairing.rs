@@ -17,6 +17,9 @@ pub struct PairingRecord {
     pub fingerprint: String,
     pub created_at: u64,
     pub last_seen_at: u64,
+    /// Live session state filled in by the browser hub; never stored on disk.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub connected: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -26,6 +29,9 @@ pub struct PairingRequest {
     pub public_key_spki: String,
     pub fingerprint: String,
 }
+
+/// Seconds between persisted last-used updates for one browser.
+const USE_RECORD_INTERVAL: u64 = 60;
 
 pub struct PairingStore {
     path: PathBuf,
@@ -103,6 +109,7 @@ impl PairingStore {
             fingerprint: pending.fingerprint.clone(),
             created_at: now,
             last_seen_at: now,
+            connected: false,
         });
         self.persist(&next)?;
         self.records = next;
@@ -115,9 +122,20 @@ impl PairingStore {
         self.records = next;
         Ok(())
     }
-    /// The last successful authenticated connection, not a continuous activity timestamp.
+    /// The last successful authenticated connection.
     pub(super) fn record_authenticated(&mut self, id: &str) -> io::Result<()> {
         self.record_authenticated_at(id, unix_seconds())
+    }
+    /// Advances the last-used time for an authenticated request. Writes are
+    /// throttled so a busy browser does not rewrite the trust store per request.
+    pub(super) fn record_used(&mut self, id: &str) -> io::Result<()> {
+        let now = unix_seconds();
+        match self.get(id) {
+            Some(record) if now >= record.last_seen_at.saturating_add(USE_RECORD_INTERVAL) => {
+                self.record_authenticated_at(id, now)
+            }
+            _ => Ok(()),
+        }
     }
     fn record_authenticated_at(&mut self, id: &str, at: u64) -> io::Result<()> {
         let mut next = self.records.clone();
