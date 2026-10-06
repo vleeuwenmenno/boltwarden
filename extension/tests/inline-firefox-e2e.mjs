@@ -128,6 +128,8 @@ try {
   await evaluate('([...document.querySelectorAll("button")].find(button => button.textContent.includes("Pair with Boltwarden")).click(), true)');
   await until(() => existsSync(join(directory, 'pairing.json')), 'Authenticated native pairing');
   await until(() => evaluate('document.body.innerText.includes("Connected") && !document.body.innerText.includes("Pair with Boltwarden")'), 'Authenticated extension state');
+  // These checks drive the menu explicitly; automatic opening and submitting are covered in Chromium.
+  await evaluate('browser.storage.local.set({ settings: { autoOpen: false, autoSubmit: false } }).then(() => true)');
 
   const messages = async () => (await readFile(join(directory, 'pairing.json.log'), 'utf8')).trim().split('\n').map(JSON.parse);
   const calls = async type => (await messages()).filter(message => message.type === type).length;
