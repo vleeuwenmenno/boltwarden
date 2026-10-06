@@ -14,6 +14,12 @@ use macos::Runtime;
 #[cfg(windows)]
 use windows::Runtime;
 
+/// Names for the Ctrl, Alt, Shift and Super modifiers, in that order.
+#[cfg(target_os = "macos")]
+pub const MODIFIER_NAMES: [&str; 4] = ["Control", "Option", "Shift", "Command"];
+#[cfg(not(target_os = "macos"))]
+pub const MODIFIER_NAMES: [&str; 4] = ["Ctrl", "Alt", "Shift", "Super"];
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Shortcut {
@@ -26,10 +32,15 @@ pub struct Shortcut {
 impl Shortcut {
     pub fn validate(&self) -> Result<(), String> {
         if !self.ctrl && !self.alt && !self.super_key {
-            return Err("Use Ctrl, Alt, or Super with the key".into());
+            let [ctrl, alt, _, super_key] = MODIFIER_NAMES;
+            return Err(format!("Use {ctrl}, {alt}, or {super_key} with the key"));
         }
         if self.virtual_key().is_none() {
             return Err("Choose a letter, digit, Space, or F1–F24".into());
+        }
+        #[cfg(target_os = "macos")]
+        if macos::key_code(&self.key).is_none() {
+            return Err("Mac keyboards stop at F20; choose another key".into());
         }
         #[cfg(windows)]
         if self.super_key || self.key == "F12" {
@@ -51,19 +62,11 @@ impl Shortcut {
         ((1..=24).contains(&number) && self.key == format!("F{number}")).then(|| 0x70 + number - 1)
     }
     pub fn label(&self) -> String {
-        let mut parts = Vec::new();
-        if self.ctrl {
-            parts.push("Ctrl");
-        }
-        if self.alt {
-            parts.push("Alt");
-        }
-        if self.shift {
-            parts.push("Shift");
-        }
-        if self.super_key {
-            parts.push("Super");
-        }
+        let mut parts: Vec<&str> = [self.ctrl, self.alt, self.shift, self.super_key]
+            .into_iter()
+            .zip(MODIFIER_NAMES)
+            .filter_map(|(pressed, name)| pressed.then_some(name))
+            .collect();
         parts.push(&self.key);
         parts.join("+")
     }
@@ -190,11 +193,7 @@ pub fn binding(shortcut: &Shortcut) -> Result<String, String> {
     {
         hyprland::copy_binding(shortcut)
     }
-    #[cfg(target_os = "macos")]
-    {
-        Err("Global shortcuts are not supported on macOS yet".into())
-    }
-    #[cfg(windows)]
+    #[cfg(not(target_os = "linux"))]
     {
         Ok(format!(
             "\"{}\" toggle",
@@ -238,7 +237,12 @@ mod tests {
     }
     #[test]
     fn validates_modifiers_and_limits_keys_to_safe_names() {
-        for key in ["A", "0", "Space", "F1", "F24"] {
+        let last_function_key = if cfg!(target_os = "macos") {
+            "F20"
+        } else {
+            "F24"
+        };
+        for key in ["A", "0", "Space", "F1", last_function_key] {
             assert!(
                 Shortcut {
                     ctrl: true,
@@ -249,7 +253,11 @@ mod tests {
                 .is_ok()
             );
         }
-        for key in ["a", "F0", "F01", "F25", "B; exec bad", "A\nexec=bad"] {
+        #[cfg(target_os = "macos")]
+        let invalid = ["a", "F0", "F01", "F21", "F25", "B; exec bad", "A\nexec=bad"];
+        #[cfg(not(target_os = "macos"))]
+        let invalid = ["a", "F0", "F01", "F25", "B; exec bad", "A\nexec=bad"];
+        for key in invalid {
             assert!(
                 Shortcut {
                     ctrl: true,

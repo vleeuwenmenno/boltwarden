@@ -137,6 +137,11 @@ pub mod ipc {
 #[path = "ipc_windows.rs"]
 pub mod ipc;
 #[cfg(target_os = "macos")]
+pub mod macos;
+#[cfg(target_os = "macos")]
+#[path = "main_thread_macos.rs"]
+pub mod main_thread;
+#[cfg(target_os = "macos")]
 #[path = "process_macos.rs"]
 pub mod process;
 #[cfg(windows)]

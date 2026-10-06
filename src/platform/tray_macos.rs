@@ -1,9 +1,8 @@
-//! The menu bar item. AppKit requires it on the main thread with events flowing, so the
-//! daemon's command loop waits through `recv`, which pumps AppKit events meanwhile.
+//! The menu bar item. AppKit requires it on the main thread with events flowing, which
+//! `platform::main_thread::recv` provides while the daemon waits for commands.
+use crate::platform::main_thread::pump;
 use objc2::MainThreadMarker;
-use objc2::rc::autoreleasepool;
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEventMask};
-use objc2_foundation::{NSDate, NSDefaultRunLoopMode};
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 use std::cell::RefCell;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -71,35 +70,4 @@ pub fn spawn(tx: mpsc::Sender<TrayCommand>) -> Result<Handle, String> {
         .map_err(|e| e.to_string())?;
     TRAY.with(|slot| *slot.borrow_mut() = Some(tray));
     Ok(Handle)
-}
-
-/// Waits for the next message while AppKit delivers menu bar clicks on the main thread.
-pub fn recv<T>(rx: &mpsc::Receiver<T>) -> Result<T, mpsc::RecvError> {
-    let Some(mtm) = MainThreadMarker::new() else {
-        return rx.recv();
-    };
-    let app = NSApplication::sharedApplication(mtm);
-    loop {
-        match rx.try_recv() {
-            Ok(message) => return Ok(message),
-            Err(mpsc::TryRecvError::Disconnected) => return Err(mpsc::RecvError),
-            Err(mpsc::TryRecvError::Empty) => pump(&app, Duration::from_millis(50)),
-        }
-    }
-}
-
-/// Handles AppKit events, waiting up to `wait` for the first one.
-fn pump(app: &NSApplication, wait: Duration) {
-    autoreleasepool(|_| {
-        let mut until = NSDate::dateWithTimeIntervalSinceNow(wait.as_secs_f64());
-        while let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
-            NSEventMask::Any,
-            Some(&until),
-            unsafe { NSDefaultRunLoopMode },
-            true,
-        ) {
-            app.sendEvent(&event);
-            until = NSDate::distantPast();
-        }
-    });
 }

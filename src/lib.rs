@@ -279,13 +279,13 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
     Ok(())
 }
 
-/// macOS delivers menu bar clicks on the main thread, so it keeps handling them while waiting.
+/// macOS delivers menu bar clicks and hotkeys on the main thread, so it keeps handling them while waiting.
 fn next_daemon_command(
     rx: &mpsc::Receiver<DaemonCommand>,
 ) -> Result<DaemonCommand, mpsc::RecvError> {
     #[cfg(target_os = "macos")]
     {
-        tray::recv(rx)
+        platform::main_thread::recv(rx)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -378,6 +378,8 @@ fn run_popup() -> eframe::Result<()> {
         "boltwarden",
         popup_options(),
         Box::new(|cc| {
+            #[cfg(target_os = "macos")]
+            platform::macos::join_all_spaces(cc);
             ui::theme::theme().install(&cc.egui_ctx);
             Ok(Box::new(App::new(backend, popup_rx)))
         }),
@@ -1453,7 +1455,8 @@ fn start_popup_stdin_listener(tx: mpsc::Sender<PopupCommand>) {
 }
 
 fn popup_options() -> eframe::NativeOptions {
-    eframe::NativeOptions {
+    #[allow(unused_mut)]
+    let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(ui::widgets::WINDOW_SIZE)
             .with_min_inner_size(ui::widgets::WINDOW_SIZE)
@@ -1473,7 +1476,10 @@ fn popup_options() -> eframe::NativeOptions {
             .with_active(true),
         run_and_return: true,
         ..platform::native_options()
-    }
+    };
+    #[cfg(target_os = "macos")]
+    platform::macos::accessory_app(&mut options);
+    options
 }
 
 fn debug_log(message: &str) {
