@@ -110,7 +110,7 @@ pub struct AppSettings {
     pub obscure_screen_capture: bool,
     #[serde(default)]
     pub start_list: StartList,
-    /// Open the daemon in the menu bar at login (macOS LaunchAgent).
+    /// Start the daemon at login (macOS LaunchAgent, XDG autostart entry on Linux).
     #[serde(default)]
     pub start_at_login: bool,
 }

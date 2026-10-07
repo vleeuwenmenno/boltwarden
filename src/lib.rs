@@ -1062,14 +1062,14 @@ fn apply_browser_settings(state: &mut VaultState) -> Result<(), String> {
     Ok(())
 }
 
-/// Starts the daemon at login when the setting asks for it; macOS only for now.
+/// Starts the daemon at login when the setting asks for it. Windows uses its installer.
 fn apply_login_item(settings: &config::AppSettings) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         platform::login_item::apply(settings.start_at_login)
             .map_err(|error| format!("Start at login: {error}"))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = settings;
         Ok(())

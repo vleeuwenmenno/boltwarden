@@ -1,7 +1,7 @@
 FROM debian:bookworm-slim
 COPY *.deb /tmp/
 RUN apt-get update && apt-get install -y --no-install-recommends /tmp/*.deb python3
-RUN test -f /usr/lib/systemd/user/boltwarden.service && \
+RUN test ! -e /usr/lib/systemd/user/boltwarden.service && \
     test -f /usr/share/licenses/boltwarden/LICENSE && \
     test -x /usr/bin/boltwarden-setup
 RUN python3 - <<'PY'
