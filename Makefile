@@ -4,13 +4,11 @@ PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 BIN_NAME := boltwarden
 BIN_PATH := $(BINDIR)/$(BIN_NAME)
-SERVICE_NAME ?= boltwarden.service
-SYSTEMD_USER_DIR ?= $(HOME)/.config/systemd/user
 CARGO ?= cargo
 NPM ?= npm
 BROWSER_TARGET ?= all
 
-.PHONY: help all build release install install-service install-browser uninstall uninstall-service check test clean extension-deps extension-check extension-test extension-build extension-zip extension-release-check playground security package package-macos packaging-test
+.PHONY: help all build release install install-browser uninstall check test clean extension-deps extension-check extension-test extension-build extension-zip extension-release-check playground security package package-macos packaging-test
 
 ##@ General
 help: ## Show available targets (default)
@@ -56,17 +54,11 @@ clean: ## Remove Rust build artifacts
 install: ## Install the existing release binary
 	sh scripts/install.sh install-binary "target/release/$(BIN_NAME)" "$(DESTDIR)$(BIN_PATH)"
 
-install-service: ## Install the systemd user service
-	sh scripts/install.sh install-service "$(BIN_PATH)" "$(SERVICE_NAME)" "$(SYSTEMD_USER_DIR)"
-
 install-browser: ## Register the installed binary with browsers (BROWSER_TARGET=all)
 	"$(BIN_PATH)" install-browser --browser "$(BROWSER_TARGET)" --path "$(BIN_PATH)"
 
 uninstall: ## Remove the installed binary
 	sh scripts/install.sh uninstall-binary "$(DESTDIR)$(BIN_PATH)"
-
-uninstall-service: ## Remove the systemd user service
-	sh scripts/install.sh uninstall-service "$(SERVICE_NAME)" "$(SYSTEMD_USER_DIR)"
 
 ##@ Browser extension
 extension-deps: ## Install browser extension dependencies
@@ -109,5 +101,5 @@ package-macos: ## Build a universal, ad-hoc signed Boltwarden.app ZIP (on macOS)
 	python3 scripts/package-macos.py --iconset target/Boltwarden.iconset --output dist \
 		--binary-dir target/aarch64-apple-darwin/release --binary-dir target/x86_64-apple-darwin/release
 
-packaging-test: ## Check packaging and user-service opt-in behavior
+packaging-test: ## Check packaging and setup opt-in behavior
 	python3 -m unittest discover -s scripts/tests

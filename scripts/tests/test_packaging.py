@@ -44,25 +44,23 @@ class PackagingTests(unittest.TestCase):
                 self.assertEqual((member.uid, member.gid, member.mtime, member.mode), (0, 0, 123, 0o755))
                 self.assertEqual(archive.extractfile(member).read(), b'fixture')
 
-    def test_setup_requires_opt_in_and_uses_only_user_systemd(self):
+    def test_setup_requires_opt_in_and_never_touches_systemd(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
             log = directory / 'calls'
-            for name, script in {
-                'id': '#!/bin/sh\necho 1000\n',
-                'systemctl': '#!/bin/sh\nprintf "%s\\n" "$*" >> "$TEST_SYSTEMCTL_LOG"\n',
-            }.items():
-                path = directory / name
-                path.write_text(script)
-                path.chmod(0o755)
+            path = directory / 'id'
+            path.write_text('#!/bin/sh\necho 1000\n')
+            path.chmod(0o755)
+            path = directory / 'systemctl'
+            path.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$TEST_SYSTEMCTL_LOG"\n')
+            path.chmod(0o755)
             env = {**os.environ, 'PATH': f'{directory}:/usr/bin:/bin', 'TEST_SYSTEMCTL_LOG': str(log)}
             script = str(ROOT / 'packaging/boltwarden-setup')
             refused = subprocess.run([script], input='', text=True, env=env, capture_output=True)
             self.assertEqual(refused.returncode, 2)
+            removed = subprocess.run([script, '--enable-service'], env=env, capture_output=True)
+            self.assertEqual(removed.returncode, 2)
             self.assertFalse(log.exists())
-            subprocess.run([script, '--enable-service'], env=env, check=True, capture_output=True)
-            self.assertEqual(log.read_text().splitlines(), [
-                '--user daemon-reload', '--user enable --now boltwarden.service'])
 
 
 if __name__ == '__main__':

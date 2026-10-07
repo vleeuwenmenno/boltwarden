@@ -18,9 +18,8 @@ Requires: libwayland-client.so.0()(64bit)
 Requires: libEGL.so.1()(64bit), libwayland-egl.so.1()(64bit)
 
 %description
-Desktop vault, browser integration, and an optional systemd user service.
-Run boltwarden-setup as your desktop user to choose graphical-login autostart.
-Package installation does not enable or start the service.
+Desktop vault and browser integration. Turn on Start at login in Settings,
+General. Package installation does not start the app.
 
 %install
 mkdir -p %{buildroot}
@@ -30,7 +29,6 @@ cp -a %{payload}/. %{buildroot}/
 %defattr(-,root,root,-)
 /usr/bin/boltwarden
 /usr/bin/boltwarden-setup
-/usr/lib/systemd/user/boltwarden.service
 /usr/share/applications/boltwarden.desktop
 /usr/share/icons/hicolor/scalable/apps/boltwarden.svg
 %doc /usr/share/doc/boltwarden

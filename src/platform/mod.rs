@@ -139,6 +139,9 @@ pub mod ipc;
 #[cfg(target_os = "macos")]
 #[path = "login_item_macos.rs"]
 pub mod login_item;
+#[cfg(target_os = "linux")]
+#[path = "login_item_linux.rs"]
+pub mod login_item;
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "macos")]

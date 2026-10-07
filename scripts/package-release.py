@@ -72,7 +72,6 @@ def main():
         root = work / 'package'
         install(args.binary, root / 'usr/bin/boltwarden', 0o755)
         install(ROOT / 'packaging/boltwarden-setup', root / 'usr/bin/boltwarden-setup', 0o755)
-        install(ROOT / 'packaging/boltwarden.service', root / 'usr/lib/systemd/user/boltwarden.service')
         install(ROOT / 'packaging/boltwarden.desktop', root / 'usr/share/applications/boltwarden.desktop')
         install(ROOT / 'extension/public/bolt.svg', root / 'usr/share/icons/hicolor/scalable/apps/boltwarden.svg')
         install(ROOT / 'README.md', root / 'usr/share/doc/boltwarden/README.md')
@@ -115,8 +114,7 @@ Depends: libc6 (>= 2.36), libgcc-s1, libfontconfig1, libgl1, libx11-6, libxcurso
 Recommends: dbus-user-session
 Homepage: https://github.com/vleeuwenmenno/boltwarden
 Description: Unofficial Linux desktop client for Bitwarden and Vaultwarden
- Includes browser integration and an optional systemd user service.
- Run boltwarden-setup as your desktop user to enable autostart.
+ Includes browser integration. Turn on Start at login in Settings, General.
 ''')
         target = output / f'boltwarden_{version}_{deb_arch}.deb'
         subprocess.run(['dpkg-deb', '--root-owner-group', '--build', str(root), str(target)], check=True)
@@ -164,9 +162,7 @@ depend = libxrandr
 depend = libxcb
 depend = libxkbcommon
 depend = wayland
-optdepend = systemd: optional user service
 ''')
-        (root / '.INSTALL').write_text('post_install() { echo "Run boltwarden-setup as your desktop user to configure autostart."; }\n')
         tar = work / 'arch.tar'
         archive(root, tar, epoch)
         target = output / f'boltwarden-{arch_version}-1-{arch}.pkg.tar.zst'

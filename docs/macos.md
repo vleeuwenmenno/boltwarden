@@ -3,8 +3,8 @@
 The macOS build is **unsigned** and runs on macOS 11 or later, as one universal app
 for Apple silicon and Intel Macs. It is signed ad hoc rather than with an Apple
 Developer ID, so macOS asks you to approve it once. Evaluate it with a test vault.
-Start at login and hiding quick access from screen capture are not available on
-macOS yet.
+Turn on **Start at login** in **Settings → General** to start Boltwarden in the menu
+bar when you log in.
 
 ## Download and installation
 

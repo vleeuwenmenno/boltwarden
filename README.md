@@ -101,7 +101,6 @@ Requirements:
 
 - Rust/Cargo 1.95 or newer
 - Linux desktop session (for macOS, see [building on macOS](docs/macos.md#building))
-- systemd user services, if you want autostart
 
 Build a release binary (`make` alone shows help):
 
@@ -115,20 +114,9 @@ Install it to `/usr/local/bin/boltwarden`:
 sudo make install
 ```
 
-Install and start the user service:
-
-```bash
-make install-service
-```
-
-The service runs:
-
-```bash
-/usr/local/bin/boltwarden --daemon
-```
-
-`--daemon` starts the tray icon, activation socket, and in-memory vault session
-without opening the popup immediately.
+`boltwarden --daemon` starts the tray icon, activation socket, and in-memory vault
+session without opening the popup. Every other command starts it too when it is not
+running yet, so a shortcut or the app launcher works without autostart.
 
 ### Distribution packages and autostart
 
@@ -138,9 +126,19 @@ with `sudo dnf install ./boltwarden-*.rpm`.
 RPM packages are available in CI builds after RC1 and will be attached to the next
 release; the published RC1 does not include them. There is no Boltwarden DNF/YUM
 repository yet, so updates require downloading a newer package.
-Run `boltwarden-setup` **without sudo** afterward to choose whether Boltwarden
-starts at graphical login. Packages install a user service but never enable it
-for all users. See [package requirements and verification](docs/releasing.md).
+To start Boltwarden at login, turn on **Start at login** in **Settings → General**.
+It writes `~/.config/autostart/boltwarden.desktop` (or under `$XDG_CONFIG_HOME`), which
+GNOME, KDE Plasma, Xfce, Cinnamon, MATE and systemd-managed sessions such as uwsm run at
+graphical login. Window managers that ignore XDG autostart, such as Sway or Hyprland
+without uwsm, need their own startup line, for example `exec-once = boltwarden --daemon`.
+See [package requirements and verification](docs/releasing.md).
+
+Earlier versions shipped a systemd user service instead. If you enabled it, remove its
+leftover link once and turn on the setting:
+
+```bash
+rm -f ~/.config/systemd/user/*.wants/boltwarden.service
+```
 
 ## Nix
 
@@ -166,7 +164,7 @@ boltwarden --daemon
 ```
 
 This is useful on desktops where you prefer launching the daemon manually instead
-of installing the systemd user service.
+of turning on Start at login.
 
 GitHub Actions prepares release tarballs, Debian, Arch, and Fedora RPM packages for
 `x86_64` and `aarch64`, with SHA-256 checksums. Distribution binaries require
@@ -841,33 +839,9 @@ has elapsed; a failed sync keeps cached results and shows a warning.
 A muted footer label shows sync state. Hover for the last-sync time; click it or
 press `Ctrl+R` to sync manually.
 
-## Service Management
+## Removing a source install
 
-Check service status:
-
-```bash
-systemctl --user status boltwarden.service
-```
-
-Restart the daemon:
-
-```bash
-systemctl --user restart boltwarden.service
-```
-
-Stop the daemon:
-
-```bash
-systemctl --user stop boltwarden.service
-```
-
-Remove the service:
-
-```bash
-make uninstall-service
-```
-
-Remove the installed binary:
+Turn off **Start at login** first, then remove the installed binary:
 
 ```bash
 sudo make uninstall
@@ -880,7 +854,6 @@ The Makefile supports the usual `PREFIX` override:
 ```bash
 make release
 sudo make install PREFIX=/opt/boltwarden
-make install-service PREFIX=/opt/boltwarden
 ```
 
 This installs the binary to:
@@ -889,11 +862,7 @@ This installs the binary to:
 /opt/boltwarden/bin/boltwarden
 ```
 
-and writes the user service to:
-
-```text
-~/.config/systemd/user/boltwarden.service
-```
+Start at login writes the path of the running binary into its autostart entry.
 
 ## Development
 

@@ -10,7 +10,7 @@ use egui::{Context, RichText, Ui};
 const SEARCH_INPUT_ID: &str = "vault-search-input";
 const SSH_PATH_INPUT_ID: &str = "settings-ssh-socket-path";
 const SETTINGS_ROWS: usize = 18;
-/// Shown on macOS only; other platforms start at login through their packages.
+/// Shown on macOS and Linux; the Windows installer offers start at sign-in instead.
 pub(crate) const START_AT_LOGIN_ROW: usize = 17;
 /// Rows 0 to 10 except the start list are plain switches, drawn from one table.
 const TOGGLE_ROWS: usize = 10;
@@ -92,13 +92,13 @@ pub(crate) const SETTING_TEXT: [(&str, &str); SETTINGS_ROWS] = [
     ),
     (
         "Start at login",
-        "Open Boltwarden in the menu bar when you log in",
+        "Start Boltwarden in the background when you log in",
     ),
 ];
 
 /// Rows this platform offers; the others are hidden and skipped by the keyboard.
 pub(crate) fn row_supported(row: usize) -> bool {
-    row != START_AT_LOGIN_ROW || cfg!(target_os = "macos")
+    row != START_AT_LOGIN_ROW || cfg!(any(target_os = "macos", target_os = "linux"))
 }
 
 /// Whether every word of `query` appears in the row's title or description.
@@ -129,7 +129,7 @@ impl SettingsGroup {
     /// The category's rows in display order, which keyboard selection follows.
     pub(crate) fn rows(self) -> &'static [usize] {
         match self {
-            Self::General if cfg!(target_os = "macos") => {
+            Self::General if row_supported(START_AT_LOGIN_ROW) => {
                 &[START_AT_LOGIN_ROW, 1, 2, START_LIST_ROW, SHORTCUT_ROW, 0, 4]
             }
             Self::General => &[1, 2, START_LIST_ROW, SHORTCUT_ROW, 0, 4],
@@ -2105,7 +2105,7 @@ mod tests {
         assert_eq!(PASSKEY_VERIFICATION_ROW, PAIRED_BROWSERS_ROW + 1);
         assert_eq!(START_AT_LOGIN_ROW, SETTINGS_ROWS - 1);
         assert_eq!(SHORTCUT_ROW, START_AT_LOGIN_ROW - 1);
-        if cfg!(target_os = "macos") {
+        if row_supported(START_AT_LOGIN_ROW) {
             assert!(matches!(
                 toggle_setting(START_AT_LOGIN_ROW, &settings),
                 Some(SearchAction::SetStartAtLogin(true))

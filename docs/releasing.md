@@ -157,20 +157,16 @@ DNF resolves dependencies from Fedora's repositories. RPMs are currently unsigne
 and distributed with SHA-256 checksums; there is no Boltwarden DNF/YUM repository
 or automatic package update channel. Installing a newer downloaded RPM uses the
 same command. Remove it with `sudo dnf remove boltwarden`.
-Package installation installs the user unit but does not start the app or ask root
-which user's session to modify. As the desktop user, run `boltwarden-setup` to get
-an explicit yes/no prompt for graphical-login autostart. For automated opt-in use
-`boltwarden-setup --enable-service`. Do not run it through sudo.
+Package installation does not start the app or ask root which user's session to
+modify. Autostart is per user: **Start at login** in **Settings → General** writes an
+XDG autostart entry to `~/.config/autostart/boltwarden.desktop`, which desktop
+environments and systemd-managed sessions (such as uwsm) run at graphical login.
+Turn it off before removing a package; a leftover entry is skipped because its
+`TryExec` binary is gone. `boltwarden-setup` only offers browser registration. Do not
+run it through sudo. Package upgrades do not restart an unlocked running vault
+automatically; restart it deliberately after saving any edits.
 
-The user service follows `graphical-session.target`. The desktop/compositor must
-start that target and import display variables into the user manager. Check
-`systemctl --user status graphical-session.target` and `systemctl --user show-environment`
-if the service cannot open its UI. No linger or system-wide daemon is configured.
-Disable with `systemctl --user disable --now boltwarden.service` before removing
-a package. Package upgrades do not restart an unlocked running vault automatically;
-restart it deliberately after saving any edits.
-
-Before publishing, test installation, upgrade, removal, service opt-in/decline,
+Before publishing, test installation, upgrade, removal, Start at login on and off,
 Wayland and X11 launch, and desktop browser registration on each CPU/distro target.
 Test against a disposable real Vaultwarden/Bitwarden account: login, 2FA, lock,
 offline unlock, sync, fills, save/update, passkeys, and revocation. Automated fixtures
