@@ -99,7 +99,18 @@ fn browser_process_description(host_pid: u32) -> String {
     crate::platform::windows::browser_description(host_pid)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
+fn browser_process_description(host_pid: u32) -> String {
+    use crate::platform::process;
+    if let Some(pid) = process::ppid(host_pid)
+        && let Some(executable) = process::executable(pid)
+    {
+        return format!("Browser process: {executable} (PID {pid})");
+    }
+    format!("Native host PID: {host_pid}")
+}
+
+#[cfg(target_os = "linux")]
 fn browser_process_description(host_pid: u32) -> String {
     let parent = std::fs::read_to_string(format!("/proc/{host_pid}/status"))
         .ok()

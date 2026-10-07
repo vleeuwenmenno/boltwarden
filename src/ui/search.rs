@@ -2,37 +2,151 @@ use crate::config::{self, AppSettings, PasskeyVerification, StartList};
 use crate::icons::IconCache;
 use crate::model::{BwItem, ItemState, SshAgentStatus, SyncStatus};
 use crate::ui::paired_browsers::{PairedBrowsersAction, PairedBrowsersState, draw_paired_browsers};
+use crate::ui::shortcuts as sc;
 use crate::ui::theme::theme;
 use crate::ui::widgets;
 use egui::{Context, RichText, Ui};
 
 const SEARCH_INPUT_ID: &str = "vault-search-input";
 const SSH_PATH_INPUT_ID: &str = "settings-ssh-socket-path";
-const SETTINGS_ROWS: usize = 17;
-const SHORTCUT_ROW: usize = 16;
-const ACKNOWLEDGEMENTS_ROW: usize = 15;
-const BROWSER_SETUP_ROW: usize = 14;
-const PASSKEY_VERIFICATION_ROW: usize = 13;
-const PAIRED_BROWSERS_ROW: usize = 12;
-const DEFAULT_URI_MATCH_ROW: usize = 11;
-const SCREEN_CAPTURE_ROW: usize = 5;
-const START_LIST_ROW: usize = 3;
-const IDLE_TIMEOUT_ROW: usize = 7;
-/// Sections used by the full-window settings view. Quick access keeps its compact list.
+const SETTINGS_ROWS: usize = 18;
+/// Shown on macOS only; other platforms start at login through their packages.
+pub(crate) const START_AT_LOGIN_ROW: usize = 17;
+/// Rows 0 to 10 except the start list are plain switches, drawn from one table.
+const TOGGLE_ROWS: usize = 10;
+pub(crate) const SHORTCUT_ROW: usize = 16;
+pub(crate) const ACKNOWLEDGEMENTS_ROW: usize = 15;
+pub(crate) const BROWSER_SETUP_ROW: usize = 14;
+pub(crate) const PASSKEY_VERIFICATION_ROW: usize = 13;
+pub(crate) const PAIRED_BROWSERS_ROW: usize = 12;
+pub(crate) const DEFAULT_URI_MATCH_ROW: usize = 11;
+pub(crate) const SCREEN_CAPTURE_ROW: usize = 5;
+pub(crate) const START_LIST_ROW: usize = 3;
+pub(crate) const IDLE_TIMEOUT_ROW: usize = 7;
+/// Title and description of each settings row, for filtering by the search field.
+pub(crate) const SETTING_TEXT: [(&str, &str); SETTINGS_ROWS] = [
+    (
+        "Show keyboard shortcuts",
+        "Show the hint bar at the bottom of the window",
+    ),
+    (
+        "Close after copying",
+        "Hide quick access after a value is copied",
+    ),
+    (
+        "Restore recent item",
+        "Reopen the last item for 30 seconds after hiding",
+    ),
+    ("Start with", "What the empty search shows"),
+    (
+        "Show website icons",
+        "Fetch icons from your server's icon service",
+    ),
+    (
+        "Obscure in screen captures",
+        "Hide this window in screenshots and screen sharing",
+    ),
+    (
+        "Lock when the screen locks",
+        "Lock the vault when the desktop session locks",
+    ),
+    (
+        "Lock after idle timeout",
+        "Lock the vault after the session has been idle",
+    ),
+    (
+        "Enable SSH agent",
+        "Serve SSH keys from the vault over a local agent socket",
+    ),
+    (
+        "Keep offline copy",
+        "Keep an encrypted copy for read-only access without a connection",
+    ),
+    (
+        "Enable browser integration",
+        "Allow paired browser extensions to fill logins",
+    ),
+    (
+        "Default URI matching",
+        "Applies only when an item has no explicit match rule",
+    ),
+    (
+        "Paired browsers",
+        "View paired extensions and revoke access",
+    ),
+    (
+        "Passkey verification",
+        "When browser passkeys ask for your password",
+    ),
+    (
+        "Browser setup",
+        "Choose installed or custom browsers for the extension",
+    ),
+    (
+        "Licenses and acknowledgements",
+        "Project license and third-party software",
+    ),
+    (
+        "Quick access shortcut",
+        "Global keyboard shortcut to show or hide quick access",
+    ),
+    (
+        "Start at login",
+        "Open Boltwarden in the menu bar when you log in",
+    ),
+];
+
+/// Rows this platform offers; the others are hidden and skipped by the keyboard.
+pub(crate) fn row_supported(row: usize) -> bool {
+    row != START_AT_LOGIN_ROW || cfg!(target_os = "macos")
+}
+
+/// Whether every word of `query` appears in the row's title or description.
+fn setting_matches(row: usize, query: &str) -> bool {
+    if !row_supported(row) {
+        return false;
+    }
+    let Some((title, description)) = SETTING_TEXT.get(row) else {
+        return false;
+    };
+    let text = format!("{title} {description}").to_lowercase();
+    query
+        .to_lowercase()
+        .split_whitespace()
+        .all(|word| text.contains(word))
+}
+
+/// Categories of the vault window's settings. Quick access keeps its compact list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsGroup {
     General,
+    Security,
     Browser,
     Ssh,
 }
 
 impl SettingsGroup {
-    fn contains(self, row: usize) -> bool {
+    /// The category's rows in display order, which keyboard selection follows.
+    pub(crate) fn rows(self) -> &'static [usize] {
         match self {
-            Self::General => matches!(row, 0..=7 | 9 | SHORTCUT_ROW),
-            Self::Browser => matches!(row, 10..=14),
-            Self::Ssh => row == 8,
+            Self::General if cfg!(target_os = "macos") => {
+                &[START_AT_LOGIN_ROW, 1, 2, START_LIST_ROW, SHORTCUT_ROW, 0, 4]
+            }
+            Self::General => &[1, 2, START_LIST_ROW, SHORTCUT_ROW, 0, 4],
+            Self::Security => &[6, IDLE_TIMEOUT_ROW, 9, SCREEN_CAPTURE_ROW],
+            Self::Browser => &[
+                10,
+                DEFAULT_URI_MATCH_ROW,
+                PASSKEY_VERIFICATION_ROW,
+                PAIRED_BROWSERS_ROW,
+                BROWSER_SETUP_ROW,
+            ],
+            Self::Ssh => &[8],
         }
+    }
+
+    fn contains(self, row: usize) -> bool {
+        self.rows().contains(&row)
     }
 }
 
@@ -174,10 +288,11 @@ pub struct SearchState {
     pub settings_group: Option<SettingsGroup>,
     pub capture_pending: bool,
     pub shortcut_setup: crate::ui::shortcut_setup::ShortcutSetup,
+    pub shortcuts: sc::ShortcutsDialog,
     pub paired_browsers: PairedBrowsersState,
     pub browser_setup: crate::ui::browser_setup::BrowserSetupState,
     paired_browsers_return: SearchView,
-    settings_scrolled_to: Option<usize>,
+    pub(crate) settings_scrolled_to: Option<usize>,
     /// Short success message for the footer, such as "Moved to trash".
     pub notice: Option<(String, std::time::Instant)>,
     /// Order of the archived and trash lists; the main search keeps relevance order.
@@ -208,6 +323,7 @@ impl Default for SearchState {
             settings_group: None,
             capture_pending: false,
             shortcut_setup: Default::default(),
+            shortcuts: Default::default(),
             paired_browsers: PairedBrowsersState::default(),
             browser_setup: Default::default(),
             paired_browsers_return: SearchView::Results,
@@ -229,9 +345,10 @@ impl SearchState {
     }
 
     pub fn reset_results_for_empty_query(&mut self) {
+        // In settings the field filters rows, so an empty query keeps them open.
         if matches!(
             self.view,
-            SearchView::PairedBrowsers | SearchView::BrowserSetup
+            SearchView::Settings | SearchView::PairedBrowsers | SearchView::BrowserSetup
         ) {
             return;
         }
@@ -380,7 +497,10 @@ impl SearchState {
         match self.display_entry(self.selected) {
             Some(DisplayEntry::VersionCommand) => OpenSelectedAction::OpenAcknowledgements,
             Some(DisplayEntry::SettingsCommand) => {
+                // The search field now filters settings, so start it empty.
                 self.view = SearchView::Settings;
+                self.query.clear();
+                self.focus_search = true;
                 self.selected = 0;
                 self.settings_selected = 0;
                 self.settings_scrolled_to = None;
@@ -433,15 +553,22 @@ impl SearchState {
         self.focus_search = true;
     }
 
+    /// Whether the quick access shortcut row is selected, for its footer hints.
+    pub fn shortcut_setup_selected(&self) -> bool {
+        self.settings_selected == SHORTCUT_ROW
+    }
+
+    /// Selects the quick access shortcut row (demo screenshots).
+    pub fn select_shortcut_setting(&mut self) {
+        self.settings_selected = SHORTCUT_ROW;
+    }
+
     pub fn close_settings_panel(&mut self) {
         self.view = SearchView::Results;
+        self.query.clear();
         self.selected = 0;
         self.ssh_agent_path_input = None;
         self.focus_search = true;
-    }
-
-    fn settings_command_visible(&self) -> bool {
-        settings_command_matches(&self.query)
     }
 
     /// Command rows shown above the vault items, in display order. The archived and
@@ -581,9 +708,6 @@ pub fn draw_search(
     let mut action = None;
     let t = theme();
 
-    if state.view == SearchView::Settings && !state.settings_command_visible() {
-        state.close_settings_panel();
-    }
     // Keys are consumed before the search field is drawn so it does not also receive them.
     handle_keys(ctx, state, settings, &mut action);
 
@@ -599,33 +723,27 @@ pub fn draw_search(
             .map(|warning| (warning, t.warning))
     };
     {
-        let hints: &[(&str, &str)] = match (settings.show_keyboard_shortcuts, state.view) {
+        const HELP: (sc::Combo, &str) = (sc::HELP, "Keyboard shortcuts");
+        let hints: &[(sc::Combo, &str)] = match (settings.show_keyboard_shortcuts, state.view) {
             (false, _) => &[],
             (true, SearchView::Results) => &[
-                ("←↑↓→", "Navigate"),
-                ("⏎", "Open"),
-                ("Shift+⏎", "Copy password"),
-                ("Esc", "Hide"),
+                (sc::ENTER, "Open"),
+                (sc::Combo::shift(sc::Key::Enter), "Copy password"),
+                HELP,
             ],
-            (true, SearchView::PairedBrowsers) => &[
-                ("↑↓", "Navigate"),
-                ("⏎", "Revoke"),
-                ("Ctrl+R", "Refresh"),
-                ("Esc", "Back"),
-            ],
+            (true, SearchView::PairedBrowsers) => {
+                &[(sc::ENTER, "Revoke"), (sc::command("R"), "Refresh"), HELP]
+            }
             (true, SearchView::BrowserSetup) => {
-                &[("↑↓", "Select"), ("Space", "Toggle"), ("Esc", "Back")]
+                &[(sc::SPACE, "Toggle"), (sc::ENTER, "Apply"), HELP]
             }
-            (true, SearchView::Settings) => {
-                &[("↑↓", "Select"), ("Space", "Toggle"), ("Esc", "Back")]
+            (true, SearchView::Settings) if state.settings_selected == SHORTCUT_ROW => {
+                state.shortcut_setup.hints()
             }
-            (true, SearchView::Archived | SearchView::Trash) => &[
-                ("←↑↓→", "Navigate"),
-                ("⏎", "Open"),
-                ("Tab", "Sort by"),
-                ("Ctrl+↑↓", "Order"),
-                ("Esc", "Back"),
-            ],
+            (true, SearchView::Settings) => &[(sc::SPACE, "Toggle"), (sc::ESCAPE, "Back"), HELP],
+            (true, SearchView::Archived | SearchView::Trash) => {
+                &[(sc::ENTER, "Open"), (sc::TAB, "Sort by"), HELP]
+            }
         };
         egui::Panel::bottom("footer")
             .frame(widgets::footer_frame())
@@ -675,7 +793,7 @@ pub fn draw_search(
                             .as_ref()
                             .filter(|s| s.offline)
                             .map(|s| s.offline_tooltip())
-                            .unwrap_or_else(|| "Sync vault · Ctrl+R".to_string());
+                            .unwrap_or_else(|| format!("Sync vault · {}", sc::command("R").text()));
                         if let Some(at) =
                             state.sync_status.as_ref().and_then(|s| s.last_synced_unix)
                         {
@@ -784,13 +902,24 @@ pub fn handle_keys(
             if path_focused {
                 return;
             }
-            let visible: Vec<usize> = (0..SETTINGS_ROWS)
-                .filter(|row| {
-                    state
-                        .settings_group
-                        .is_none_or(|group| group.contains(*row))
-                })
+            let order: Vec<usize> = match state.settings_group {
+                Some(group) => group.rows().to_vec(),
+                None => (0..SETTINGS_ROWS).collect(),
+            };
+            let visible: Vec<usize> = order
+                .into_iter()
+                .filter(|row| setting_matches(*row, &state.query))
                 .collect();
+            if input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                || (state.query.is_empty()
+                    && input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft))
+            {
+                state.close_settings_panel();
+                return;
+            }
+            if visible.is_empty() {
+                return;
+            }
             let mut selected = visible
                 .iter()
                 .position(|row| *row == state.settings_selected)
@@ -802,16 +931,22 @@ pub fn handle_keys(
                 selected = (selected + visible.len() - 1) % visible.len();
             }
             state.settings_selected = visible[selected];
-            if (input.consume_key(egui::Modifiers::NONE, egui::Key::Space)
+            if state.settings_selected == SHORTCUT_ROW {
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::Space)
+                    || input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                {
+                    state.shortcut_setup.activate();
+                }
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
+                    || input.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
+                {
+                    state.shortcut_setup.clear();
+                }
+            } else if (input.consume_key(egui::Modifiers::NONE, egui::Key::Space)
                 || input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
                 && (state.settings_selected != SCREEN_CAPTURE_ROW || !state.capture_pending)
             {
                 *action = toggle_setting(state.settings_selected, settings);
-            }
-            if input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
-                || input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)
-            {
-                state.close_settings_panel();
             }
         }
         SearchView::Results | SearchView::Archived | SearchView::Trash => {
@@ -947,7 +1082,14 @@ fn draw_search_field(ui: &mut Ui, state: &mut SearchState) {
             .id(egui::Id::new(SEARCH_INPUT_ID))
             .font(t.font(t.input()))
             .text_color(t.text_strong)
-            .hint_text(RichText::new("Search vault").color(t.text_faint))
+            .hint_text(
+                RichText::new(if state.view == SearchView::Settings {
+                    "Search settings"
+                } else {
+                    "Search vault"
+                })
+                .color(t.text_faint),
+            )
             .frame(egui::Frame::NONE)
             .vertical_align(egui::Align::Center);
         if state.focus_search {
@@ -961,7 +1103,9 @@ fn draw_search_field(ui: &mut Ui, state: &mut SearchState) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if state.in_flight {
                 ui.add(egui::Spinner::new().color(t.text_muted));
-            } else if !state.query.trim().is_empty() || state.view.is_item_list() {
+            } else if state.view != SearchView::Settings
+                && (!state.query.trim().is_empty() || state.view.is_item_list())
+            {
                 ui.label(RichText::new(state.results.len().to_string()).color(t.text_faint));
             }
             if state.view.is_item_list() {
@@ -981,9 +1125,15 @@ fn draw_sort_control(ui: &mut Ui, state: &mut SearchState) {
         t.icon("\u{f176}", "↑")
     };
     let order_hint = if sort.descending {
-        "Newest / Z first (Ctrl+↑ for ascending)"
+        format!(
+            "Newest / Z first ({} for ascending)",
+            sc::Combo::command(sc::Key::Up).text()
+        )
     } else {
-        "Oldest / A first (Ctrl+↓ for descending)"
+        format!(
+            "Oldest / A first ({} for descending)",
+            sc::Combo::command(sc::Key::Down).text()
+        )
     };
     if ui
         .add(egui::Button::new(RichText::new(arrow).color(t.accent)).frame(false))
@@ -1199,12 +1349,11 @@ fn draw_results(
     action
 }
 
-fn toggle_setting(row: usize, settings: &AppSettings) -> Option<SearchAction> {
+pub(crate) fn toggle_setting(row: usize, settings: &AppSettings) -> Option<SearchAction> {
     Some(match row {
         0 => SearchAction::SetKeyboardShortcuts(!settings.show_keyboard_shortcuts),
         1 => SearchAction::SetCloseAfterCopy(!settings.close_after_copy),
         2 => SearchAction::SetRestoreRecentItem(!settings.restore_recent_item),
-        SHORTCUT_ROW => SearchAction::OpenShortcutSetup,
         START_LIST_ROW => SearchAction::SetStartList(settings.start_list.next()),
         4 => SearchAction::SetShowWebsiteIcons(!settings.show_website_icons),
         SCREEN_CAPTURE_ROW if crate::screen_capture::available() => {
@@ -1231,6 +1380,9 @@ fn toggle_setting(row: usize, settings: &AppSettings) -> Option<SearchAction> {
         PASSKEY_VERIFICATION_ROW => {
             SearchAction::SetPasskeyVerification(settings.passkey_verification.next())
         }
+        START_AT_LOGIN_ROW if row_supported(START_AT_LOGIN_ROW) => {
+            SearchAction::SetStartAtLogin(!settings.start_at_login)
+        }
         _ => return None,
     })
 }
@@ -1243,13 +1395,20 @@ pub fn draw_settings(
 ) -> Option<SearchAction> {
     let t = theme();
     let mut action = None;
-    let visible = |row| state.settings_group.is_none_or(|group| group.contains(row));
+    let query = state.query.clone();
+    let group = state.settings_group;
+    let visible =
+        |row| group.is_none_or(|group| group.contains(row)) && setting_matches(row, &query);
+    if !(0..SETTINGS_ROWS).any(visible) {
+        widgets::empty_state(ui, t.icon("\u{f002}", "🔍"), "No matching settings", false);
+        return None;
+    }
     if !visible(state.settings_selected) {
         state.settings_selected = (0..SETTINGS_ROWS).find(|row| visible(*row)).unwrap_or(0);
         state.settings_scrolled_to = None;
     }
     // The start list row (a choice, not a toggle) is drawn separately at START_LIST_ROW.
-    let rows: [(bool, &str, &str); SETTINGS_ROWS - 7] = [
+    let rows: [(bool, &str, &str); TOGGLE_ROWS] = [
         (
             settings.show_keyboard_shortcuts,
             "Show keyboard shortcuts",
@@ -1367,23 +1526,10 @@ pub fn draw_settings(
                     state.settings_selected = idx;
                     action = toggle_setting(idx, settings);
                 }
-                if idx == IDLE_TIMEOUT_ROW && settings.lock_after_idle_timeout {
-                    ui.horizontal(|ui| {
-                        ui.add_space(54.0);
-                        ui.label(RichText::new("Idle timeout").color(t.text_muted));
-                        let mut minutes = settings.idle_lock_timeout_minutes.clamp(1, 1440);
-                        let response = ui.add(
-                            egui::DragValue::new(&mut minutes)
-                                .range(1..=1440)
-                                .speed(1)
-                                .suffix(" min"),
-                        );
-                        // Save once a drag ends instead of on every intermediate value.
-                        if response.changed() && !response.dragged() || response.drag_stopped() {
-                            action = Some(SearchAction::SetIdleLockTimeoutMinutes(minutes));
-                        }
-                    });
-                    ui.add_space(4.0);
+                if idx == IDLE_TIMEOUT_ROW
+                    && let Some(timeout) = draw_idle_timeout(ui, settings)
+                {
+                    action = Some(timeout);
                 }
             }
 
@@ -1493,14 +1639,29 @@ pub fn draw_settings(
                     action = Some(SearchAction::OpenAcknowledgements);
                 }
             }
-            if visible(SHORTCUT_ROW) {
-                let response = widgets::choice_row(
+            if visible(START_AT_LOGIN_ROW) {
+                let response = widgets::toggle_row(
                     ui,
-                    state.settings_selected == SHORTCUT_ROW,
-                    "Quick access shortcut",
-                    "Record, change, or clear the global shortcut",
-                    "Configure",
+                    state.settings_selected == START_AT_LOGIN_ROW,
+                    settings.start_at_login,
+                    SETTING_TEXT[START_AT_LOGIN_ROW].0,
+                    SETTING_TEXT[START_AT_LOGIN_ROW].1,
                 );
+                if state.settings_selected == START_AT_LOGIN_ROW
+                    && state.settings_scrolled_to != Some(START_AT_LOGIN_ROW)
+                {
+                    response.scroll_to_me(None);
+                    state.settings_scrolled_to = Some(START_AT_LOGIN_ROW);
+                }
+                if response.clicked() {
+                    state.settings_selected = START_AT_LOGIN_ROW;
+                    action = toggle_setting(START_AT_LOGIN_ROW, settings);
+                }
+            }
+            if visible(SHORTCUT_ROW) {
+                let response = state
+                    .shortcut_setup
+                    .draw_row(ui, state.settings_selected == SHORTCUT_ROW);
                 if state.settings_selected == SHORTCUT_ROW
                     && state.settings_scrolled_to != Some(SHORTCUT_ROW)
                 {
@@ -1509,55 +1670,97 @@ pub fn draw_settings(
                 }
                 if response.clicked() {
                     state.settings_selected = SHORTCUT_ROW;
-                    action = Some(SearchAction::OpenShortcutSetup);
+                    state.shortcut_setup.activate();
                 }
             }
-            if !cfg!(windows) && visible(8) && settings.ssh_agent_enabled {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(54.0);
-                    ui.vertical(|ui| {
-                        let path = state
-                            .ssh_agent_path_input
-                            .get_or_insert_with(|| settings.ssh_agent_socket_path.clone());
-                        widgets::field_label(ui, "Socket path (Enter to apply)");
-                        let response = widgets::text_input(
-                            ui,
-                            egui::Id::new(SSH_PATH_INPUT_ID),
-                            path,
-                            "$HOME/.bitwarden-ssh.sock",
-                            false,
-                            t.body(),
-                        );
-                        let commit =
-                            response.lost_focus() && *path != settings.ssh_agent_socket_path;
-                        match config::expand_ssh_agent_socket_path(path) {
-                            Ok(expanded) => {
-                                if commit {
-                                    action =
-                                        Some(SearchAction::SetSshAgentSocketPath(path.clone()));
-                                }
-                                ui.label(
-                                    RichText::new(format!("SSH_AUTH_SOCK={}", expanded.display()))
-                                        .size(t.small())
-                                        .color(t.text_muted),
-                                );
-                            }
-                            Err(e) => widgets::error_line(ui, &e),
-                        }
-                        ui.label(
-                            RichText::new(&ssh_agent_status.message)
-                                .size(t.small())
-                                .color(if ssh_agent_status.active {
-                                    t.success
-                                } else {
-                                    t.text_muted
-                                }),
-                        );
-                    });
-                });
+            if visible(8)
+                && let Some(path) = draw_ssh_socket_path(ui, state, settings, ssh_agent_status)
+            {
+                action = Some(path);
             }
         });
+    action
+}
+
+/// The idle timeout field under "Lock after idle timeout", shown while that is on.
+pub(crate) fn draw_idle_timeout(ui: &mut Ui, settings: &AppSettings) -> Option<SearchAction> {
+    if !settings.lock_after_idle_timeout {
+        return None;
+    }
+    let t = theme();
+    let mut action = None;
+    ui.horizontal(|ui| {
+        ui.add_space(54.0);
+        ui.label(RichText::new("Idle timeout").color(t.text_muted));
+        let mut minutes = settings.idle_lock_timeout_minutes.clamp(1, 1440);
+        let response = ui.add(
+            egui::DragValue::new(&mut minutes)
+                .range(1..=1440)
+                .speed(1)
+                .suffix(" min"),
+        );
+        // Save once a drag ends instead of on every intermediate value.
+        if response.changed() && !response.dragged() || response.drag_stopped() {
+            action = Some(SearchAction::SetIdleLockTimeoutMinutes(minutes));
+        }
+    });
+    ui.add_space(4.0);
+    action
+}
+
+/// The SSH agent socket path and status, shown while the agent is enabled.
+pub(crate) fn draw_ssh_socket_path(
+    ui: &mut Ui,
+    state: &mut SearchState,
+    settings: &AppSettings,
+    ssh_agent_status: &SshAgentStatus,
+) -> Option<SearchAction> {
+    if cfg!(windows) || !settings.ssh_agent_enabled {
+        return None;
+    }
+    let t = theme();
+    let mut action = None;
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(54.0);
+        ui.vertical(|ui| {
+            let path = state
+                .ssh_agent_path_input
+                .get_or_insert_with(|| settings.ssh_agent_socket_path.clone());
+            widgets::field_label(ui, "Socket path (Enter to apply)");
+            let response = widgets::text_input(
+                ui,
+                egui::Id::new(SSH_PATH_INPUT_ID),
+                path,
+                "$HOME/.bitwarden-ssh.sock",
+                false,
+                t.body(),
+            );
+            let commit = response.lost_focus() && *path != settings.ssh_agent_socket_path;
+            match config::expand_ssh_agent_socket_path(path) {
+                Ok(expanded) => {
+                    if commit {
+                        action = Some(SearchAction::SetSshAgentSocketPath(path.clone()));
+                    }
+                    ui.label(
+                        RichText::new(format!("SSH_AUTH_SOCK={}", expanded.display()))
+                            .size(t.small())
+                            .color(t.text_muted),
+                    );
+                }
+                Err(e) => widgets::error_line(ui, &e),
+            }
+            ui.label(
+                RichText::new(&ssh_agent_status.message)
+                    .size(t.small())
+                    .color(if ssh_agent_status.active {
+                        t.success
+                    } else {
+                        t.text_muted
+                    }),
+            );
+        });
+    });
     action
 }
 
@@ -1567,7 +1770,6 @@ pub enum SearchAction {
     OpenResult(usize),
     OpenWindow,
     OpenAcknowledgements,
-    OpenShortcutSetup,
     SetKeepOfflineCopy(bool),
     SetKeyboardShortcuts(bool),
     SetCloseAfterCopy(bool),
@@ -1580,6 +1782,7 @@ pub enum SearchAction {
     SetSshAgentEnabled(bool),
     SetSshAgentSocketPath(String),
     SetStartList(StartList),
+    SetStartAtLogin(bool),
     SetBrowserIntegrationEnabled(bool),
     SetDefaultUriMatch(crate::uri_match::UriMatchType),
     SetPasskeyVerification(PasskeyVerification),
@@ -1656,11 +1859,13 @@ mod tests {
 
     #[test]
     fn settings_tabs_keep_keyboard_actions_within_visible_rows() {
-        for (group, first, last) in [
-            (SettingsGroup::General, 0, SHORTCUT_ROW),
-            (SettingsGroup::Browser, 10, 14),
-            (SettingsGroup::Ssh, 8, 8),
+        for group in [
+            SettingsGroup::General,
+            SettingsGroup::Security,
+            SettingsGroup::Browser,
+            SettingsGroup::Ssh,
         ] {
+            let (first, last) = (group.rows()[0], *group.rows().last().unwrap());
             let ctx = Context::default();
             let mut state = SearchState {
                 view: SearchView::Settings,
@@ -1780,9 +1985,14 @@ mod tests {
             }
             (state.settings_selected, offset)
         };
+        let rows = (0..SETTINGS_ROWS).filter(|row| row_supported(*row)).count();
+        let last = (0..SETTINGS_ROWS)
+            .rev()
+            .find(|row| row_supported(*row))
+            .unwrap();
         assert_eq!(frame(None), (0, 0.0));
         let (selected, bottom) = frame(Some(egui::Key::ArrowUp));
-        assert_eq!(selected, SETTINGS_ROWS - 1);
+        assert_eq!(selected, last);
         assert!(
             bottom > 200.,
             "last setting must scroll into view: {bottom}"
@@ -1793,12 +2003,12 @@ mod tests {
             top < 1.,
             "wrapping to first setting must scroll back: {top}"
         );
-        for _ in 0..SETTINGS_ROWS - 1 {
+        for _ in 0..rows - 1 {
             frame(Some(egui::Key::ArrowDown));
         }
         let (_, offset) = frame(Some(egui::Key::ArrowUp));
         assert!(offset > 0.);
-        for _ in 0..SETTINGS_ROWS - 2 {
+        for _ in 0..rows - 2 {
             frame(Some(egui::Key::ArrowUp));
         }
         assert!(frame(None).1 < 1.);
@@ -1893,12 +2103,20 @@ mod tests {
     fn passkey_verification_setting_cycles_after_existing_browser_rows() {
         let mut settings = AppSettings::default();
         assert_eq!(PASSKEY_VERIFICATION_ROW, PAIRED_BROWSERS_ROW + 1);
-        assert_eq!(SHORTCUT_ROW, SETTINGS_ROWS - 1);
+        assert_eq!(START_AT_LOGIN_ROW, SETTINGS_ROWS - 1);
+        assert_eq!(SHORTCUT_ROW, START_AT_LOGIN_ROW - 1);
+        if cfg!(target_os = "macos") {
+            assert!(matches!(
+                toggle_setting(START_AT_LOGIN_ROW, &settings),
+                Some(SearchAction::SetStartAtLogin(true))
+            ));
+        } else {
+            assert!(toggle_setting(START_AT_LOGIN_ROW, &settings).is_none());
+            assert!(!setting_matches(START_AT_LOGIN_ROW, ""));
+        }
         assert_eq!(ACKNOWLEDGEMENTS_ROW, SHORTCUT_ROW - 1);
-        assert!(matches!(
-            toggle_setting(SHORTCUT_ROW, &settings),
-            Some(SearchAction::OpenShortcutSetup)
-        ));
+        // The shortcut row records inline instead of toggling.
+        assert!(toggle_setting(SHORTCUT_ROW, &settings).is_none());
         assert!(matches!(
             toggle_setting(ACKNOWLEDGEMENTS_ROW, &settings),
             Some(SearchAction::OpenAcknowledgements)
@@ -1952,13 +2170,39 @@ mod tests {
         assert_eq!(state.display_entry_count(), 3);
         assert_eq!(state.open_selected_entry(), OpenSelectedAction::None);
         assert_eq!(state.view, SearchView::Settings);
-
+        // The field filters settings from here, and returns empty to the vault search.
+        assert!(state.query.is_empty());
+        state.reset_results_for_empty_query();
+        assert_eq!(state.view, SearchView::Settings, "settings must stay open");
+        state.query = "lock".into();
         state.close_settings_panel();
+        assert!(state.query.is_empty());
+
+        state.query = "set".into();
         state.move_selection(1);
         assert_eq!(
             state.open_selected_entry(),
             OpenSelectedAction::OpenResult(0)
         );
+    }
+
+    #[test]
+    fn settings_search_matches_every_word_in_titles_and_descriptions() {
+        assert!(
+            (0..SETTINGS_ROWS)
+                .filter(|row| row_supported(*row))
+                .all(|row| setting_matches(row, ""))
+        );
+        assert!(setting_matches(SHORTCUT_ROW, "shortcut"));
+        assert!(setting_matches(SHORTCUT_ROW, "KEYBOARD quick"));
+        assert!(setting_matches(IDLE_TIMEOUT_ROW, "lock idle"));
+        assert!(!setting_matches(SHORTCUT_ROW, "lock idle"));
+        let matches: Vec<usize> = (0..SETTINGS_ROWS)
+            .filter(|row| setting_matches(*row, "browser"))
+            .collect();
+        assert!(matches.contains(&BROWSER_SETUP_ROW));
+        assert!(matches.contains(&PAIRED_BROWSERS_ROW));
+        assert!(!matches.contains(&SHORTCUT_ROW));
     }
 
     #[test]

@@ -169,6 +169,51 @@ jobs:
           name: windows-x86_64
           path: dist/*
           if-no-files-found: error
+  macos:
+    name: macos-universal
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check Python for release scripts
+        # The packaging scripts read Cargo.toml with tomllib (Python 3.11+).
+        run: python3 -c 'import sys, tomllib; print(sys.version)'
+      - name: Set version from release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 scripts/set-version.py
+      - name: Install Rust tools
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal \
+            --target aarch64-apple-darwin --target x86_64-apple-darwin
+          rustup default 1.98.1
+      - name: Test macOS platform and shared vault behavior
+        run: cargo test --locked -- --test-threads=1
+      - name: Generate notices and build both CPU architectures
+        run: |
+          python3 scripts/third-party-notices.py rust THIRD_PARTY_NOTICES.txt
+          cargo build --locked --release --target aarch64-apple-darwin --bins
+          cargo build --locked --release --target x86_64-apple-darwin --bins
+      - name: Package the universal, ad hoc signed app
+        run: |
+          cargo run --locked --example macos_icon -- target/Boltwarden.iconset
+          python3 scripts/package-macos.py --iconset target/Boltwarden.iconset --output dist \
+            --binary-dir target/aarch64-apple-darwin/release \
+            --binary-dir target/x86_64-apple-darwin/release
+      - name: Smoke-test the ZIP as users receive it
+        run: python3 scripts/macos-smoke.py dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-universal
+          path: dist/*
+          if-no-files-found: error
   extensions:
     needs: changes
     if: needs.changes.outputs.extension == 'true'
@@ -242,7 +287,7 @@ jobs:
   ci-result:
     name: CI result
     if: always()
-    needs: [changes, security, linux, windows, extensions, website]
+    needs: [changes, security, linux, windows, macos, extensions, website]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -254,7 +299,7 @@ jobs:
           case " $RESULTS " in *" failure "*|*" cancelled "*) exit 1 ;; esac
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [security, linux, windows]
+    needs: [security, linux, windows, macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

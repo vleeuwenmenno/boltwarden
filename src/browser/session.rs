@@ -61,6 +61,16 @@ pub fn read_frame(
     Ok(body)
 }
 
+/// macOS rejects socket options with EINVAL once the peer has closed, although data it
+/// sent before closing is still readable. Let the read itself report end of stream.
+pub fn set_read_timeout(socket: &UnixStream, timeout: Option<Duration>) -> io::Result<()> {
+    match socket.set_read_timeout(timeout) {
+        #[cfg(target_os = "macos")]
+        Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(()),
+        result => result,
+    }
+}
+
 /// Idle authenticated connections are harmless; a partially delivered frame is not.
 /// Start a cumulative five-second deadline after its first byte arrives.
 pub fn read_socket_frame(
@@ -79,7 +89,7 @@ pub fn read_socket_frame(
                 })
         })
         .transpose()?;
-    socket.set_read_timeout(idle_timeout)?;
+    set_read_timeout(socket, idle_timeout)?;
     let mut header = [0; 4];
     socket.read_exact(&mut header[..1]).map_err(|error| {
         if matches!(
@@ -117,7 +127,7 @@ fn read_exact_before(
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::TimedOut, "Browser frame deadline expired")
             })?;
-        socket.set_read_timeout(Some(remaining))?;
+        set_read_timeout(socket, Some(remaining))?;
         match socket.read(buffer) {
             Ok(0) => {
                 return Err(io::Error::new(

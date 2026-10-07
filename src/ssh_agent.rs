@@ -55,6 +55,8 @@ struct PendingApproval {
 struct CachedApproval {
     key_id: String,
     scope: SshApprovalRemember,
+    /// For `Session`: the shell whose descendants this approval covers.
+    session: Option<ProcessIdentity>,
     pid: u32,
     start_time_ticks: Option<u64>,
     command: Option<String>,
@@ -214,10 +216,21 @@ impl SshApprovalService {
 
 impl CachedApproval {
     fn from_request(request: &SshApprovalRequest, scope: SshApprovalRemember) -> Option<Self> {
+        Self::from_request_with(request, scope, process_node)
+    }
+
+    fn from_request_with(
+        request: &SshApprovalRequest,
+        scope: SshApprovalRemember,
+        lookup: impl Fn(u32) -> Option<ProcessNode>,
+    ) -> Option<Self> {
         // Older clients may send broad scopes. Never cache these approvals.
-        if scope != SshApprovalRemember::Process {
-            return None;
-        }
+        let session = match scope {
+            SshApprovalRemember::Process => None,
+            // Resolved again now rather than trusted from the request.
+            SshApprovalRemember::Session => Some(session_of(request.client.pid, &lookup)?),
+            _ => return None,
+        };
         request.client.start_time_ticks?;
         request.client.executable.as_ref()?;
         let command = request.client.command_line.clone();
@@ -225,6 +238,7 @@ impl CachedApproval {
         Some(Self {
             key_id: request.key_id.clone(),
             scope,
+            session,
             pid: request.client.pid,
             start_time_ticks: request.client.start_time_ticks,
             command,
@@ -446,6 +460,10 @@ pub fn start(
             }
             match listener.accept() {
                 Ok((stream, _)) => {
+                    // BSD sockets inherit O_NONBLOCK from the listener; Linux ones do not.
+                    if stream.set_nonblocking(false).is_err() {
+                        continue;
+                    }
                     let key_store = thread_key_store.clone();
                     let approvals = thread_approvals.clone();
                     thread::spawn(move || handle_stream(stream, key_store, approvals));
@@ -752,9 +770,23 @@ fn prune_cached_approvals(state: &mut ApprovalState) {
 }
 
 fn cached_approval_matches(cached: &[CachedApproval], request: &SshApprovalRequest) -> bool {
+    cached_approval_matches_with(cached, request, process_node)
+}
+
+fn cached_approval_matches_with(
+    cached: &[CachedApproval],
+    request: &SshApprovalRequest,
+    lookup: impl Fn(u32) -> Option<ProcessNode>,
+) -> bool {
     cached.iter().any(|approval| {
         if approval.key_id != request.key_id {
             return false;
+        }
+        if approval.scope == SshApprovalRemember::Session {
+            return approval
+                .session
+                .as_ref()
+                .is_some_and(|session| within_session(request.client.pid, session, &lookup));
         }
         approval.scope == SshApprovalRemember::Process
             && approval.pid == request.client.pid
@@ -773,12 +805,14 @@ fn remember_duration(scope: SshApprovalRemember) -> Duration {
         SshApprovalRemember::CommandInCwd { duration_seconds } => {
             Duration::from_secs(duration_seconds).min(MAX_REMEMBER_DURATION)
         }
-        SshApprovalRemember::Once | SshApprovalRemember::Process | SshApprovalRemember::Parent => {
-            SSH_APPROVAL_TTL
-        }
+        SshApprovalRemember::Once
+        | SshApprovalRemember::Process
+        | SshApprovalRemember::Session
+        | SshApprovalRemember::Parent => SSH_APPROVAL_TTL,
     }
 }
 
+#[cfg(target_os = "linux")]
 fn peer_client_info(stream: &UnixStream) -> Result<SshAgentClientInfo, String> {
     let mut credentials = libc::ucred {
         pid: 0,
@@ -808,7 +842,40 @@ fn peer_client_info(stream: &UnixStream) -> Result<SshAgentClientInfo, String> {
     Ok(info)
 }
 
+#[cfg(target_os = "macos")]
+fn peer_client_info(stream: &UnixStream) -> Result<SshAgentClientInfo, String> {
+    let mut uid = 0;
+    let mut gid = 0;
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    let rc = unsafe {
+        if libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) != 0 {
+            -1
+        } else {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                (&mut pid as *mut libc::pid_t).cast(),
+                &mut len,
+            )
+        }
+    };
+    if rc != 0 {
+        return Err(format!(
+            "could not inspect SSH agent peer credentials: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    let pid = u32::try_from(pid).map_err(|_| "invalid peer pid".to_string())?;
+    let mut info = process_info(pid);
+    info.uid = uid;
+    info.gid = gid;
+    Ok(info)
+}
+
 fn process_info(pid: u32) -> SshAgentClientInfo {
+    let session = session_of(pid, process_node);
     let ppid = read_ppid(pid);
     let parent_pid = ppid.filter(|ppid| *ppid > 1);
     SshAgentClientInfo {
@@ -819,18 +886,115 @@ fn process_info(pid: u32) -> SshAgentClientInfo {
         start_time_ticks: read_start_time_ticks(pid),
         process_name: read_comm(pid),
         command_line: read_cmdline(pid),
-        executable: fs::read_link(format!("/proc/{pid}/exe"))
-            .ok()
-            .map(|path| path.display().to_string()),
-        cwd: fs::read_link(format!("/proc/{pid}/cwd"))
-            .ok()
-            .map(|path| path.display().to_string()),
+        executable: read_executable(pid),
+        cwd: read_cwd(pid),
         parent_pid,
         parent_name: parent_pid.and_then(read_comm),
         parent_start_time_ticks: parent_pid.and_then(read_start_time_ticks),
+        session_pid: session.as_ref().map(|session| session.pid),
+        session_name: session.map(|session| executable_name(&session.executable)),
     }
 }
 
+/// A process identified so that a reused PID cannot stand in for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessIdentity {
+    pid: u32,
+    start_time_ticks: u64,
+    executable: String,
+}
+
+struct ProcessNode {
+    identity: ProcessIdentity,
+    ppid: Option<u32>,
+}
+
+fn process_node(pid: u32) -> Option<ProcessNode> {
+    Some(ProcessNode {
+        identity: ProcessIdentity {
+            pid,
+            start_time_ticks: read_start_time_ticks(pid)?,
+            executable: read_executable(pid)?,
+        },
+        ppid: read_ppid(pid),
+    })
+}
+
+const SHELLS: &[&str] = &[
+    "sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "oksh", "yash", "tcsh", "csh", "nu",
+    "xonsh", "elvish", "pwsh",
+];
+/// Deep enough for shell, git, ssh and helpers; bounded against loops and long chains.
+const MAX_ANCESTORS: usize = 16;
+
+fn executable_name(executable: &str) -> String {
+    Path::new(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(executable)
+        .trim_start_matches('-')
+        .to_owned()
+}
+
+/// The terminal session a client runs in: the nearest shell above it, else its parent.
+/// `git push` runs ssh under git, so the client's own parent is not the terminal.
+fn session_of(pid: u32, lookup: impl Fn(u32) -> Option<ProcessNode>) -> Option<ProcessIdentity> {
+    let mut next = lookup(pid)?.ppid;
+    let mut parent = None;
+    for _ in 0..MAX_ANCESTORS {
+        // PID 1 (init or launchd) is every process's ancestor, never a session.
+        let Some(node) = next.filter(|pid| *pid > 1).and_then(&lookup) else {
+            break;
+        };
+        if SHELLS.contains(&executable_name(&node.identity.executable).as_str()) {
+            return Some(node.identity);
+        }
+        parent.get_or_insert_with(|| node.identity.clone());
+        next = node.ppid;
+    }
+    parent
+}
+
+/// Whether `session` is still an ancestor of `pid`, compared by PID, start time and executable.
+fn within_session(
+    pid: u32,
+    session: &ProcessIdentity,
+    lookup: impl Fn(u32) -> Option<ProcessNode>,
+) -> bool {
+    let mut next = lookup(pid).and_then(|node| node.ppid);
+    for _ in 0..MAX_ANCESTORS {
+        let Some(node) = next.filter(|pid| *pid > 1).and_then(&lookup) else {
+            return false;
+        };
+        if node.identity == *session {
+            return true;
+        }
+        next = node.ppid;
+    }
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn read_executable(pid: u32) -> Option<String> {
+    fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .map(|path| path.display().to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn read_cwd(pid: u32) -> Option<String> {
+    fs::read_link(format!("/proc/{pid}/cwd"))
+        .ok()
+        .map(|path| path.display().to_string())
+}
+
+#[cfg(target_os = "macos")]
+use crate::platform::process::{
+    command_line as read_cmdline, cwd as read_cwd, executable as read_executable,
+    name as read_comm, ppid as read_ppid, start_time as read_start_time_ticks,
+};
+
+#[cfg(target_os = "linux")]
 fn read_comm(pid: u32) -> Option<String> {
     fs::read_to_string(format!("/proc/{pid}/comm"))
         .ok()
@@ -838,6 +1002,7 @@ fn read_comm(pid: u32) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+#[cfg(target_os = "linux")]
 fn read_cmdline(pid: u32) -> Option<String> {
     let bytes = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
     let parts = bytes
@@ -852,14 +1017,17 @@ fn read_cmdline(pid: u32) -> Option<String> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn read_ppid(pid: u32) -> Option<u32> {
     read_stat_field(pid, 1).and_then(|value| value.parse().ok())
 }
 
+#[cfg(target_os = "linux")]
 fn read_start_time_ticks(pid: u32) -> Option<u64> {
     read_stat_field(pid, 19).and_then(|value| value.parse().ok())
 }
 
+#[cfg(target_os = "linux")]
 fn read_stat_field(pid: u32, index_after_comm: usize) -> Option<String> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let end = stat.rfind(") ")?;
@@ -1018,7 +1186,7 @@ mod tests {
     #[test]
     fn socket_lists_identities_and_signs() {
         // Unix socket paths have a small fixed limit; worktree paths can exceed it.
-        let socket_dir = std::env::temp_dir().join(format!("bw-ssh-{}", uuid::Uuid::new_v4()));
+        let socket_dir = crate::test_temp_dir().join(format!("bw-ssh-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&socket_dir).unwrap();
         let socket_path = socket_dir.join("agent.sock");
         let settings = AppSettings {
@@ -1324,6 +1492,88 @@ mod tests {
         other = request.clone();
         other.client.start_time_ticks = None;
         assert!(!cached_approval_matches(&[cached], &other));
+    }
+
+    /// launchd(1) → Terminal(500) → zsh(600) → git(700) → ssh(800), plus a second
+    /// terminal shell(610) running ssh(810).
+    fn process_tree(pid: u32) -> Option<ProcessNode> {
+        let (ppid, executable, start) = match pid {
+            1 => (None, "/sbin/launchd", 1),
+            500 => (
+                Some(1),
+                "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal",
+                5,
+            ),
+            600 => (Some(500), "/bin/zsh", 6),
+            610 => (Some(500), "/bin/zsh", 61),
+            700 => (Some(600), "/usr/bin/git", 7),
+            800 => (Some(700), "/usr/bin/ssh", 8),
+            801 => (Some(600), "/usr/bin/ssh", 9),
+            810 => (Some(610), "/usr/bin/ssh", 10),
+            900 => (Some(1), "/Applications/Tool.app/Contents/MacOS/Tool", 11),
+            901 => (Some(900), "/usr/bin/ssh", 12),
+            _ => return None,
+        };
+        Some(ProcessNode {
+            identity: ProcessIdentity {
+                pid,
+                start_time_ticks: start,
+                executable: executable.into(),
+            },
+            ppid,
+        })
+    }
+
+    #[test]
+    fn session_is_the_nearest_shell_or_the_parent_and_never_pid_one() {
+        assert_eq!(session_of(800, process_tree).map(|s| s.pid), Some(600));
+        assert_eq!(session_of(801, process_tree).map(|s| s.pid), Some(600));
+        // Without a shell above it, the client's own parent is the session.
+        assert_eq!(session_of(901, process_tree).map(|s| s.pid), Some(900));
+        assert_eq!(session_of(500, process_tree), None);
+        assert_eq!(executable_name("/bin/-zsh"), "zsh");
+    }
+
+    #[test]
+    fn terminal_approval_covers_later_commands_in_that_terminal_only() {
+        let mut request = SshApprovalRequest {
+            id: "test".into(),
+            kind: SshApprovalKind::Sign,
+            key_id: "key".into(),
+            key_name: "Fixture".into(),
+            public_key: "fixture".into(),
+            fingerprint: None,
+            algorithm: "Ed25519".into(),
+            client: fake_client_info(),
+            created_at_unix_ms: 0,
+            expires_at_unix_ms: 0,
+        };
+        request.client.pid = 801;
+        let cached =
+            CachedApproval::from_request_with(&request, SshApprovalRemember::Session, process_tree)
+                .unwrap();
+        let matches = |pid: u32, key: &str, lookup: fn(u32) -> Option<ProcessNode>| {
+            let mut later = request.clone();
+            later.client.pid = pid;
+            later.key_id = key.into();
+            cached_approval_matches_with(std::slice::from_ref(&cached), &later, lookup)
+        };
+        assert!(
+            matches(800, "key", process_tree),
+            "git push in the same terminal"
+        );
+        assert!(!matches(810, "key", process_tree), "another terminal");
+        assert!(!matches(901, "key", process_tree), "another app");
+        assert!(!matches(800, "other-key", process_tree), "another key");
+        // The shell exited and its PID was reused by a new process.
+        fn reused(pid: u32) -> Option<ProcessNode> {
+            let mut node = process_tree(pid)?;
+            if pid == 600 {
+                node.identity.start_time_ticks = 99;
+            }
+            Some(node)
+        }
+        assert!(!matches(800, "key", reused), "reused PID");
     }
 
     #[test]

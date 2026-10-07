@@ -272,6 +272,11 @@ pub fn draw_browser_setup(ui: &mut Ui, state: &mut BrowserSetupState) {
                 }
             }
         });
+        if !state.rows.is_empty()
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+        {
+            state.apply();
+        }
     }
     ui.label(
         RichText::new("Choose browsers that can connect to Boltwarden.")
@@ -347,7 +352,11 @@ pub fn draw_browser_setup(ui: &mut Ui, state: &mut BrowserSetupState) {
                         ui,
                         egui::Id::new("browser-setup-executable"),
                         &mut state.executable,
-                        "/usr/bin/browser",
+                        if cfg!(target_os = "macos") {
+                            "/Applications/Browser.app/Contents/MacOS/Browser"
+                        } else {
+                            "/usr/bin/browser"
+                        },
                         false,
                         t.body(),
                     );
@@ -387,7 +396,11 @@ pub fn draw_browser_setup(ui: &mut Ui, state: &mut BrowserSetupState) {
                         ui,
                         egui::Id::new("browser-setup-directory"),
                         &mut state.directory,
-                        "~/.config/browser/NativeMessagingHosts",
+                        if cfg!(target_os = "macos") {
+                            "~/Library/Application Support/Browser/NativeMessagingHosts"
+                        } else {
+                            "~/.config/browser/NativeMessagingHosts"
+                        },
                         false,
                         t.body(),
                     );

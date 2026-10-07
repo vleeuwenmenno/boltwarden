@@ -10,7 +10,7 @@ CARGO ?= cargo
 NPM ?= npm
 BROWSER_TARGET ?= all
 
-.PHONY: help all build release install install-service install-browser uninstall uninstall-service check test clean extension-deps extension-check extension-test extension-build extension-zip extension-release-check playground security package packaging-test
+.PHONY: help all build release install install-service install-browser uninstall uninstall-service check test clean extension-deps extension-check extension-test extension-build extension-zip extension-release-check playground security package package-macos packaging-test
 
 ##@ General
 help: ## Show available targets (default)
@@ -99,6 +99,15 @@ security: ## Audit Rust and npm dependencies (requires cargo-audit)
 
 package: ## Build tested Linux tar, Debian, Arch, and RPM packages with Docker
 	docker buildx build -f packaging/Dockerfile --output type=local,dest=dist .
+
+package-macos: ## Build a universal, ad-hoc signed Boltwarden.app ZIP (on macOS)
+	python3 scripts/third-party-notices.py rust THIRD_PARTY_NOTICES.txt
+	$(CARGO) build --locked --release --target aarch64-apple-darwin --bins
+	$(CARGO) build --locked --release --target x86_64-apple-darwin --bins
+	rm -rf target/Boltwarden.iconset
+	$(CARGO) run --locked --example macos_icon -- target/Boltwarden.iconset
+	python3 scripts/package-macos.py --iconset target/Boltwarden.iconset --output dist \
+		--binary-dir target/aarch64-apple-darwin/release --binary-dir target/x86_64-apple-darwin/release
 
 packaging-test: ## Check packaging and user-service opt-in behavior
 	python3 -m unittest discover -s scripts/tests

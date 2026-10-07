@@ -24,11 +24,12 @@ the tests and builds; CI creates and populates the GitHub release draft.
    The example version is illustrative; always use the version being released.
    Never move or reuse an existing release tag, including failed ones.
 4. Wait for the tagged workflow to finish successfully. It runs security and
-   browser checks, builds native x86_64 and ARM64 Linux packages plus the Windows
-   x64 installer/ZIP, and creates a draft release. RC tags are marked as prereleases.
-   Expected attachments are ten
-   artifacts plus their ten SHA-256 checksum files: tarballs, Debian packages,
-   Arch packages, and Fedora RPMs for both CPUs, and the Windows installer and ZIP.
+   browser checks, builds native x86_64 and ARM64 Linux packages, the Windows
+   x64 installer/ZIP and the universal macOS ZIP, and creates a draft release. RC tags are marked as prereleases.
+   Expected attachments are eleven
+   artifacts plus their eleven SHA-256 checksum files: tarballs, Debian packages,
+   Arch packages, and Fedora RPMs for both CPUs, the Windows installer and ZIP, and
+   the universal macOS app ZIP.
    CI verifies downloads after upload.
 5. Review the draft, release notes, artifacts, and applicable manual testing before
    publishing. Do not publish the release before CI finishes: the workflow refuses

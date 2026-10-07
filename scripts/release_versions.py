@@ -22,6 +22,7 @@ def desktop_artifact_names(version):
     names += [f'boltwarden_{version}_{cpu}.deb' for cpu in ('amd64', 'arm64')]
     names += [f'boltwarden-{version}-1.{cpu}.rpm' for cpu in ('x86_64', 'aarch64')]
     names += [f'boltwarden-{version}-x86_64-windows.zip', f'boltwarden-{version}-x86_64-windows-setup.exe']
+    names += [f'boltwarden-{version}-universal-macos.zip']
     return names
 
 

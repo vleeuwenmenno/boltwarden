@@ -5,6 +5,7 @@ pub mod browser_setup;
 pub mod edit;
 pub mod paired_browsers;
 pub mod search;
+pub mod settings_page;
 pub mod ssh_approval;
 pub mod summary;
 pub mod theme;
@@ -13,3 +14,4 @@ pub mod vault;
 pub mod widgets;
 
 pub mod shortcut_setup;
+pub mod shortcuts;

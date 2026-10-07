@@ -1,5 +1,6 @@
 mod app;
 #[cfg_attr(windows, path = "platform/auto_lock_windows.rs")]
+#[cfg_attr(target_os = "macos", path = "platform/auto_lock_macos.rs")]
 mod auto_lock;
 mod backend;
 mod browser;
@@ -9,6 +10,7 @@ mod browser_backend;
 mod browser_backend_tests;
 mod bw;
 #[cfg_attr(windows, path = "platform/clipboard_windows.rs")]
+#[cfg_attr(target_os = "macos", path = "platform/clipboard_macos.rs")]
 mod clipboard;
 mod config;
 mod demo;
@@ -24,14 +26,16 @@ mod platform;
 mod random;
 mod rpc;
 #[cfg_attr(windows, path = "platform/screen_capture_windows.rs")]
+#[cfg_attr(target_os = "macos", path = "platform/screen_capture_macos.rs")]
 mod screen_capture;
 mod shortcut;
 #[cfg_attr(windows, path = "platform/ssh_agent_windows.rs")]
 mod ssh_agent;
 #[cfg_attr(windows, path = "platform/tray_windows.rs")]
+#[cfg_attr(target_os = "macos", path = "platform/tray_macos.rs")]
 mod tray;
 mod ui;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod unix_socket;
 mod uri_match;
 mod version;
@@ -52,6 +56,17 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tray::TrayCommand;
+
+/// Base for test directories. The macOS per-user temp dir is long enough to push socket
+/// paths past the 104-byte limit, and sits behind the `/var` -> `/private/var` symlink.
+#[cfg(test)]
+pub(crate) fn test_temp_dir() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/private/tmp")
+    } else {
+        std::env::temp_dir()
+    }
+}
 
 const POPUP_TOKEN_PREFIX: &str = "token ";
 /// Internal flag that starts the vault window process; users run `boltwarden window`.
@@ -232,13 +247,17 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
         if let Err(error) = apply_browser_settings(&mut state) {
             eprintln!("browser integration: {error}");
         }
+        // Also moves the agent to this executable after the app was moved.
+        if let Err(error) = apply_login_item(&config::load_settings()) {
+            eprintln!("{error}");
+        }
         apply_ssh_agent_settings(&mut state);
     }
 
     if show_on_start {
         show_popup(&popup, rpc_socket.as_ref());
     }
-    while let Ok(command) = rx.recv() {
+    while let Ok(command) = next_daemon_command(&rx) {
         match command {
             DaemonCommand::Show => show_popup(&popup, rpc_socket.as_ref()),
             DaemonCommand::Hide => hide_popup(&popup),
@@ -263,6 +282,20 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
     }
 
     Ok(())
+}
+
+/// macOS delivers menu bar clicks and hotkeys on the main thread, so it keeps handling them while waiting.
+fn next_daemon_command(
+    rx: &mpsc::Receiver<DaemonCommand>,
+) -> Result<DaemonCommand, mpsc::RecvError> {
+    #[cfg(target_os = "macos")]
+    {
+        platform::main_thread::recv(rx)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        rx.recv()
+    }
 }
 
 fn start_auto_lock_monitor(vault: Arc<Mutex<VaultState>>) {
@@ -350,6 +383,8 @@ fn run_popup() -> eframe::Result<()> {
         "boltwarden",
         popup_options(),
         Box::new(|cc| {
+            #[cfg(target_os = "macos")]
+            platform::macos::join_all_spaces(cc);
             ui::theme::theme().install(&cc.egui_ctx);
             Ok(Box::new(App::new(backend, popup_rx)))
         }),
@@ -802,6 +837,7 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
             let result = config::save_settings(&settings)
                 .map_err(|e| e.to_string())
                 .and_then(|_| apply_browser_settings(&mut state))
+                .and_then(|_| apply_login_item(&settings))
                 .and_then(|_| state.bw.apply_offline_setting().map_err(|e| e.to_string()))
                 .map(|_| apply_ssh_agent_settings(&mut state));
             RpcResponse::SettingsApplied(result)
@@ -1015,6 +1051,7 @@ fn apply_browser_settings(state: &mut VaultState) -> Result<(), String> {
             hub.shutdown();
         }
     } else if state.browser_hub.is_none() {
+        register_detected_browsers();
         let handler = state
             .browser_handler
             .clone()
@@ -1023,6 +1060,70 @@ fn apply_browser_settings(state: &mut VaultState) -> Result<(), String> {
         state.browser_enabled = true;
     }
     Ok(())
+}
+
+/// Starts the daemon at login when the setting asks for it; macOS only for now.
+fn apply_login_item(settings: &config::AppSettings) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        platform::login_item::apply(settings.start_at_login)
+            .map_err(|error| format!("Start at login: {error}"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = settings;
+        Ok(())
+    }
+}
+
+/// Turning on browser integration registers the detected browsers, unless the user already
+/// chose browsers in Browser setup. Failures are logged and retried on the next start.
+fn register_detected_browsers() {
+    let result = config::load_browser_setup()
+        .map_err(|e| e.to_string())
+        .and_then(|mut preferences| {
+            if preferences.configured {
+                return Ok(());
+            }
+            let rows = browser::install::discover().map_err(|e| e.to_string())?;
+            let errors = auto_register_browsers(&mut preferences, rows, |row| {
+                browser::install::register(row.executable, row.family, row.native_host_dir)
+                    .map_err(|e| e.to_string())
+            });
+            if preferences.configured {
+                config::save_browser_setup(&preferences).map_err(|e| e.to_string())?;
+            }
+            if errors.is_empty() {
+                Ok(())
+            } else {
+                Err(errors.join("; "))
+            }
+        });
+    if let Err(error) = result {
+        eprintln!("browser registration: {error}");
+    }
+}
+
+/// Registers the unregistered `rows` while browser setup is unconfigured, and marks it
+/// configured once all succeeded. Returns the failures.
+fn auto_register_browsers(
+    preferences: &mut config::BrowserSetupPreferences,
+    rows: Vec<browser::install::BrowserRegistration>,
+    mut register: impl FnMut(browser::install::BrowserRegistration) -> Result<(), String>,
+) -> Vec<String> {
+    if preferences.configured {
+        return Vec::new();
+    }
+    let errors: Vec<String> = rows
+        .into_iter()
+        .filter(|row| !row.registered)
+        .filter_map(|row| {
+            let label = row.label.clone();
+            register(row).err().map(|error| format!("{label}: {error}"))
+        })
+        .collect();
+    preferences.configured = errors.is_empty();
+    errors
 }
 
 fn apply_browser_request_preferences(state: &mut VaultState, settings: &config::AppSettings) {
@@ -1425,7 +1526,8 @@ fn start_popup_stdin_listener(tx: mpsc::Sender<PopupCommand>) {
 }
 
 fn popup_options() -> eframe::NativeOptions {
-    eframe::NativeOptions {
+    #[allow(unused_mut)]
+    let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(ui::widgets::WINDOW_SIZE)
             .with_min_inner_size(ui::widgets::WINDOW_SIZE)
@@ -1445,7 +1547,10 @@ fn popup_options() -> eframe::NativeOptions {
             .with_active(true),
         run_and_return: true,
         ..platform::native_options()
-    }
+    };
+    #[cfg(target_os = "macos")]
+    platform::macos::accessory_app(&mut options);
+    options
 }
 
 fn debug_log(message: &str) {
@@ -1457,4 +1562,60 @@ fn debug_log(message: &str) {
 /// Browser-launched stdio entry point. Never write diagnostics to stdout.
 pub fn native_host_main() -> std::io::Result<()> {
     browser::native_host::run_native_host()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use browser::install::{BrowserFamily, BrowserRegistration};
+
+    fn row(id: &str, registered: bool) -> BrowserRegistration {
+        BrowserRegistration {
+            id: id.into(),
+            label: id.into(),
+            executable: PathBuf::from(format!("/apps/{id}")),
+            family: BrowserFamily::Chromium,
+            native_host_dir: PathBuf::from(format!("/hosts/{id}")),
+            registered,
+        }
+    }
+
+    #[test]
+    fn enabling_registers_unregistered_browsers_once() {
+        let mut preferences = config::BrowserSetupPreferences::default();
+        let mut registered = Vec::new();
+        let errors = auto_register_browsers(
+            &mut preferences,
+            vec![row("chrome", false), row("firefox", true)],
+            |row| {
+                registered.push(row.id);
+                Ok(())
+            },
+        );
+        assert!(errors.is_empty());
+        assert_eq!(registered, ["chrome"]);
+        assert!(preferences.configured);
+        let errors = auto_register_browsers(&mut preferences, vec![row("vivaldi", false)], |_| {
+            panic!("a configured setup must not be changed")
+        });
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn failed_registration_is_reported_and_retried() {
+        let mut preferences = config::BrowserSetupPreferences::default();
+        let errors = auto_register_browsers(
+            &mut preferences,
+            vec![row("chrome", false), row("vivaldi", false)],
+            |row| {
+                if row.id == "chrome" {
+                    Err("read-only folder".into())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(errors, ["chrome: read-only folder"]);
+        assert!(!preferences.configured, "the next start should try again");
+    }
 }

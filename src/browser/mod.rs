@@ -346,6 +346,9 @@ fn accept(inner: &Arc<Inner>, socket: UnixStream) -> io::Result<()> {
     if connections.len() >= MAX_CONNECTIONS || unauthenticated >= MAX_UNAUTHENTICATED {
         return Err(io::Error::other("Browser connection limit reached"));
     }
+    // BSD sockets inherit O_NONBLOCK from the listener; Linux ones do not.
+    #[cfg(unix)]
+    socket.set_nonblocking(false)?;
     socket.set_read_timeout(Some(Duration::from_secs(10)))?;
     socket.set_write_timeout(Some(Duration::from_secs(5)))?;
     let (sender, receiver) = mpsc::sync_channel(WRITE_QUEUE);
@@ -967,7 +970,7 @@ mod tests {
     }
     impl Harness {
         fn new() -> Self {
-            let directory = std::env::temp_dir()
+            let directory = crate::test_temp_dir()
                 .join(format!("boltwarden-browser-test-{}", uuid::Uuid::new_v4()));
             #[cfg(unix)]
             std::fs::create_dir(&directory).unwrap();

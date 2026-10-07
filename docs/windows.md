@@ -48,14 +48,15 @@ can disable native messaging; registration does not bypass those policies.
 Before moving a ZIP directory, unregister its browsers and quit. Register again
 from its new location. Browser connections require an already running daemon.
 
-Open **Settings → General → Quick access shortcut**, record or select a combination,
-and choose **Apply shortcut**. The global shortcut works while Boltwarden is running,
-including while the vault is locked; use the installer's sign-in option to start
-the daemon automatically. No shortcut is enabled by default. Reserved combinations
-and conflicts show an error and preserve the previous active shortcut. **Clear
-shortcut** unregisters it. **Copy command** provides the executable's full path for
-manual setup. Shortcuts are restored on daemon startup; if another application has
-taken the key, Settings shows the failure and lets you choose another combination.
+Open **Settings → General**, select **Quick access shortcut**, and press Enter to
+record; the next combination applies at once. The global shortcut works while
+Boltwarden is running, including while the vault is locked; use the installer's
+sign-in option to start the daemon automatically. No shortcut is enabled by default.
+Reserved combinations and conflicts show an error and preserve the previous active
+shortcut. Escape cancels recording and Backspace clears the shortcut. For manual
+setup in another tool, run `boltwarden.exe toggle`. Shortcuts are restored on daemon
+startup; if another application has taken the key, Settings shows the failure and
+lets you record another combination.
 
 Quick access is also available from the tray and commands above.
 Drag the logo or empty header space to move quick access; search text and header

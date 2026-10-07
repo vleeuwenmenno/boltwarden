@@ -10,7 +10,8 @@ matching `v*` (desktop) or `extension-v*` (browser extension), and manual dispat
 
 To save runner minutes, a small `changes` job (`scripts/ci-changes.py`) routes work:
 documentation-only changes (`docs/**`, root `*.md`) run no other jobs; extension-only
-changes run only the `extensions` job; desktop changes run security, Linux and Windows.
+changes run only the `extensions` job; desktop changes run security, Linux, Windows and
+macOS.
 Files the desktop build embeds from the extension (`extension/public`,
 `extension/protocol`, `extension/lib/browser-identities.json`), workflow files and
 `LICENSE` trigger everything. Skipped jobs count as passing for required checks.
@@ -45,6 +46,16 @@ It opens both GUI windows with default and forced WARP software rendering using
 synthetic demo data, then checks native-host framing, registration, singleton activation, installation,
 upgrade while running, optional sign-in/browser tasks, and uninstall while
 preserving user data.
+
+The `macos-universal` job runs on `macos-15` with Rust 1.98.1 and both
+`aarch64-apple-darwin` and `x86_64-apple-darwin` targets. It runs the Rust tests,
+generates dependency notices, builds both architectures, and packages
+`boltwarden-VERSION-universal-macos.zip` with `scripts/package-macos.py`: one
+`Boltwarden.app` whose executables are merged with `lipo`, signed ad hoc (there is no
+Developer ID), and zipped with `ditto`, plus a checksum. `scripts/macos-smoke.py` then
+extracts the ZIP, verifies the signature strictly, checks that both executables are
+universal and that the bundle version matches, and runs `--version`. Users approve the
+unsigned app once on first launch; see [macOS](macos.md).
 
 Windows assets are unsigned previews, including on stable desktop tags. Do not
 advertise stable Windows support until both EXEs and the installer are signed

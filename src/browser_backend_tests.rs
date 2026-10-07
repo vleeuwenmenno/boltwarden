@@ -66,7 +66,7 @@ impl Harness {
             unlock: unlock_notify,
         });
         let directory =
-            std::env::temp_dir().join(format!("boltwarden-backend-{}", uuid::Uuid::new_v4()));
+            crate::test_temp_dir().join(format!("boltwarden-backend-{}", uuid::Uuid::new_v4()));
         let (hub, client) = BrowserHub::test_connection(backend.clone(), &directory).unwrap();
         {
             let mut state = vault.lock().unwrap();
@@ -287,9 +287,7 @@ impl Harness {
     }
 
     fn assert_no_credentials(&mut self) {
-        self.client
-            .set_read_timeout(Some(Duration::from_millis(50)))
-            .unwrap();
+        session::set_read_timeout(&self.client, Some(Duration::from_millis(50))).unwrap();
         while let Ok(body) = session::read_frame(&mut self.client, false) {
             let response: Value = serde_json::from_slice(&body).unwrap();
             assert_ne!(response["type"], "Card", "unexpected card secrets");
@@ -303,9 +301,7 @@ impl Harness {
                 "cancelled request released a passkey"
             );
         }
-        self.client
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+        session::set_read_timeout(&self.client, Some(Duration::from_secs(2))).unwrap();
     }
 }
 

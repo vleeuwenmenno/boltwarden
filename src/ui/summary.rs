@@ -1,5 +1,6 @@
 use crate::icons::{self, IconCache};
 use crate::model::{BwItemDetail, ItemAction, ItemState, Passkey, TotpCode};
+use crate::ui::shortcuts as sc;
 use crate::ui::theme::theme;
 use crate::ui::widgets;
 use egui::{RichText, Ui};
@@ -215,7 +216,8 @@ pub fn draw_summary(
             if input.key_pressed(egui::Key::R) && item_state == ItemState::Deleted {
                 action = Some(SummaryAction::Item(ItemAction::Restore));
             }
-            if input.key_pressed(egui::Key::Delete) {
+            // Mac keyboards label Backspace "delete"; forward delete needs fn there.
+            if input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace) {
                 state.confirm = Some(if item_state == ItemState::Deleted {
                     ItemAction::DeleteForever
                 } else {
@@ -284,44 +286,21 @@ pub fn draw_summary(
             .map(|(notice, _)| (notice.clone(), t.success))
     };
     if show_shortcuts || status.is_some() {
-        let hints: &[(&str, &str)] = match (show_shortcuts, item_state) {
-            (false, _) => &[],
-            (true, Some(ItemState::Deleted)) => &[
-                ("←↑↓→", "Navigate"),
-                ("⏎", "Copy"),
-                ("R", "Restore"),
-                ("Del", "Delete"),
-            ],
-            (true, Some(ItemState::Archived)) => &[
-                ("←↑↓→", "Navigate"),
-                ("⏎", "Copy"),
-                ("E", "Edit"),
-                ("F", "Favorite"),
-                ("A", "Unarchive"),
-                ("Del", "Trash"),
-            ],
-            (true, _) => &[
-                ("←↑↓→", "Navigate"),
-                ("⏎", "Copy"),
-                ("E", "Edit"),
-                ("F", "Favorite"),
-                ("A", "Archive"),
-                ("Del", "Trash"),
-            ],
-        };
         let link_selected = fields
             .get(state.selected_field)
             .is_some_and(|field| field.kind == FieldKind::Link);
-        // The window's list owns the arrows, and there is nothing to go back to.
-        let hints = hints
-            .iter()
-            .copied()
-            .filter(|(key, _)| !embedded || *key != "←↑↓→")
-            .flat_map(|(key, label)| match (key, link_selected) {
-                ("⏎", true) => vec![(key, "Open"), ("Ctrl+C", "Copy")],
-                _ => vec![(key, label)],
-            })
-            .collect::<Vec<_>>();
+        let mut hints: Vec<(sc::Combo, &str)> = Vec::new();
+        if show_shortcuts {
+            hints.push((sc::ENTER, if link_selected { "Open" } else { "Copy" }));
+            if link_selected {
+                hints.push((sc::command("C"), "Copy"));
+            }
+            hints.push(match item_state {
+                Some(ItemState::Deleted) => (sc::letter("R"), "Restore"),
+                _ => (sc::letter("E"), "Edit"),
+            });
+            hints.push((sc::HELP, "Keyboard shortcuts"));
+        }
         egui::Panel::bottom("footer")
             .frame(widgets::footer_frame())
             .show(root, |ui| {

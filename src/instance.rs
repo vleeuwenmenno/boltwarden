@@ -170,7 +170,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn activating_existing_instance_sends_show_message() {
-        let temp = std::env::temp_dir().join(format!("boltwarden-{}", uuid::Uuid::new_v4()));
+        let temp = crate::test_temp_dir().join(format!("boltwarden-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&temp).unwrap();
         let socket = temp.join(SOCKET_NAME);
         match UnixListener::bind(&socket) {
@@ -206,7 +206,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn activating_existing_instance_sends_toggle_message() {
-        let temp = std::env::temp_dir().join(format!("boltwarden-{}", uuid::Uuid::new_v4()));
+        let temp = crate::test_temp_dir().join(format!("boltwarden-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&temp).unwrap();
         let socket = temp.join(SOCKET_NAME);
         match UnixListener::bind(&socket) {

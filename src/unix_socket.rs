@@ -1,6 +1,7 @@
 //! Helpers for the daemon's private Unix sockets (activation and vault RPC).
 //!
-//! The sockets live in `$XDG_RUNTIME_DIR` when available. Without it we fall back to a
+//! The sockets live in `$XDG_RUNTIME_DIR` when available, and on macOS otherwise in
+//! `~/Library/Application Support/boltwarden`. Elsewhere we fall back to a
 //! per-user directory in the system temp dir, which another local user could pre-create,
 //! so every directory is checked to be owned by us and closed to group and others.
 
@@ -15,13 +16,29 @@ use std::path::{Path, PathBuf};
 pub fn runtime_dir() -> io::Result<PathBuf> {
     let dir = match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(runtime_dir) => PathBuf::from(runtime_dir),
-        None => {
-            let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
-            std::env::temp_dir().join(format!("boltwarden-{user}"))
-        }
+        None => fallback_runtime_dir(),
     };
     ensure_private_dir(&dir)?;
     Ok(dir)
+}
+
+/// macOS removes files left untouched in its per-user temp dir after a few days.
+#[cfg(target_os = "macos")]
+fn fallback_runtime_dir() -> PathBuf {
+    match std::env::var_os("HOME") {
+        Some(home) => PathBuf::from(home).join("Library/Application Support/boltwarden"),
+        None => temp_runtime_dir(),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn fallback_runtime_dir() -> PathBuf {
+    temp_runtime_dir()
+}
+
+fn temp_runtime_dir() -> PathBuf {
+    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
+    std::env::temp_dir().join(format!("boltwarden-{user}"))
 }
 
 fn ensure_private_dir(path: &Path) -> io::Result<()> {
@@ -75,6 +92,7 @@ pub fn remove_stale_socket(path: &Path) -> io::Result<()> {
 }
 
 /// Uid of the process on the other end of `stream`, as reported by the kernel.
+#[cfg(target_os = "linux")]
 pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
     let mut credentials = libc::ucred {
         pid: 0,
@@ -97,6 +115,17 @@ pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
     Ok(credentials.uid)
 }
 
+/// Uid of the process on the other end of `stream`, as reported by the kernel.
+#[cfg(target_os = "macos")]
+pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    let mut uid = 0;
+    let mut gid = 0;
+    if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(uid)
+}
+
 pub fn current_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
@@ -113,7 +142,7 @@ mod tests {
     use super::*;
 
     fn temp_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
+        crate::test_temp_dir().join(format!(
             "boltwarden-socket-test-{}-{name}",
             uuid::Uuid::new_v4()
         ))

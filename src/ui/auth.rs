@@ -1,4 +1,5 @@
 use crate::config;
+use crate::ui::shortcuts as sc;
 use crate::ui::theme::theme;
 use crate::ui::widgets;
 use egui::{Context, RichText};
@@ -75,10 +76,10 @@ pub fn draw_auth(root: &mut egui::Ui, state: &mut AuthState) -> Option<AuthActio
     let mut action = None;
     let t = theme();
 
-    let hints: &[(&str, &str)] = if state.has_saved_session {
-        &[("⏎", "Unlock"), ("Esc", "Hide")]
+    let hints: &[(sc::Combo, &str)] = if state.has_saved_session {
+        &[(sc::ENTER, "Unlock"), (sc::ESCAPE, "Hide")]
     } else {
-        &[("⏎", "Log in"), ("Tab", "Next field"), ("Esc", "Hide")]
+        &[(sc::ENTER, "Log in"), (sc::TAB, "Next field")]
     };
     egui::Panel::bottom("footer")
         .frame(widgets::footer_frame())

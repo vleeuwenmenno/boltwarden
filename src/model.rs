@@ -256,6 +256,11 @@ pub struct SshAgentClientInfo {
     pub parent_pid: Option<u32>,
     pub parent_name: Option<String>,
     pub parent_start_time_ticks: Option<u64>,
+    /// The terminal session that "remember" covers: the nearest shell above the client.
+    #[serde(default)]
+    pub session_pid: Option<u32>,
+    #[serde(default)]
+    pub session_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -281,8 +286,12 @@ pub struct SshApprovalRequest {
 pub enum SshApprovalRemember {
     Once,
     Process,
+    /// The client's terminal session; see `SshAgentClientInfo::session_pid`.
+    Session,
     Parent,
-    CommandInCwd { duration_seconds: u64 },
+    CommandInCwd {
+        duration_seconds: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

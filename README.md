@@ -3,15 +3,21 @@
 [![CI](https://github.com/vleeuwenmenno/boltwarden/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/vleeuwenmenno/boltwarden/actions/workflows/ci.yml)
 [![Release downloads](https://img.shields.io/badge/releases-downloads-7c3aed?logo=github&logoColor=white)](https://github.com/vleeuwenmenno/boltwarden/releases)
 [![Linux x86_64 and ARM64](https://img.shields.io/badge/Linux-x86__64%20%7C%20ARM64-1793d1?logo=linux&logoColor=white)](#install)
+[![Windows 11 x64](https://img.shields.io/badge/Windows%2011-x64-0078d4?logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0yIDJoOS41djkuNUgyek0xMi41IDJIMjJ2OS41aC05LjV6TTIgMTIuNWg5LjVWMjJIMnpNMTIuNSAxMi41SDIyVjIyaC05LjV6Ii8+PC9zdmc+)](docs/windows.md)
+[![macOS Apple silicon and Intel](https://img.shields.io/badge/macOS-Apple%20silicon%20%7C%20Intel-555555?logo=apple&logoColor=white)](docs/macos.md)
 [![License: MIT with Commons Clause](https://img.shields.io/badge/license-MIT%20%2B%20Commons%20Clause-f59e0b)](LICENSE)
 
-An unofficial desktop app for Vaultwarden and Bitwarden vaults, with Linux support
-and an unsigned Windows 11 x64 preview: a quick
+An unofficial desktop app for Vaultwarden and Bitwarden vaults, for Linux,
+Windows 11 x64 and macOS (unsigned on Windows and macOS): a quick
 access popup plus a full vault window. It is not affiliated with Bitwarden or the
 Vaultwarden project.
 
 Open quick access from a keyboard shortcut or tray icon, search your vault,
 and copy the field you need. Use the full vault window to browse and edit entries.
+
+<a href="https://boltwarden.org/#download"><img src="https://img.shields.io/badge/Download%20for-Linux-1793d1?style=for-the-badge&logo=linux&logoColor=white" alt="Download for Linux" height="40"></a>
+<a href="https://boltwarden.org/#download"><img src="https://img.shields.io/badge/Download%20for-Windows-0078d4?style=for-the-badge&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0yIDJoOS41djkuNUgyek0xMi41IDJIMjJ2OS41aC05LjV6TTIgMTIuNWg5LjVWMjJIMnpNMTIuNSAxMi41SDIyVjIyaC05LjV6Ii8+PC9zdmc+" alt="Download for Windows" height="40"></a>
+<a href="https://boltwarden.org/#download"><img src="https://img.shields.io/badge/Download%20for-macOS-555555?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS" height="40"></a>
 
 <!-- Official badge: https://extensionworkshop.com/documentation/publish/promoting-your-extension/ -->
 <a href="https://addons.mozilla.org/en-US/firefox/addon/boltwarden/">
@@ -63,10 +69,12 @@ and [release notes](docs/release-notes-1.0.0-rc.1.md) before installing.
 
 Choose your platform and browser from the assets on the
 [Releases page](https://github.com/vleeuwenmenno/boltwarden/releases).
-Desktop packages support Linux x86_64 and ARM64. Windows 11 x64 preview builds
+Desktop packages support Linux x86_64 and ARM64. Windows 11 x64 builds
 provide an installer and ZIP containing both required executables; see
-[Windows setup](docs/windows.md). Browser extensions are separate
-downloads and require the Boltwarden desktop app:
+[Windows setup](docs/windows.md). The macOS build is a universal app ZIP for Apple
+silicon and Intel Macs; see [macOS setup](docs/macos.md). The macOS build starts with
+the next release. Browser extensions are separate downloads and require the
+Boltwarden desktop app:
 
 | Browser | Release asset |
 | --- | --- |
@@ -92,7 +100,7 @@ individually, alongside the native packages.
 Requirements:
 
 - Rust/Cargo 1.95 or newer
-- Linux desktop session
+- Linux desktop session (for macOS, see [building on macOS](docs/macos.md#building))
 - systemd user services, if you want autostart
 
 Build a release binary (`make` alone shows help):
@@ -230,22 +238,23 @@ Layout is stored separately from shared preferences in
 Drag the logo or empty header space to move quick access. Search fields and header
 buttons keep their normal text-selection and click behavior.
 
-Open **Settings → General → Quick access shortcut** to record a shortcut or choose
-its modifiers and key, then select **Apply shortcut**. **Clear shortcut** removes
-the saved binding. No global shortcut is enabled by default.
+Open **Settings → General**, select **Quick access shortcut**, and press Enter to
+record: the next key combination applies at once. Escape cancels recording and
+Backspace clears the saved binding. On Hyprland, recording cannot capture Super, so
+select **Add Super** while recording. No global shortcut is enabled by default.
 
-On Windows, the shortcut works while Boltwarden is running, including when the
-vault is locked. The installer offers optional start at sign-in. Conflicting or
+On Windows and macOS, the shortcut works while Boltwarden is running, including when
+the vault is locked. The installer offers optional start at sign-in. Conflicting or
 reserved shortcuts are rejected without removing the previous active shortcut.
 
-On Hyprland, Apply creates `boltwarden-shortcut.lua` (or `.conf`) beside the
+On Hyprland, applying a shortcut creates `boltwarden-shortcut.lua` (or `.conf`) beside the
 standard user configuration, backs up the main file, and adds an include. It checks
 existing bindings before reloading and restores the files if validation fails.
 Existing bindings are preserved, including manually configured Boltwarden bindings;
 remove those yourself before assigning the same shortcut in Settings. Clear leaves
 the include and an empty managed file. Custom config paths and symlinked configs
-require manual setup. **Copy binding** provides a snippet for manual configuration.
-Other desktops can bind `boltwarden toggle` through their own shortcut settings.
+require manual setup; see the snippets below. On other desktops, pressing Enter on the
+shortcut row copies the `boltwarden toggle` command to bind in their own settings.
 
 For manual setup with Hyprland's Lua configuration:
 

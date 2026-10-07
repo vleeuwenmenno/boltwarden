@@ -1,7 +1,7 @@
 //! Shared building blocks so every screen uses the same header, rows, inputs and
 //! footer, all colored from [`theme()`].
 
-use crate::ui::theme::theme;
+use crate::ui::{shortcuts, theme::theme};
 use egui::{Color32, Response, RichText, Ui};
 
 /// Every screen uses the same fixed window size, so the popup never resizes (no
@@ -247,6 +247,143 @@ pub fn text_input(
         .inner
 }
 
+/// A search field styled like [`text_input`], with a magnifier inside on the left and a
+/// clear button on the right while it has text. Clearing marks the response as changed.
+pub fn search_input(ui: &mut Ui, id: egui::Id, value: &mut String, hint: &str) -> Response {
+    let t = theme();
+    let focused = ui.memory(|m| m.has_focus(id));
+    let clearable = !value.is_empty() && ui.is_enabled();
+    let frame = egui::Frame::new()
+        .fill(t.surface)
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            if focused { t.accent } else { t.border },
+        ))
+        .corner_radius(t.rounding)
+        .inner_margin(egui::Margin {
+            left: 32,
+            right: if clearable { 32 } else { 10 },
+            top: 7,
+            bottom: 7,
+        })
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::singleline(value)
+                    .id(id)
+                    .font(t.font(t.body()))
+                    .text_color(t.text_strong)
+                    .hint_text(RichText::new(hint).color(t.text_faint))
+                    .frame(egui::Frame::NONE)
+                    .margin(egui::Margin::ZERO)
+                    .desired_width(f32::INFINITY),
+            )
+        });
+    let mut response = frame.inner;
+    let rect = frame.response.rect;
+    let painter = ui.painter_at(rect);
+    let lens = egui::pos2(rect.left() + 15.0, rect.center().y - 1.0);
+    let stroke = egui::Stroke::new(1.6_f32, if focused { t.accent } else { t.text_muted });
+    painter.circle_stroke(lens, 5.0, stroke);
+    painter.line_segment(
+        [lens + egui::vec2(3.6, 3.6), lens + egui::vec2(7.0, 7.0)],
+        stroke,
+    );
+    if clearable {
+        let button = egui::Rect::from_center_size(
+            egui::pos2(rect.right() - 16.0, rect.center().y),
+            egui::vec2(20.0, 20.0),
+        );
+        let clear = ui
+            .interact(button, id.with("clear"), egui::Sense::click())
+            .on_hover_text("Clear search")
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        clear.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Clear search")
+        });
+        painter.circle_filled(
+            button.center(),
+            8.0,
+            if clear.hovered() {
+                t.text_muted
+            } else {
+                t.text_faint
+            },
+        );
+        let cross = egui::Stroke::new(1.5_f32, t.surface);
+        let arm = 3.0;
+        painter.line_segment(
+            [
+                button.center() - egui::vec2(arm, arm),
+                button.center() + egui::vec2(arm, arm),
+            ],
+            cross,
+        );
+        painter.line_segment(
+            [
+                button.center() + egui::vec2(-arm, arm),
+                button.center() + egui::vec2(arm, -arm),
+            ],
+            cross,
+        );
+        if clear.clicked() {
+            value.clear();
+            response.mark_changed();
+            ui.memory_mut(|m| m.request_focus(id));
+        }
+    }
+    response
+}
+
+/// A labelled monospace snippet with a Copy button, for configuration to paste elsewhere.
+pub fn code_block(ui: &mut Ui, label: &str, code: &str) {
+    let t = theme();
+    let id = ui.make_persistent_id(("code-block", label));
+    field_label(ui, label);
+    egui::Frame::new()
+        .fill(t.surface)
+        .stroke(egui::Stroke::new(1.0_f32, t.border))
+        .corner_radius(t.rounding)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(code)
+                            .font(t.mono(t.small() + 1.0))
+                            .color(t.text_strong),
+                    )
+                    .selectable(true),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                    let copied_at = ui.data(|data| data.get_temp::<f64>(id));
+                    let now = ui.input(|input| input.time);
+                    let copied = copied_at.is_some_and(|at| now - at < 2.0);
+                    if copied {
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(250));
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(if copied { "Copied" } else { "Copy" })
+                                    .size(t.small())
+                                    .color(if copied { t.success } else { t.accent }),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text(format!("Copy {label}"))
+                        .clicked()
+                    {
+                        ui.ctx().copy_text(code.to_owned());
+                        ui.data_mut(|data| data.insert_temp(id, now));
+                    }
+                });
+            });
+        });
+    ui.add_space(6.0);
+}
+
 /// A bordered multi-line input, styled like [`text_input`].
 pub fn text_area(
     ui: &mut Ui,
@@ -420,7 +557,16 @@ pub fn confirm_dialog(ctx: &egui::Context, dialog: &ConfirmDialog<'_>) -> Option
                     if dialog.busy {
                         ui.add(egui::Spinner::new().color(t.text_muted));
                     } else if dialog.key == ConfirmKey::CtrlEnter {
-                        ui.label(RichText::new("Ctrl+⏎").size(t.small()).color(t.text_faint));
+                        let caps = shortcuts::Combo::command(shortcuts::Key::Enter).caps();
+                        let style = shortcuts::CapStyle::footer();
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(
+                                shortcuts::caps_width(ui.painter(), &caps, style),
+                                style.height,
+                            ),
+                            egui::Sense::hover(),
+                        );
+                        shortcuts::paint_caps(ui.painter(), rect.left_center(), &caps, style);
                     }
                 });
             });
@@ -594,10 +740,11 @@ pub fn empty_state(ui: &mut Ui, icon: &str, text: &str, spinner: bool) {
 /// Footer with keyboard hints on the left and an optional status message on the right.
 pub fn footer(
     ui: &mut Ui,
-    hints: &[(&str, &str)],
+    hints: &[(shortcuts::Combo, &str)],
     status: Option<(&str, Color32)>,
 ) -> Option<egui::Rect> {
     let t = theme();
+    let style = shortcuts::CapStyle::footer();
     let height = 24.0;
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), height),
@@ -622,110 +769,25 @@ pub fn footer(
     }
 
     let mut cursor = rect.left();
-    for (key, label) in hints {
-        let key_size = keycap_size(key);
+    for (combo, label) in hints {
+        let caps = combo.caps();
         let label_galley =
             painter.layout_no_wrap((*label).to_owned(), t.font(t.small()), t.text_muted);
-        let hint_width = key_size.x + 6.0 + label_galley.size().x;
+        let hint_width =
+            shortcuts::caps_width(&painter, &caps, style) + 6.0 + label_galley.size().x;
         if cursor + hint_width > status_left - 12.0 {
             break;
         }
-        let key_rect = egui::Rect::from_min_size(
-            egui::pos2(cursor, rect.center().y - key_size.y / 2.0),
-            key_size,
-        );
-        paint_keycap(&painter, key_rect, key);
-        cursor += key_size.x + 6.0;
+        cursor = shortcuts::paint_caps(&painter, egui::pos2(cursor, rect.center().y), &caps, style)
+            + 6.0;
         painter.galley(
             egui::pos2(cursor, rect.center().y - label_galley.size().y / 2.0),
             label_galley.clone(),
             t.text_muted,
         );
-        cursor += label_galley.size().x + 16.0;
+        cursor += label_galley.size().x + 18.0;
     }
     status_rect
-}
-
-fn keycap_size(key: &str) -> egui::Vec2 {
-    match key {
-        "↑↓" => egui::vec2(30.0, 20.0),
-        "←↑↓→" => egui::vec2(46.0, 20.0),
-        "⏎" => egui::vec2(26.0, 20.0),
-        "←" | "→" => egui::vec2(22.0, 20.0),
-        _ => egui::vec2(key.chars().count() as f32 * 7.0 + 12.0, 20.0),
-    }
-}
-
-fn paint_keycap(painter: &egui::Painter, rect: egui::Rect, key: &str) {
-    let t = theme();
-    painter.rect_stroke(
-        rect,
-        t.rounding.min(4) as f32,
-        egui::Stroke::new(1.0_f32, t.border),
-        egui::StrokeKind::Inside,
-    );
-    let color = t.text;
-    match key {
-        "↑↓" => {
-            arrow(
-                painter,
-                rect.center() + egui::vec2(-4.0, 0.0),
-                egui::vec2(0.0, -4.5),
-                color,
-            );
-            arrow(
-                painter,
-                rect.center() + egui::vec2(4.0, 0.0),
-                egui::vec2(0.0, 4.5),
-                color,
-            );
-        }
-        "←↑↓→" => {
-            for (offset, direction) in [
-                (-14.0, egui::vec2(-4.5, 0.0)),
-                (-4.0, egui::vec2(0.0, -4.5)),
-                (4.0, egui::vec2(0.0, 4.5)),
-                (14.0, egui::vec2(4.5, 0.0)),
-            ] {
-                arrow(
-                    painter,
-                    rect.center() + egui::vec2(offset, 0.0),
-                    direction,
-                    color,
-                );
-            }
-        }
-        "⏎" => enter_glyph(painter, rect, color),
-        "←" => arrow(painter, rect.center(), egui::vec2(-5.0, 0.0), color),
-        "→" => arrow(painter, rect.center(), egui::vec2(5.0, 0.0), color),
-        _ => {
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                key,
-                t.font(t.small() - 1.0),
-                color,
-            );
-        }
-    }
-}
-
-fn enter_glyph(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-    let stroke = egui::Stroke::new(1.4_f32, color);
-    let left = rect.left() + 7.0;
-    let right = rect.right() - 7.0;
-    let top = rect.top() + 6.0;
-    let mid_y = rect.center().y + 2.5;
-    painter.line_segment([egui::pos2(right, top), egui::pos2(right, mid_y)], stroke);
-    painter.line_segment([egui::pos2(right, mid_y), egui::pos2(left, mid_y)], stroke);
-    painter.line_segment(
-        [egui::pos2(left, mid_y), egui::pos2(left + 3.5, mid_y - 3.0)],
-        stroke,
-    );
-    painter.line_segment(
-        [egui::pos2(left, mid_y), egui::pos2(left + 3.5, mid_y + 3.0)],
-        stroke,
-    );
 }
 
 #[cfg(test)]
@@ -739,16 +801,4 @@ mod tests {
         assert_eq!(super::format_date("2026-13-01"), None);
         assert_eq!(super::format_date("soon"), None);
     }
-}
-
-fn arrow(painter: &egui::Painter, center: egui::Pos2, delta: egui::Vec2, color: Color32) {
-    let stroke = egui::Stroke::new(1.4_f32, color);
-    let start = center - delta * 0.55;
-    let end = center + delta * 0.55;
-    painter.line_segment([start, end], stroke);
-    let direction = delta.normalized();
-    let perp = egui::vec2(-direction.y, direction.x);
-    let back = end - direction * 3.5;
-    painter.line_segment([end, back + perp * 3.0], stroke);
-    painter.line_segment([end, back - perp * 3.0], stroke);
 }

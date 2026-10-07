@@ -1,5 +1,6 @@
-//! Native-host registration for per-user, unsandboxed browsers on Linux.
+//! Native-host registration for per-user, unsandboxed browsers on Linux and macOS.
 //!
+//! Linux finds browsers on PATH; macOS finds their app bundles in the Applications folders.
 //! Discovery reads executable metadata only; it does not launch browsers or inspect profiles.
 //! Custom Chromium profiles need their user-data directory's `NativeMessagingHosts` directory,
 //! not an individual profile directory. Registration controls native-host discovery, while the
@@ -65,8 +66,11 @@ struct KnownBrowser {
     browser: Browser,
     id: &'static str,
     label: &'static str,
+    // macOS locates browsers through `MAC_APPS` instead.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     executables: &'static [&'static str],
     family: BrowserFamily,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     config_dir: &'static str,
 }
 
@@ -257,8 +261,112 @@ const KNOWN_BROWSERS: &[KnownBrowser] = &[
     },
 ];
 
+/// A browser's app bundle, its executable, and its native-host directory under
+/// `~/Library/Application Support`. Browsers without an entry are added as custom ones.
+#[cfg(target_os = "macos")]
+struct MacApp {
+    id: &'static str,
+    bundle: &'static str,
+    executable: &'static str,
+    native_host_dir: &'static str,
+}
+
+#[cfg(target_os = "macos")]
+const MAC_APPS: &[MacApp] = &[
+    MacApp {
+        id: "firefox",
+        bundle: "Firefox.app",
+        executable: "firefox",
+        native_host_dir: "Mozilla/NativeMessagingHosts",
+    },
+    MacApp {
+        id: "firefox-developer",
+        bundle: "Firefox Developer Edition.app",
+        executable: "firefox",
+        native_host_dir: "Mozilla/NativeMessagingHosts",
+    },
+    MacApp {
+        id: "librewolf",
+        bundle: "LibreWolf.app",
+        executable: "librewolf",
+        native_host_dir: "LibreWolf/NativeMessagingHosts",
+    },
+    MacApp {
+        id: "chrome",
+        bundle: "Google Chrome.app",
+        executable: "Google Chrome",
+        native_host_dir: "Google/Chrome/NativeMessagingHosts",
+    },
+    MacApp {
+        id: "chrome-beta",
+        bundle: "Google Chrome Beta.app",
+        executable: "Google Chrome Beta",
+        native_host_dir: "Google/Chrome Beta/NativeMessagingHosts",
+    },
+    MacApp {
+        id: "chrome-dev",
+        bundle: "Google Chrome Dev.app",
+        executable: "Google Chrome Dev",
+        native_host_dir: "Google/Chrome Dev/NativeMessagingHosts",
+    },
+    MacApp {
+        id: "chromium",
+        bundle: "Chromium.app",
+        executable: "Chromium",
+        native_host_dir: "Chromium/NativeMessagingHosts",
+    },
+    MacApp {
+        id: "edge",
+        bundle: "Microsoft Edge.app",
+        executable: "Microsoft Edge",
+        native_host_dir: "Microsoft Edge/NativeMessagingHosts",
+    },
+    MacApp {
+        id: "edge-beta",
+        bundle: "Microsoft Edge Beta.app",
+        executable: "Microsoft Edge Beta",
+        native_host_dir: "Microsoft Edge Beta/NativeMessagingHosts",
+    },
+    MacApp {
+        id: "edge-dev",
+        bundle: "Microsoft Edge Dev.app",
+        executable: "Microsoft Edge Dev",
+        native_host_dir: "Microsoft Edge Dev/NativeMessagingHosts",
+    },
+    MacApp {
+        id: "brave",
+        bundle: "Brave Browser.app",
+        executable: "Brave Browser",
+        native_host_dir: "BraveSoftware/Brave-Browser/NativeMessagingHosts",
+    },
+    MacApp {
+        id: "brave-beta",
+        bundle: "Brave Browser Beta.app",
+        executable: "Brave Browser Beta",
+        native_host_dir: "BraveSoftware/Brave-Browser-Beta/NativeMessagingHosts",
+    },
+    MacApp {
+        id: "brave-nightly",
+        bundle: "Brave Browser Nightly.app",
+        executable: "Brave Browser Nightly",
+        native_host_dir: "BraveSoftware/Brave-Browser-Nightly/NativeMessagingHosts",
+    },
+    MacApp {
+        id: "vivaldi",
+        bundle: "Vivaldi.app",
+        executable: "Vivaldi",
+        native_host_dir: "Vivaldi/NativeMessagingHosts",
+    },
+];
+
+#[cfg(target_os = "macos")]
+fn mac_app(browser: &KnownBrowser) -> Option<&'static MacApp> {
+    MAC_APPS.iter().find(|app| app.id == browser.id)
+}
+
 struct Paths {
     home: PathBuf,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     config: PathBuf,
 }
 
@@ -279,15 +387,53 @@ impl Paths {
         self.home.join(".local/libexec/boltwarden-native-host")
     }
 
-    fn native_host_dir(&self, browser: &KnownBrowser) -> PathBuf {
-        match browser.family {
+    /// Where `browser` looks for native-host manifests, if it is supported on this platform.
+    #[cfg(not(target_os = "macos"))]
+    fn native_host_dir(&self, browser: &KnownBrowser) -> Option<PathBuf> {
+        Some(match browser.family {
             BrowserFamily::Firefox => self.home.join(browser.config_dir),
             BrowserFamily::Chromium => self.config.join(browser.config_dir),
-        }
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn native_host_dir(&self, browser: &KnownBrowser) -> Option<PathBuf> {
+        mac_app(browser).map(|app| self.application_support().join(app.native_host_dir))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn application_support(&self) -> PathBuf {
+        self.home.join("Library/Application Support")
     }
 }
 
-/// Discover known browsers on the absolute entries of PATH. Symlink aliases are deduplicated.
+/// The browser's executable within `search`: PATH entries on Linux, Applications folders on
+/// macOS.
+#[cfg(not(target_os = "macos"))]
+fn locate(browser: &KnownBrowser, search: &[PathBuf]) -> Option<PathBuf> {
+    browser
+        .executables
+        .iter()
+        .find_map(|name| find_executable(search, name))
+}
+
+#[cfg(target_os = "macos")]
+fn locate(browser: &KnownBrowser, search: &[PathBuf]) -> Option<PathBuf> {
+    let app = mac_app(browser)?;
+    search
+        .iter()
+        .filter(|directory| directory.is_absolute())
+        .map(|directory| {
+            directory
+                .join(app.bundle)
+                .join("Contents/MacOS")
+                .join(app.executable)
+        })
+        .find(|path| executable_file(path))
+}
+
+/// Discover known browsers on the absolute entries of PATH, or in the Applications folders on
+/// macOS. Symlink aliases are deduplicated.
 /// Saved custom registrations belong to the caller and are not inferred from browser profiles.
 pub fn discover() -> Result<Vec<BrowserRegistration>> {
     discover_at(&Paths::from_env()?, &search_paths())
@@ -297,18 +443,17 @@ fn discover_at(paths: &Paths, search: &[PathBuf]) -> Result<Vec<BrowserRegistrat
     let mut seen = HashSet::new();
     let mut registrations: Vec<BrowserRegistration> = Vec::new();
     for browser in KNOWN_BROWSERS {
-        let Some(executable) = browser
-            .executables
-            .iter()
-            .find_map(|name| find_executable(search, name))
-        else {
+        let Some(executable) = locate(browser, search) else {
+            continue;
+        };
+        let Some(native_host_dir) = paths.native_host_dir(browser) else {
             continue;
         };
         let canonical = fs::canonicalize(&executable)?;
         if !seen.insert(canonical) {
             continue;
         }
-        let native_host_dir = normalize_native_host_dir(&paths.native_host_dir(browser))?;
+        let native_host_dir = normalize_native_host_dir(&native_host_dir)?;
         if let Some(shared) = registrations
             .iter_mut()
             .find(|row| row.native_host_dir == native_host_dir)
@@ -339,21 +484,48 @@ pub fn default_native_host_dir(family: BrowserFamily) -> Result<PathBuf> {
 
 /// Suggest the vendor directory for a known executable without launching it.
 pub fn suggested_registration(executable: &Path) -> Option<(BrowserFamily, PathBuf)> {
-    let name = executable.file_name()?.to_str()?;
     let browser = KNOWN_BROWSERS
         .iter()
-        .find(|browser| browser.executables.contains(&name))?;
+        .find(|browser| is_browser_executable(browser, executable))?;
     Some((
         browser.family,
-        Paths::from_env().ok()?.native_host_dir(browser),
+        Paths::from_env().ok()?.native_host_dir(browser)?,
     ))
 }
 
+#[cfg(not(target_os = "macos"))]
+fn is_browser_executable(browser: &KnownBrowser, executable: &Path) -> bool {
+    executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| browser.executables.contains(&name))
+}
+
+#[cfg(target_os = "macos")]
+fn is_browser_executable(browser: &KnownBrowser, executable: &Path) -> bool {
+    mac_app(browser).is_some_and(|app| {
+        executable.ends_with(
+            Path::new(app.bundle)
+                .join("Contents/MacOS")
+                .join(app.executable),
+        )
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
 fn default_native_host_dir_at(paths: &Paths, family: BrowserFamily) -> PathBuf {
     match family {
         BrowserFamily::Firefox => paths.home.join(".mozilla/native-messaging-hosts"),
         BrowserFamily::Chromium => paths.config.join("chromium/NativeMessagingHosts"),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn default_native_host_dir_at(paths: &Paths, family: BrowserFamily) -> PathBuf {
+    paths.application_support().join(match family {
+        BrowserFamily::Firefox => "Mozilla/NativeMessagingHosts",
+        BrowserFamily::Chromium => "Chromium/NativeMessagingHosts",
+    })
 }
 
 /// Register a browser without executing it. `executable` identifies the browser, never the native
@@ -507,7 +679,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
         }
         let found = discover_at(&paths, &search_paths()).map_err(|error| error.to_string())?;
         if found.is_empty() {
-            println!("No supported browsers found in PATH.");
+            println!("No supported browsers found.");
             return Ok(());
         }
         let targets: Vec<_> = found
@@ -624,7 +796,7 @@ fn destinations(paths: &Paths, browser: Browser) -> Vec<(PathBuf, BrowserFamily)
     KNOWN_BROWSERS
         .iter()
         .filter(|known| browser == Browser::All || known.browser == browser)
-        .map(|known| (paths.native_host_dir(known), known.family))
+        .filter_map(|known| Some((paths.native_host_dir(known)?, known.family)))
         .filter(|(path, _)| seen.insert(path.clone()))
         .collect()
 }
@@ -684,6 +856,16 @@ fn executable_file(path: &Path) -> bool {
             .is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o111 != 0)
 }
 
+#[cfg(target_os = "macos")]
+fn search_paths() -> Vec<PathBuf> {
+    let mut folders = vec![PathBuf::from("/Applications")];
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        folders.push(home.join("Applications"));
+    }
+    folders
+}
+
+#[cfg(not(target_os = "macos"))]
 fn search_paths() -> Vec<PathBuf> {
     std::env::var_os("PATH")
         .map(|path| {
@@ -702,6 +884,7 @@ fn find_executable(search: &[PathBuf], name: &str) -> Option<PathBuf> {
         .find(|path| executable_file(path))
 }
 
+#[cfg(not(target_os = "macos"))]
 fn find_binary() -> Option<PathBuf> {
     let installed = PathBuf::from("/usr/local/bin/boltwarden");
     if executable_file(&installed) {
@@ -709,6 +892,26 @@ fn find_binary() -> Option<PathBuf> {
     } else {
         find_executable(&search_paths(), "boltwarden")
     }
+}
+
+/// The running app, then an installed one, then PATH.
+#[cfg(target_os = "macos")]
+fn find_binary() -> Option<PathBuf> {
+    let running = std::env::current_exe()
+        .ok()
+        .filter(|path| path.file_name().is_some_and(|name| name == "boltwarden"));
+    let installed = search_paths()
+        .into_iter()
+        .map(|folder| folder.join("Boltwarden.app/Contents/MacOS/boltwarden"));
+    running
+        .into_iter()
+        .chain(installed)
+        .find(|path| executable_file(path))
+        .or_else(|| {
+            let path = std::env::var_os("PATH")?;
+            let search: Vec<PathBuf> = std::env::split_paths(&path).collect();
+            find_executable(&search, "boltwarden")
+        })
 }
 
 fn shell_quote(text: &str) -> String {
@@ -816,7 +1019,7 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let root =
-                std::env::temp_dir().join(format!("boltwarden-install-{}", uuid::Uuid::new_v4()));
+                crate::test_temp_dir().join(format!("boltwarden-install-{}", uuid::Uuid::new_v4()));
             let binaries = root.join("bin");
             fs::create_dir_all(&binaries).unwrap();
             let boltwarden = binaries.join("boltwarden");
@@ -855,7 +1058,7 @@ mod tests {
     #[test]
     fn repair_rewrites_stale_or_missing_launcher_only_when_registered() {
         let fixture = Fixture::new();
-        let directory = fixture.paths.home.join(".mozilla/native-messaging-hosts");
+        let directory = default_native_host_dir_at(&fixture.paths, BrowserFamily::Firefox);
         let launcher = fixture.paths.launcher();
         let current = Some(fixture.boltwarden.clone());
 
@@ -924,7 +1127,82 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    fn app_bundle(applications: &Path, bundle: &str, name: &str) -> PathBuf {
+        let path = applications.join(bundle).join("Contents/MacOS").join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        executable(&path);
+        path
+    }
+
     #[test]
+    #[cfg(target_os = "macos")]
+    fn every_mac_app_discovers_and_registers_in_application_support() {
+        for app in MAC_APPS {
+            let browser = KNOWN_BROWSERS
+                .iter()
+                .find(|browser| browser.id == app.id)
+                .unwrap_or_else(|| panic!("{} is not in the browser catalog", app.id));
+            let fixture = Fixture::new();
+            let executable = app_bundle(&fixture.binaries, app.bundle, app.executable);
+            let rows = discover_at(&fixture.paths, &[fixture.binaries.clone()]).unwrap();
+            assert_eq!(rows.len(), 1, "{}", app.id);
+            let row = &rows[0];
+            assert_eq!(row.executable, executable);
+            assert_eq!(row.family, browser.family);
+            assert_eq!(
+                row.native_host_dir,
+                fixture
+                    .paths
+                    .home
+                    .join("Library/Application Support")
+                    .join(app.native_host_dir)
+            );
+            assert!(is_browser_executable(browser, &executable));
+            fixture.install(&row.native_host_dir, row.family).unwrap();
+            assert!(is_registered_at(&row.native_host_dir, &fixture.paths.launcher()).unwrap());
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn mac_discovery_shares_mozilla_folder_and_skips_unsupported_browsers() {
+        let fixture = Fixture::new();
+        app_bundle(&fixture.binaries, "Firefox.app", "firefox");
+        app_bundle(
+            &fixture.binaries,
+            "Firefox Developer Edition.app",
+            "firefox",
+        );
+        app_bundle(&fixture.binaries, "Google Chrome.app", "Google Chrome");
+        // Linux executable names and bundles without a known folder are not browsers here.
+        executable(&fixture.binaries.join("chromium"));
+        app_bundle(&fixture.binaries, "Zen.app", "zen");
+        let rows = discover_at(
+            &fixture.paths,
+            &[PathBuf::from("relative"), fixture.binaries.clone()],
+        )
+        .unwrap();
+        let labels: Vec<_> = rows.iter().map(|row| row.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["Firefox / Firefox Developer Edition", "Google Chrome"]
+        );
+        assert!(
+            destinations(&fixture.paths, Browser::Zen).is_empty(),
+            "Zen has no known macOS folder"
+        );
+        assert_eq!(
+            default_native_host_dir_at(&fixture.paths, BrowserFamily::Chromium),
+            fixture
+                .paths
+                .home
+                .join("Library/Application Support/Chromium/NativeMessagingHosts")
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
     fn vendor_destinations_respect_config_home_and_vivaldi_is_in_all() {
         let fixture = Fixture::new();
         let all = destinations(&fixture.paths, Browser::All);
@@ -958,6 +1236,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn every_catalog_entry_discovers_parses_and_registers_its_own_family() {
         for browser in KNOWN_BROWSERS {
             let fixture = Fixture::new();
@@ -967,7 +1246,10 @@ mod tests {
             let row = &rows[0];
             assert_eq!(row.id, browser.id);
             assert_eq!(row.family, browser.family);
-            assert_eq!(row.native_host_dir, fixture.paths.native_host_dir(browser));
+            assert_eq!(
+                Some(row.native_host_dir.clone()),
+                fixture.paths.native_host_dir(browser)
+            );
             assert_eq!(
                 parse(["--browser".into(), browser.id.into()])
                     .unwrap()
@@ -980,6 +1262,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn firefox_and_zen_share_one_visible_registration() {
         let fixture = Fixture::new();
         executable(&fixture.binaries.join("firefox"));
@@ -1002,6 +1285,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn brave_origin_is_discovered_separately_from_brave_and_chromium() {
         let fixture = Fixture::new();
         for name in ["brave", "brave-origin", "chromium"] {
@@ -1028,6 +1312,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn discovery_ignores_missing_nonexecutables_and_relative_search_and_deduplicates_aliases() {
         let fixture = Fixture::new();
         executable(&fixture.binaries.join("vivaldi-stable"));
@@ -1049,6 +1334,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn discovery_deduplicates_browsers_sharing_the_same_native_host_directory() {
         let fixture = Fixture::new();
         executable(&fixture.binaries.join("google-chrome"));

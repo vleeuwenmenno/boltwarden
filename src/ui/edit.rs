@@ -2,6 +2,7 @@
 //! fields and notes.
 
 use crate::model::{DraftField, DraftFieldKind, DraftUri, Folder, ItemDraft, LoginDraft};
+use crate::ui::shortcuts as sc;
 use crate::ui::theme::theme;
 use crate::ui::widgets;
 use egui::{RichText, Ui};
@@ -131,8 +132,13 @@ pub fn draw_edit(
 
     let status = state.error.as_deref().map(|error| (error, t.danger));
     if show_shortcuts || status.is_some() {
-        let hints: &[(&str, &str)] = if show_shortcuts {
-            &[("Tab", "Next field"), ("Ctrl+S", "Save"), ("Esc", "Cancel")]
+        let hints: &[(sc::Combo, &str)] = if show_shortcuts {
+            &[
+                (sc::TAB, "Next field"),
+                (sc::command("S"), "Save"),
+                (sc::ESCAPE, "Cancel"),
+                (sc::HELP, "Keyboard shortcuts"),
+            ]
         } else {
             &[]
         };

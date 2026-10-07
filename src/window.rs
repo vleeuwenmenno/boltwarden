@@ -14,6 +14,8 @@ use crate::model::{
 use crate::ui::auth::{AuthAction, AuthState, draw_auth};
 use crate::ui::edit::{EditAction, EditState, draw_edit};
 use crate::ui::paired_browsers::{PairedBrowsersAction, PairedBrowsersState, draw_paired_browsers};
+use crate::ui::settings_page;
+use crate::ui::shortcuts as sc;
 use crate::ui::summary::{SummaryAction, SummaryState, draw_summary};
 use crate::ui::theme::theme;
 use crate::ui::two_factor::{TwoFactorAction, TwoFactorState, draw_two_factor};
@@ -187,6 +189,8 @@ pub struct WindowApp {
     paired_browsers: PairedBrowsersState,
     browser_setup: crate::ui::browser_setup::BrowserSetupState,
     browser_setup_open: bool,
+    /// Browser setup returns to paired browsers when opened there, else to settings.
+    browser_setup_from_pairings: bool,
     paired_browsers_generation: u64,
     paired_browsers_refreshed_at: Option<Instant>,
 
@@ -282,6 +286,7 @@ impl WindowApp {
             paired_browsers: PairedBrowsersState::default(),
             browser_setup: Default::default(),
             browser_setup_open: false,
+            browser_setup_from_pairings: false,
             paired_browsers_generation: 0,
             paired_browsers_refreshed_at: None,
             selected: None,
@@ -314,7 +319,7 @@ impl WindowApp {
                 app.settings_licenses = mode == "licenses";
                 app.focus_search = false;
                 if mode == "shortcut" {
-                    app.settings_state.shortcut_setup.open();
+                    app.settings_state.select_shortcut_setting();
                 }
             }
         }
@@ -549,6 +554,36 @@ impl WindowApp {
         self.select(&ids[next]);
     }
 
+    fn settings_category(&self) -> settings_page::Category {
+        use crate::ui::search::SettingsGroup;
+        if self.section == Section::PairedBrowsers {
+            settings_page::Category::Group(SettingsGroup::Browser)
+        } else if self.settings_licenses {
+            settings_page::Category::About
+        } else {
+            settings_page::Category::Group(
+                self.settings_state
+                    .settings_group
+                    .unwrap_or(SettingsGroup::General),
+            )
+        }
+    }
+
+    fn select_settings_category(&mut self, category: settings_page::Category) {
+        self.set_section(Section::Settings);
+        match category {
+            settings_page::Category::About => self.settings_licenses = true,
+            settings_page::Category::Group(group) => {
+                self.settings_licenses = false;
+                if self.settings_state.settings_group != Some(group) {
+                    self.settings_state.settings_group = Some(group);
+                    self.settings_state.settings_selected = group.rows()[0];
+                    self.settings_state.settings_scrolled_to = None;
+                }
+            }
+        }
+    }
+
     fn set_section(&mut self, section: Section) {
         if section == self.section {
             return;
@@ -624,15 +659,12 @@ impl WindowApp {
         use crate::ui::search::SearchAction;
         self.refresh_settings(true);
         match action {
+            SearchAction::SetStartAtLogin(value) => self.settings.start_at_login = value,
             SearchAction::SetStartList(value) => {
                 self.settings.start_list = value;
                 if value != config::StartList::RecentlyUsed && !crate::demo::enabled() {
                     let _ = config::clear_item_usage();
                 }
-            }
-            SearchAction::OpenShortcutSetup => {
-                self.settings_state.shortcut_setup.open();
-                return;
             }
             SearchAction::SetKeepOfflineCopy(value) => self.settings.keep_offline_copy = value,
             SearchAction::SetKeyboardShortcuts(value) => {
@@ -697,12 +729,21 @@ impl WindowApp {
             SearchAction::OpenBrowserSetup => {
                 self.set_section(Section::PairedBrowsers);
                 self.browser_setup_open = true;
+                self.browser_setup_from_pairings = false;
                 self.browser_setup.refresh();
                 return;
             }
             _ => return,
         }
         self.save_settings();
+    }
+
+    fn close_browser_setup(&mut self) {
+        if self.browser_setup_from_pairings {
+            self.browser_setup_open = false;
+        } else {
+            self.return_to_browser_settings();
+        }
     }
 
     fn return_to_browser_settings(&mut self) {
@@ -1260,10 +1301,15 @@ impl eframe::App for WindowApp {
                 return;
             }
         }
-        if self.settings_state.shortcut_setup.open {
-            self.settings_state.shortcut_setup.show(root, &self.backend);
-            return;
-        }
+        // Before other key handling, so a shortcut being recorded is not also acted on.
+        self.settings_state.shortcut_setup.poll(ctx, &self.backend);
+        let settings = &mut self.settings_state;
+        settings.shortcuts.handle_keys(ctx);
+        settings.shortcuts.show(
+            ctx,
+            sc::VAULT_WINDOW,
+            settings.shortcut_setup.active_shortcut(),
+        );
         self.icons.poll(ctx);
         if let Some(warning) = &self.security_warning {
             egui::Panel::top("vault-security-warning").show(root, |ui| {
@@ -1439,7 +1485,17 @@ impl WindowApp {
                         &self.folder_tree,
                         self.health.as_ref(),
                     );
-                    if let Some(action) = vault::draw_sidebar(
+                    if matches!(self.section, Section::Settings | Section::PairedBrowsers) {
+                        match settings_page::draw_sidebar(ui, self.settings_category()) {
+                            Some(settings_page::SidebarAction::Back) => {
+                                self.set_section(Section::All)
+                            }
+                            Some(settings_page::SidebarAction::Select(category)) => {
+                                self.select_settings_category(category)
+                            }
+                            None => {}
+                        }
+                    } else if let Some(action) = vault::draw_sidebar(
                         ui,
                         &self.section,
                         &self.folder_tree,
@@ -1453,49 +1509,22 @@ impl WindowApp {
             });
 
         if self.section == Section::Settings {
-            self.settings_state
+            let group = *self
+                .settings_state
                 .settings_group
                 .get_or_insert(crate::ui::search::SettingsGroup::General);
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::new()
                         .fill(t.bg)
-                        .inner_margin(egui::Margin::symmetric(20, 12)),
+                        .inner_margin(egui::Margin::symmetric(24, 16)),
                 )
                 .show(root, |ui| {
-                    ui.heading("Settings");
-                    crate::ui::acknowledgements::draw_versions(ui);
-                    ui.horizontal_wrapped(|ui| {
-                        for (group, label) in [
-                            (crate::ui::search::SettingsGroup::General, "General"),
-                            (
-                                crate::ui::search::SettingsGroup::Browser,
-                                "Browser integration",
-                            ),
-                            (crate::ui::search::SettingsGroup::Ssh, "SSH integration"),
-                        ] {
-                            let selected = !self.settings_licenses
-                                && self
-                                    .settings_state
-                                    .settings_group
-                                    .unwrap_or(crate::ui::search::SettingsGroup::General)
-                                    == group;
-                            if ui.selectable_label(selected, label).clicked() {
-                                self.settings_licenses = false;
-                                self.settings_state.settings_group = Some(group);
-                            }
-                        }
-                        ui.selectable_value(
-                            &mut self.settings_licenses,
-                            true,
-                            "Licenses and acknowledgements",
-                        );
-                    });
-                    ui.separator();
                     if self.settings_licenses {
-                        crate::ui::acknowledgements::draw(ui);
-                    } else if let Some(action) = crate::ui::search::draw_settings(
+                        settings_page::column(ui, crate::ui::acknowledgements::draw);
+                    } else if let Some(action) = settings_page::draw_page(
                         ui,
+                        group,
                         &mut self.settings_state,
                         &self.settings,
                         &self.settings_ssh_status,
@@ -1514,50 +1543,50 @@ impl WindowApp {
                         .inner_margin(egui::Margin::symmetric(20, 12)),
                 )
                 .show(root, |ui| {
-                    if self.browser_setup_open {
-                        ui.horizontal(|ui| {
-                            if widgets::button(ui, "Back to paired browsers", false, true).clicked() {
-                                self.browser_setup_open = false;
+                    settings_page::column(ui, |ui| {
+                        if self.browser_setup_open {
+                            let back = if self.browser_setup_from_pairings {
+                                "Paired browsers"
+                            } else {
+                                "Browser"
+                            };
+                            if settings_page::subpage_header(ui, back, "Browser setup", true) {
+                                self.close_browser_setup();
+                                return;
                             }
-                            ui.label(
-                                RichText::new("Browser setup")
-                                    .size(t.title())
-                                    .color(t.text_strong),
-                            );
-                        });
+                            ui.add_space(8.0);
+                            crate::ui::browser_setup::draw_browser_setup(ui, &mut self.browser_setup);
+                            return;
+                        }
+                        let idle = !self.paired_browsers.has_confirmation();
+                        if settings_page::subpage_header(ui, "Browser", "Paired browsers", idle) {
+                            self.return_to_browser_settings();
+                            return;
+                        }
+                        ui.label(
+                            RichText::new("Each pairing grants one extension profile access to this vault. Revoke access to disconnect it.")
+                                .size(t.small())
+                                .color(t.text_muted),
+                        );
                         ui.add_space(8.0);
-                        crate::ui::browser_setup::draw_browser_setup(ui, &mut self.browser_setup);
-                        return;
-                    }
-                    if widgets::button(ui, "Back to Settings", false, !self.paired_browsers.has_confirmation()).clicked() {
-                        self.return_to_browser_settings();
-                        return;
-                    }
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new("Paired browser extensions")
-                            .size(t.title())
-                            .color(t.text_strong),
-                    );
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("Each pairing grants one extension profile access to this vault. Revoke access to disconnect it.").size(t.small()).color(t.text_muted));
-                    ui.add_space(8.0);
-                    if widgets::choice_row(
-                        ui,
-                        false,
-                        "Browser setup",
-                        "Choose installed or custom browsers for the extension",
-                        "Manage",
-                    )
-                    .clicked()
-                    {
-                        self.browser_setup_open = true;
-                        self.browser_setup.refresh();
-                    }
-                    ui.add_space(8.0);
-                    if let Some(action) = draw_paired_browsers(ui, &mut self.paired_browsers) {
-                        self.paired_browsers_action(action);
-                    }
+                        if widgets::choice_row(
+                            ui,
+                            false,
+                            "Browser setup",
+                            "Choose installed or custom browsers for the extension",
+                            "Manage",
+                        )
+                        .clicked()
+                        {
+                            self.browser_setup_open = true;
+                            self.browser_setup_from_pairings = true;
+                            self.browser_setup.refresh();
+                        }
+                        ui.add_space(8.0);
+                        if let Some(action) = draw_paired_browsers(ui, &mut self.paired_browsers) {
+                            self.paired_browsers_action(action);
+                        }
+                    });
                 });
             return;
         }
@@ -1904,7 +1933,7 @@ impl WindowApp {
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
             if self.browser_setup_open {
-                self.browser_setup_open = false;
+                self.close_browser_setup();
             } else {
                 self.return_to_browser_settings();
             }
@@ -1956,7 +1985,7 @@ impl WindowApp {
         let mut settings = false;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if widgets::icon_button(ui, t.icon("\u{f023}", "🔒"), true)
-                .on_hover_text("Lock vault (Ctrl+L)")
+                .on_hover_text(format!("Lock vault ({})", sc::command("L").text()))
                 .clicked()
             {
                 lock = true;
@@ -1964,7 +1993,7 @@ impl WindowApp {
             settings = widgets::button(ui, "Settings", false, !editing).clicked();
             let label = format!("{}  New item", t.icon("\u{f067}", "+"));
             new_item = widgets::button(ui, &label, true, !editing && !self.offline())
-                .on_hover_text("Ctrl+N")
+                .on_hover_text(sc::command("N").text())
                 .clicked();
             ui.add_space(8.0);
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -1976,20 +2005,13 @@ impl WindowApp {
                         .color(t.text_strong),
                 );
                 ui.add_space(24.0);
-                ui.label(
-                    RichText::new(t.icon("\u{f002}", "🔎"))
-                        .size(t.body())
-                        .color(t.text_muted),
-                );
                 let response = ui
                     .add_enabled_ui(!editing, |ui| {
-                        widgets::text_input(
+                        widgets::search_input(
                             ui,
                             egui::Id::new(SEARCH_INPUT_ID),
                             &mut self.query,
-                            "Search vault (Ctrl+F)",
-                            false,
-                            t.body(),
+                            &format!("Search vault ({})", sc::command("F").text()),
                         )
                     })
                     .inner;
@@ -2023,10 +2045,11 @@ impl WindowApp {
     }
 
     fn draw_statusbar(&mut self, ui: &mut egui::Ui) {
+        const HELP: (sc::Combo, &str) = (sc::HELP, "Keyboard shortcuts");
         let t = theme();
         if self.section == Section::PairedBrowsers && self.browser_setup_open {
-            let hints: &[(&str, &str)] = if self.settings.show_keyboard_shortcuts {
-                &[("↑↓", "Select"), ("Space", "Toggle")]
+            let hints: &[(sc::Combo, &str)] = if self.settings.show_keyboard_shortcuts {
+                &[(sc::SPACE, "Toggle"), (sc::ENTER, "Apply"), HELP]
             } else {
                 &[]
             };
@@ -2034,14 +2057,8 @@ impl WindowApp {
             return;
         }
         if self.section == Section::PairedBrowsers {
-            let hints: &[(&str, &str)] = if self.settings.show_keyboard_shortcuts {
-                &[
-                    ("↑↓", "Navigate"),
-                    ("⏎", "Revoke"),
-                    ("Ctrl+R", "Refresh"),
-                    ("Esc", "Settings"),
-                    ("Ctrl+F", "Search vault"),
-                ]
+            let hints: &[(sc::Combo, &str)] = if self.settings.show_keyboard_shortcuts {
+                &[(sc::ENTER, "Revoke"), (sc::command("R"), "Refresh"), HELP]
             } else {
                 &[]
             };
@@ -2069,24 +2086,21 @@ impl WindowApp {
                     .filter(|_| !self.offline())
                     .map(|warning| (warning, t.warning))
             });
-        let hints: &[(&str, &str)] = if !self.settings.show_keyboard_shortcuts {
+        let hints: &[(sc::Combo, &str)] = if !self.settings.show_keyboard_shortcuts {
             &[]
         } else if self.section == Section::Settings && self.settings_licenses {
-            &[("Esc", "Settings"), ("Ctrl+L", "Lock")]
+            &[(sc::ESCAPE, "Settings"), HELP]
         } else if self.section == Section::Settings {
-            &[
-                ("↑↓", "Settings"),
-                ("Space", "Change"),
-                ("Esc", "Back"),
-                ("Ctrl+L", "Lock"),
-            ]
+            if self.settings_state.shortcut_setup_selected() {
+                self.settings_state.shortcut_setup.hints()
+            } else {
+                &[(sc::SPACE, "Change"), (sc::ESCAPE, "Back"), HELP]
+            }
         } else {
             &[
-                ("↑↓", "Items"),
-                ("Ctrl+F", "Search"),
-                ("Ctrl+N", "New"),
-                ("Ctrl+R", "Sync"),
-                ("Ctrl+L", "Lock"),
+                (sc::command("F"), "Search"),
+                (sc::command("N"), "New item"),
+                HELP,
             ]
         };
         let sync_label = if self.sync_in_flight {
@@ -2121,7 +2135,7 @@ impl WindowApp {
                         .as_ref()
                         .filter(|s| s.offline)
                         .map(|s| s.offline_tooltip())
-                        .unwrap_or_else(|| "Sync vault · Ctrl+R".into()),
+                        .unwrap_or_else(|| format!("Sync vault · {}", sc::command("R").text())),
                 )
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
@@ -2596,6 +2610,7 @@ mod tests {
         let mut app = WindowApp::with_settings(backend, commands, AppSettings::default());
         app.section = Section::PairedBrowsers;
         app.browser_setup_open = true;
+        app.browser_setup_from_pairings = true;
         let ctx = Context::default();
         let escape = || {
             let mut input = egui::RawInput::default();
@@ -2623,6 +2638,15 @@ mod tests {
         );
         assert!(!app.settings_licenses);
         assert!(!app.paired_browsers.is_busy());
+
+        // Opened from Browser settings, setup goes straight back there.
+        app.settings_action(crate::ui::search::SearchAction::OpenBrowserSetup);
+        assert!(app.browser_setup_open);
+        ctx.run_ui(escape(), |ui| app.handle_keys(ui.ctx(), false))
+            .textures_delta
+            .clear();
+        assert_eq!(app.section, Section::Settings);
+        assert!(!app.browser_setup_open);
     }
 
     #[test]
@@ -2694,6 +2718,37 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn settings_sidebar_switches_categories_and_returns_to_the_vault() {
+        use crate::ui::search::SettingsGroup;
+        use settings_page::Category;
+        let (_, commands) = mpsc::channel();
+        let mut app =
+            WindowApp::with_settings(AppBackend::demo(), commands, AppSettings::default());
+        app.screen = Screen::Vault;
+        app.select_settings_category(Category::Group(SettingsGroup::Security));
+        assert_eq!(app.section, Section::Settings);
+        assert_eq!(
+            app.settings_category(),
+            Category::Group(SettingsGroup::Security)
+        );
+        assert_eq!(
+            app.settings_state.settings_selected,
+            SettingsGroup::Security.rows()[0],
+            "keyboard selection starts at the category's first row"
+        );
+        app.select_settings_category(Category::About);
+        assert_eq!(app.settings_category(), Category::About);
+        app.select_settings_category(Category::Group(SettingsGroup::Browser));
+        assert!(!app.settings_licenses);
+        app.set_section(Section::PairedBrowsers);
+        assert_eq!(
+            app.settings_category(),
+            Category::Group(SettingsGroup::Browser),
+            "paired browsers belong to the Browser category"
+        );
     }
 
     #[test]
