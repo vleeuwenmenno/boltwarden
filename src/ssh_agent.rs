@@ -358,6 +358,8 @@ impl SshKeyStore {
 
 pub struct SshAgentHandle {
     path: PathBuf,
+    /// The socket this agent bound, so stopping never removes a newer agent's socket.
+    socket: SocketId,
     stop_tx: Option<mpsc::Sender<()>>,
     join: Option<thread::JoinHandle<()>>,
     status: SshAgentStatus,
@@ -383,7 +385,7 @@ impl SshAgentHandle {
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
-        let _ = remove_owned_socket_if_present(&self.path);
+        remove_socket_if_ours(&self.path, self.socket);
     }
 }
 
@@ -444,7 +446,7 @@ pub fn start(
     let path = expand_ssh_agent_socket_path(&settings.ssh_agent_socket_path)?;
     prepare_socket_path(&path)?;
     let listener = UnixListener::bind(&path).map_err(|e| format!("could not bind socket: {e}"))?;
-    secure_bound_socket(&path)?;
+    let socket = secure_bound_socket(&path)?;
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("could not configure socket: {e}"))?;
@@ -475,11 +477,12 @@ pub fn start(
             }
         }
         thread_approvals.clear_all("SSH agent stopped");
-        let _ = remove_owned_socket_if_present(&thread_path);
+        remove_socket_if_ours(&thread_path, socket);
     });
 
     Ok(SshAgentHandle {
         path: path.clone(),
+        socket,
         stop_tx: Some(stop_tx),
         join: Some(join),
         status: SshAgentStatus {
@@ -502,7 +505,7 @@ fn prepare_socket_path(path: &Path) -> Result<(), String> {
     };
     fs::create_dir_all(parent).map_err(|e| format!("could not create socket dir: {e}"))?;
     ensure_owned_directory(parent)?;
-    remove_owned_socket_if_present(path)?;
+    remove_stale_socket(path)?;
     Ok(())
 }
 
@@ -518,7 +521,9 @@ fn ensure_owned_directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn remove_owned_socket_if_present(path: &Path) -> Result<(), String> {
+/// Removes a leftover socket from an agent that is gone. A socket that still accepts
+/// connections belongs to a running agent, which keeps it.
+fn remove_stale_socket(path: &Path) -> Result<(), String> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -530,10 +535,39 @@ fn remove_owned_socket_if_present(path: &Path) -> Result<(), String> {
     if !metadata.file_type().is_socket() {
         return Err("SSH agent path already exists and is not a socket".into());
     }
+    if UnixStream::connect(path).is_ok() {
+        return Err(format!(
+            "another SSH agent is already listening at {}",
+            path.display()
+        ));
+    }
     fs::remove_file(path).map_err(|e| format!("could not remove stale SSH agent socket: {e}"))
 }
 
-fn secure_bound_socket(path: &Path) -> Result<(), String> {
+/// Identifies the socket file an agent bound by device and inode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SocketId {
+    device: u64,
+    inode: u64,
+}
+
+impl SocketId {
+    fn of(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+}
+
+/// Removes the socket at `path` only while it is still the one this agent bound.
+fn remove_socket_if_ours(path: &Path, socket: SocketId) {
+    if fs::symlink_metadata(path).is_ok_and(|metadata| SocketId::of(&metadata) == socket) {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn secure_bound_socket(path: &Path) -> Result<SocketId, String> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
         .map_err(|e| format!("could not set SSH agent socket permissions: {e}"))?;
     let metadata = fs::symlink_metadata(path)
@@ -547,7 +581,7 @@ fn secure_bound_socket(path: &Path) -> Result<(), String> {
             "SSH agent socket permissions must be 0600, got {mode:04o}"
         ));
     }
-    Ok(())
+    Ok(SocketId::of(&metadata))
 }
 
 fn current_uid() -> u32 {
@@ -1277,6 +1311,69 @@ mod tests {
         assert!(err.contains("not a socket"));
         assert_eq!(fs::read(&socket_path).unwrap(), b"not a socket");
         fs::remove_file(&socket_path).unwrap();
+    }
+
+    fn agent_settings(socket_path: &Path) -> AppSettings {
+        AppSettings {
+            ssh_agent_enabled: true,
+            ssh_agent_socket_path: socket_path.display().to_string(),
+            ..AppSettings::default()
+        }
+    }
+
+    fn start_agent(socket_path: &Path) -> Result<SshAgentHandle, String> {
+        let (key_store, _) = key_store(Vec::new());
+        let (approvals, _) = approval_service();
+        start(&agent_settings(socket_path), key_store, approvals)
+    }
+
+    #[test]
+    fn live_agent_socket_is_not_taken_over_but_a_stale_one_is_replaced() {
+        let socket_dir = crate::test_temp_dir().join(format!("bw-ssh-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&socket_dir).unwrap();
+        let socket_path = socket_dir.join("agent.sock");
+        let first = start_agent(&socket_path).unwrap();
+        let error = match start_agent(&socket_path) {
+            Ok(second) => {
+                second.stop();
+                panic!("a second agent must not take over a live socket");
+            }
+            Err(error) => error,
+        };
+        assert!(error.contains("already listening"), "{error}");
+        assert!(
+            UnixStream::connect(&socket_path).is_ok(),
+            "the first agent keeps serving"
+        );
+        first.stop();
+        assert!(!socket_path.exists());
+
+        // A socket left by an agent that is gone no longer accepts connections.
+        drop(UnixListener::bind(&socket_path).unwrap());
+        assert!(socket_path.exists());
+        let replacement = start_agent(&socket_path).unwrap();
+        assert!(UnixStream::connect(&socket_path).is_ok());
+        replacement.stop();
+        fs::remove_dir(&socket_dir).unwrap();
+    }
+
+    #[test]
+    fn stopping_agent_leaves_a_newer_socket_at_its_path() {
+        let socket_dir = crate::test_temp_dir().join(format!("bw-ssh-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&socket_dir).unwrap();
+        let socket_path = socket_dir.join("agent.sock");
+        let agent = start_agent(&socket_path).unwrap();
+        // Something else replaced the socket while this agent was running.
+        fs::remove_file(&socket_path).unwrap();
+        let newer = UnixListener::bind(&socket_path).unwrap();
+        agent.stop();
+        assert!(
+            UnixStream::connect(&socket_path).is_ok(),
+            "the newer socket must survive"
+        );
+        drop(newer);
+        fs::remove_file(&socket_path).unwrap();
+        fs::remove_dir(&socket_dir).unwrap();
     }
 
     #[test]
