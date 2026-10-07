@@ -874,6 +874,16 @@ make check
 RUST_TEST_THREADS=1 make test
 ```
 
+To try a change in the installed app, install a release package once, then run:
+
+```bash
+make dev-swap
+```
+
+It builds a release binary, quits the running daemon, replaces `/usr/bin/boltwarden`
+through sudo, and starts the new daemon. Set `DEV_SWAP_PATH` for another install path.
+The package manager then sees a modified file until you reinstall a package.
+
 Browser development uses an optional Nix shell with Node.js:
 
 ```bash

@@ -4,11 +4,12 @@ PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 BIN_NAME := boltwarden
 BIN_PATH := $(BINDIR)/$(BIN_NAME)
+DEV_SWAP_PATH ?= /usr/bin/$(BIN_NAME)
 CARGO ?= cargo
 NPM ?= npm
 BROWSER_TARGET ?= all
 
-.PHONY: help all build release install install-browser uninstall check test clean extension-deps extension-check extension-test extension-build extension-zip extension-release-check playground security package package-macos packaging-test
+.PHONY: help all build release install install-browser dev-swap uninstall check test clean extension-deps extension-check extension-test extension-build extension-zip extension-release-check playground security package package-macos packaging-test
 
 ##@ General
 help: ## Show available targets (default)
@@ -56,6 +57,9 @@ install: ## Install the existing release binary
 
 install-browser: ## Register the installed binary with browsers (BROWSER_TARGET=all)
 	"$(BIN_PATH)" install-browser --browser "$(BROWSER_TARGET)" --path "$(BIN_PATH)"
+
+dev-swap: release ## Replace the installed binary with this build and restart it (DEV_SWAP_PATH=/usr/bin/boltwarden)
+	sh scripts/install.sh dev-swap "target/release/$(BIN_NAME)" "$(DEV_SWAP_PATH)"
 
 uninstall: ## Remove the installed binary
 	sh scripts/install.sh uninstall-binary "$(DESTDIR)$(BIN_PATH)"
