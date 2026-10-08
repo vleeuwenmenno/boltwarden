@@ -620,8 +620,9 @@ fn handle_rpc_request(
             );
         }
         RpcRequest::VaultHealth => {
-            // The directory download can take seconds; don't hold the vault lock for it.
+            // The list downloads can take seconds; don't hold the vault lock for them.
             let directory = health::directory();
+            let breaches = health::breaches();
             let Ok(mut state) = vault.lock() else {
                 return RpcResponse::Health(Err(RpcError::Message(
                     "vault state lock poisoned".into(),
@@ -630,7 +631,7 @@ fn handle_rpc_request(
             return RpcResponse::Health(
                 state
                     .bw
-                    .health_report(&directory)
+                    .health_report(&directory, &breaches)
                     .map_err(rpc_error_from_bw),
             );
         }

@@ -1079,8 +1079,8 @@ pub fn draw_action_center(
                     ui.label(
                         RichText::new(
                             "Problems and suggestions for the logins in your vault. The score \
-                             is the share of passwords that are strong, unique and only sent \
-                             over https.",
+                             is the share of passwords that are strong, unique, only sent over \
+                             https and not exposed in a known breach.",
                         )
                         .color(t.text_muted),
                     );
@@ -1112,33 +1112,57 @@ pub fn draw_action_center(
                         egui::vec2(card_width, CARD_HEIGHT),
                     );
                     let count = report.items(*check).len();
-                    let unavailable = matches!(
-                        check,
-                        HealthCheck::TwoFactorAvailable | HealthCheck::PasskeysAvailable
-                    ) && report.directory_error.is_some();
+                    let unavailable = match check {
+                        HealthCheck::TwoFactorAvailable | HealthCheck::PasskeysAvailable => {
+                            report.directory_error.is_some()
+                        }
+                        HealthCheck::BreachedWebsites => report.breach_error.is_some(),
+                        _ => false,
+                    };
                     if draw_card(ui, rect, *check, count, unavailable) {
                         picked = Some(*check);
                     }
                 }
                 ui.add_space(CARD_GAP);
             }
-            if let Some(error) = &report.directory_error {
-                ui.label(
-                    RichText::new(format!(
-                        "Two-factor and passkey suggestions are unavailable: {error}"
-                    ))
-                    .size(t.small())
-                    .color(t.text_faint),
-                );
-            } else {
-                ui.label(
-                    RichText::new(
-                        "Two-factor and passkey suggestions use the public lists from \
-                         2fa.directory, downloaded whole so no vault data is sent.",
-                    )
-                    .size(t.small())
-                    .color(t.text_faint),
-                );
+            let note = |ui: &mut Ui, text: String| {
+                ui.label(RichText::new(text).size(t.small()).color(t.text_faint));
+            };
+            match &report.breach_error {
+                Some(error) => note(
+                    ui,
+                    format!("The breached websites check is unavailable: {error}"),
+                ),
+                None => {
+                    // The breach list is CC BY 4.0: credit Have I Been Pwned with a link.
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        note(
+                            ui,
+                            "Breached websites use the public breach list from ".into(),
+                        );
+                        ui.hyperlink_to(
+                            RichText::new("Have I Been Pwned").size(t.small()),
+                            "https://haveibeenpwned.com",
+                        );
+                        note(
+                            ui,
+                            " (CC BY 4.0), downloaded whole so no vault data is sent.".into(),
+                        );
+                    });
+                }
+            }
+            match &report.directory_error {
+                Some(error) => note(
+                    ui,
+                    format!("Two-factor and passkey suggestions are unavailable: {error}"),
+                ),
+                None => note(
+                    ui,
+                    "Two-factor and passkey suggestions use the public lists from \
+                     2fa.directory, downloaded whole so no vault data is sent."
+                        .into(),
+                ),
             }
             ui.add_space(8.0);
         });
@@ -1289,6 +1313,7 @@ fn check_icon(check: HealthCheck) -> &'static str {
         HealthCheck::Expiring => t.icon("\u{f017}", "⏰"),
         HealthCheck::TwoFactorAvailable => t.icon("\u{f10b}", "📱"),
         HealthCheck::PasskeysAvailable => t.icon("\u{f084}", "🔑"),
+        HealthCheck::BreachedWebsites => t.icon("\u{f1e2}", "💥"),
     }
 }
 

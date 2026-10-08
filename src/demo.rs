@@ -286,6 +286,7 @@ impl DemoBackend {
         Ok(crate::health::report(
             &self.items()?,
             &directory,
+            &crate::health::Breaches::demo(),
             std::time::SystemTime::now(),
         ))
     }
@@ -574,6 +575,7 @@ fn details() -> Vec<BwItemDetail> {
             state_changed_at: Some(format!("{changed}T10:00:00.000Z")),
             revision_date: Some(format!("{revised}T10:00:00.000Z")),
             creation_date: Some("2018-01-01T10:00:00.000Z".into()),
+            password_changed_at: None,
         };
         items.push(item);
     }

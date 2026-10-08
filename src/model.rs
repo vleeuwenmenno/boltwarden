@@ -29,6 +29,9 @@ pub struct ItemDates {
     pub revision_date: Option<String>,
     #[serde(default)]
     pub creation_date: Option<String>,
+    /// When a login's password last changed; unset if it never changed since creation.
+    #[serde(default)]
+    pub password_changed_at: Option<String>,
 }
 
 /// Where an item lives in the vault. A trashed item that was also archived counts as
@@ -378,10 +381,12 @@ pub enum HealthCheck {
     Expiring,
     TwoFactorAvailable,
     PasskeysAvailable,
+    BreachedWebsites,
 }
 
 impl HealthCheck {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
+        Self::BreachedWebsites,
         Self::ReusedPasswords,
         Self::WeakPasswords,
         Self::UnsecuredWebsites,
@@ -400,6 +405,7 @@ impl HealthCheck {
             Self::Expiring => "Expiring items",
             Self::TwoFactorAvailable => "Two-factor authentication",
             Self::PasskeysAvailable => "Passkeys available",
+            Self::BreachedWebsites => "Breached websites",
         }
     }
 
@@ -422,6 +428,9 @@ impl HealthCheck {
             Self::PasskeysAvailable => {
                 "These sites support passkeys, a phishing-resistant alternative to passwords."
             }
+            Self::BreachedWebsites => {
+                "These sites leaked passwords in a breach after you last changed yours. Change them."
+            }
         }
     }
 
@@ -429,7 +438,10 @@ impl HealthCheck {
     pub fn is_risk(self) -> bool {
         matches!(
             self,
-            Self::ReusedPasswords | Self::WeakPasswords | Self::UnsecuredWebsites
+            Self::ReusedPasswords
+                | Self::WeakPasswords
+                | Self::UnsecuredWebsites
+                | Self::BreachedWebsites
         )
     }
 }
@@ -441,11 +453,14 @@ pub struct HealthReport {
     pub passwords: usize,
     /// How many passwords got each strength score, from 0 (very weak) to 4 (strong).
     pub strength: [usize; 5],
-    /// Share of those logins with no risk (reused, weak or unsecured), 0..=100.
+    /// Share of those logins with no risk (reused, weak, unsecured or breached), 0..=100.
     pub score: u8,
     pub findings: Vec<(HealthCheck, Vec<String>)>,
     /// Why the two-factor and passkey checks are missing, if they are.
     pub directory_error: Option<String>,
+    /// Why the breached websites check is missing, if it is.
+    #[serde(default)]
+    pub breach_error: Option<String>,
 }
 
 impl HealthReport {
