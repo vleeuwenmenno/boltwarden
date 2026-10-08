@@ -2327,6 +2327,9 @@ impl WindowApp {
             return;
         }
 
+        if let (Some(report), Some(id)) = (&self.health, &self.summary_state.detail_id) {
+            vault::draw_breach_notes(ui, report.breaches_for(id));
+        }
         let copy_id = self.summary_state.detail_id.clone().unwrap_or_default();
         let copy_version = self
             .summary_state
