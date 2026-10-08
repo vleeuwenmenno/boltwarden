@@ -2,7 +2,10 @@
 //! fields and notes.
 
 use crate::generator::{GeneratorMode, GeneratorOptions};
-use crate::model::{DraftField, DraftFieldKind, DraftUri, Folder, ItemDraft, LoginDraft};
+use crate::model::{
+    DraftField, DraftFieldKind, DraftUri, Folder, ItemDraft, LoginDraft, TypedDraft, TypedKind,
+    card_brand,
+};
 use crate::ui::shortcuts as sc;
 use crate::ui::theme::theme;
 use crate::ui::widgets;
@@ -17,8 +20,10 @@ pub struct EditState {
     /// Item being edited; empty while creating a new one.
     pub id: String,
     pub creating: bool,
-    /// Login data put aside while a new item is switched to a secure note.
+    /// Login data put aside while a new item is switched to another type.
     stashed_login: Option<LoginDraft>,
+    /// Card and identity data put aside the same way.
+    stashed_typed: Vec<TypedDraft>,
     /// `None` while the draft is loading.
     pub draft: Option<ItemDraft>,
     original: Option<ItemDraft>,
@@ -32,6 +37,8 @@ pub struct EditState {
     reveal_password: bool,
     reveal_totp: bool,
     reveal_fields: HashSet<usize>,
+    /// Revealed secret card or identity fields, by index into the kind's fields.
+    reveal_typed: HashSet<usize>,
     /// Input to focus on the next frame, such as the name of a field just added.
     focus: Option<egui::Id>,
     generator_open: bool,
@@ -56,6 +63,9 @@ impl Drop for EditState {
         if let Some(login) = &mut self.stashed_login {
             login.zeroize();
         }
+        for typed in &mut self.stashed_typed {
+            typed.zeroize();
+        }
     }
 }
 
@@ -65,6 +75,7 @@ impl EditState {
             id,
             creating: false,
             stashed_login: None,
+            stashed_typed: Vec::new(),
             draft: None,
             original: None,
             error: None,
@@ -75,6 +86,7 @@ impl EditState {
             reveal_password: false,
             reveal_totp: false,
             reveal_fields: HashSet::new(),
+            reveal_typed: HashSet::new(),
             focus: Some(name_id()),
             generator_open: false,
             generator_changed: false,
@@ -209,6 +221,108 @@ fn draw_generator(
                 *state.reveal = true;
             }
             Err(error) => *state.error = Some(format!("Could not generate password: {error}")),
+        }
+    }
+}
+
+/// What a new item is, as the type picker offers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ItemKind {
+    Login,
+    SecureNote,
+    Typed(TypedKind),
+}
+
+impl ItemKind {
+    const ALL: [Self; 4] = [
+        Self::Login,
+        Self::SecureNote,
+        Self::Typed(TypedKind::Card),
+        Self::Typed(TypedKind::Identity),
+    ];
+
+    fn of(draft: &ItemDraft) -> Self {
+        match (&draft.login, &draft.typed) {
+            (Some(_), _) => Self::Login,
+            (None, Some(typed)) => Self::Typed(typed.kind),
+            (None, None) => Self::SecureNote,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Login => "Login",
+            Self::SecureNote => "Secure note",
+            Self::Typed(kind) => kind.label(),
+        }
+    }
+}
+
+/// Changes a new item's type, keeping what was typed for the old type in case the user
+/// switches back.
+struct Stash<'a> {
+    login: &'a mut Option<LoginDraft>,
+    typed: &'a mut Vec<TypedDraft>,
+}
+
+fn switch_kind(stash: Stash, draft: &mut ItemDraft, kind: ItemKind) {
+    if let Some(login) = draft.login.take() {
+        *stash.login = Some(login);
+    }
+    if let Some(typed) = draft.typed.take() {
+        stash.typed.push(typed);
+    }
+    match kind {
+        ItemKind::Login => draft.login = Some(stash.login.take().unwrap_or_default()),
+        ItemKind::SecureNote => {}
+        ItemKind::Typed(kind) => {
+            let stashed = stash.typed.iter().position(|typed| typed.kind == kind);
+            draft.typed = Some(match stashed {
+                Some(idx) => stash.typed.remove(idx),
+                None => TypedDraft::new(kind),
+            });
+        }
+    }
+}
+
+/// Card or identity fields. Secret ones are masked until revealed, and a card number
+/// fills in the brand unless the user chose a different one.
+fn draw_typed(ui: &mut Ui, typed: &mut TypedDraft, revealed: &mut HashSet<usize>) {
+    let t = theme();
+    let kind = typed.kind;
+    let detected_before = card_brand(typed.get("number"));
+    for (idx, field) in kind.fields().iter().enumerate() {
+        let Some(value) = typed.values.get_mut(idx) else {
+            continue;
+        };
+        labeled_row(ui, field.label, |ui| {
+            let id = egui::Id::new(("edit-typed", kind.label(), idx));
+            if field.secret {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let shown = revealed.contains(&idx);
+                    if reveal_button(ui, shown).clicked() && !revealed.remove(&idx) {
+                        revealed.insert(idx);
+                    }
+                    widgets::text_input(ui, id, value, "", !shown, t.body());
+                });
+            } else {
+                let hint = match field.key {
+                    "expMonth" => "MM",
+                    "expYear" => "YYYY",
+                    _ => "",
+                };
+                widgets::text_input(ui, id, value, hint, false, t.body());
+            }
+        });
+    }
+    if kind == TypedKind::Card {
+        let brand = typed.get("brand");
+        let detected = card_brand(typed.get("number"));
+        if detected != detected_before
+            && (brand.is_empty() || Some(brand) == detected_before)
+            && let Some(detected) = detected
+        {
+            typed.set("brand", detected.to_string());
         }
     }
 }
@@ -404,6 +518,9 @@ pub fn validate(draft: &ItemDraft) -> Result<(), &'static str> {
     {
         return Err("Custom fields with a value need a name");
     }
+    if let Some(problem) = draft.typed.as_ref().and_then(TypedDraft::problem) {
+        return Err(problem);
+    }
     Ok(())
 }
 
@@ -423,12 +540,19 @@ fn draw_form(ui: &mut Ui, state: &mut EditState, generator: &mut GeneratorOption
 
     if state.creating {
         labeled_row(ui, "Type", |ui| {
-            let is_login = draft.login.is_some();
-            if ui.selectable_label(is_login, "Login").clicked() && !is_login {
-                draft.login = Some(state.stashed_login.take().unwrap_or_default());
-            }
-            if ui.selectable_label(!is_login, "Secure note").clicked() && is_login {
-                state.stashed_login = draft.login.take();
+            let current = ItemKind::of(draft);
+            for kind in ItemKind::ALL {
+                if ui.selectable_label(current == kind, kind.label()).clicked() && current != kind {
+                    switch_kind(
+                        Stash {
+                            login: &mut state.stashed_login,
+                            typed: &mut state.stashed_typed,
+                        },
+                        draft,
+                        kind,
+                    );
+                    state.reveal_typed.clear();
+                }
             }
         });
     }
@@ -462,6 +586,10 @@ fn draw_form(ui: &mut Ui, state: &mut EditState, generator: &mut GeneratorOption
             draft.favorite = !draft.favorite;
         }
     });
+
+    if let Some(typed) = draft.typed.as_mut() {
+        draw_typed(ui, typed, &mut state.reveal_typed);
+    }
 
     if let Some(login) = draft.login.as_mut() {
         labeled_row(ui, "Username", |ui| {
@@ -771,6 +899,42 @@ fn add_button(ui: &mut Ui, text: &str) -> egui::Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn switching_type_keeps_what_was_typed() {
+        let mut login = None;
+        let mut typed = Vec::new();
+        let mut draft = ItemDraft {
+            login: Some(LoginDraft {
+                username: "alex".into(),
+                ..LoginDraft::default()
+            }),
+            ..ItemDraft::default()
+        };
+        let mut switch = |draft: &mut ItemDraft, kind| {
+            switch_kind(
+                Stash {
+                    login: &mut login,
+                    typed: &mut typed,
+                },
+                draft,
+                kind,
+            )
+        };
+
+        switch(&mut draft, ItemKind::Typed(TypedKind::Card));
+        assert!(draft.login.is_none());
+        draft.typed.as_mut().unwrap().set("number", "4111".into());
+        switch(&mut draft, ItemKind::Typed(TypedKind::Identity));
+        assert_eq!(draft.typed.as_ref().unwrap().kind, TypedKind::Identity);
+        switch(&mut draft, ItemKind::SecureNote);
+        assert!(draft.login.is_none() && draft.typed.is_none());
+        switch(&mut draft, ItemKind::Typed(TypedKind::Card));
+        assert_eq!(draft.typed.as_ref().unwrap().get("number"), "4111");
+        switch(&mut draft, ItemKind::Login);
+        assert_eq!(draft.login.as_ref().unwrap().username, "alex");
+        assert_eq!(ItemKind::of(&draft), ItemKind::Login);
+    }
 
     #[test]
     fn validates_name_and_field_names() {

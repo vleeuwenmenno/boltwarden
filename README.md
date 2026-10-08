@@ -862,8 +862,10 @@ least once), and whether to avoid ambiguous characters, or for passphrases the
 number of words (3–20) from the EFF Long Wordlist, the separator, capitalization,
 and an added digit. Characters and words are drawn uniformly with kernel randomness.
 The editor shows the estimated entropy, remembers the options in the settings, and
-never stores generated values until you save the item. Card and identity editors are
-not implemented. Vault sync runs approximately every 60 seconds while the
+never stores generated values until you save the item. New items can be logins,
+secure notes, cards, or identities; card and identity fields are edited in place, card
+numbers, security codes, and identity document numbers stay masked until revealed, and
+a card number fills in the brand. Vault sync runs approximately every 60 seconds while the
 search screen is active, or on browser listing/fill requests once the same interval
 has elapsed; a failed sync keeps cached results and shows a warning.
 A muted footer label shows sync state. Hover for the last-sync time; click it or
