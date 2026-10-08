@@ -116,6 +116,9 @@ pub struct AppSettings {
     /// Send 5-character password hash prefixes to Pwned Passwords (k-anonymity).
     #[serde(default)]
     pub check_exposed_passwords: bool,
+    /// Password generator preferences in the item editor.
+    #[serde(default)]
+    pub generator: crate::generator::GeneratorOptions,
 }
 
 impl Default for AppSettings {
@@ -138,6 +141,7 @@ impl Default for AppSettings {
             start_list: StartList::None,
             start_at_login: false,
             check_exposed_passwords: false,
+            generator: crate::generator::GeneratorOptions::default(),
         }
     }
 }
