@@ -3,7 +3,7 @@ use crate::config::{SavedKdf, SavedSession};
 use crate::model::{
     BwItem, BwItemDetail, CustomField, DraftField, DraftFieldKind, DraftPasskey, DraftUri, Folder,
     HealthReport, ItemAction, ItemDates, ItemDraft, ItemState, LoginDraft, Passkey, SshKey,
-    SyncStatus, TotpCode,
+    SyncStatus, TotpCode, TypedDraft, TypedKind,
 };
 use crate::uri_match::{self, LoginUri, UriMatchType};
 use aes::Aes256;
@@ -2836,6 +2836,20 @@ struct CardResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct IdentityResponse {
+    #[serde(default, alias = "Title")]
+    title: Option<String>,
+    #[serde(default, alias = "Company")]
+    company: Option<String>,
+    #[serde(default, alias = "Address2")]
+    address2: Option<String>,
+    #[serde(default, alias = "Address3")]
+    address3: Option<String>,
+    #[serde(default, alias = "SSN", alias = "Ssn")]
+    ssn: Option<String>,
+    #[serde(default, alias = "PassportNumber")]
+    passport_number: Option<String>,
+    #[serde(default, alias = "LicenseNumber")]
+    license_number: Option<String>,
     #[serde(default, alias = "FirstName")]
     first_name: Option<String>,
     #[serde(default, alias = "MiddleName")]
@@ -2922,6 +2936,20 @@ struct CipherDataResponse {
     postal_code: Option<String>,
     #[serde(default, alias = "Country")]
     country: Option<String>,
+    #[serde(default, alias = "Title")]
+    title: Option<String>,
+    #[serde(default, alias = "Company")]
+    company: Option<String>,
+    #[serde(default, alias = "Address2")]
+    address2: Option<String>,
+    #[serde(default, alias = "Address3")]
+    address3: Option<String>,
+    #[serde(default, alias = "SSN", alias = "Ssn")]
+    ssn: Option<String>,
+    #[serde(default, alias = "PassportNumber")]
+    passport_number: Option<String>,
+    #[serde(default, alias = "LicenseNumber")]
+    license_number: Option<String>,
     #[serde(default, alias = "SshKey", alias = "SSHKey")]
     ssh_key: Option<SshKeyResponse>,
     #[serde(default, alias = "PrivateKey")]
@@ -3067,7 +3095,7 @@ fn decrypt_cipher_with_uri_rules(
             "Number",
             data.number.clone(),
             &item_key,
-            false,
+            true,
         )?;
         push_card_field(
             &mut custom_fields,
@@ -3108,7 +3136,7 @@ fn decrypt_cipher_with_uri_rules(
             &item_key,
             false,
         )?;
-        push_card_field(&mut custom_fields, "Number", card.number, &item_key, false)?;
+        push_card_field(&mut custom_fields, "Number", card.number, &item_key, true)?;
         push_card_field(&mut custom_fields, "Brand", card.brand, &item_key, false)?;
         push_card_field(
             &mut custom_fields,
@@ -3576,10 +3604,28 @@ fn draft_from_raw(raw: &Value, item_key: &[u8]) -> Result<ItemDraft, BwError> {
             })
         })
         .collect::<Result<Vec<_>, BwError>>()?;
+    let typed = match raw_get(raw, "type")
+        .and_then(Value::as_i64)
+        .and_then(TypedKind::from_type_id)
+    {
+        Some(kind) => {
+            let object = raw_get(raw, kind.object_key())
+                .cloned()
+                .unwrap_or(Value::Null);
+            let values = kind
+                .fields()
+                .iter()
+                .map(|field| raw_decrypt(&object, field.key, item_key))
+                .collect::<Result<Vec<_>, BwError>>()?;
+            Some(TypedDraft { kind, values })
+        }
+        None => None,
+    };
     Ok(ItemDraft {
         name: raw_decrypt(raw, "name", item_key)?,
         notes: raw_decrypt(raw, "notes", item_key)?,
         login,
+        typed,
         fields,
         folder_id: raw_get(raw, "folderId")
             .and_then(Value::as_str)
@@ -3624,11 +3670,24 @@ fn validate_draft(draft: &ItemDraft) -> Result<(), BwError> {
             "custom fields with a value need a name".into(),
         ));
     }
+    if let Some(problem) = draft.typed.as_ref().and_then(TypedDraft::problem) {
+        return Err(BwError::Cli(problem.to_lowercase()));
+    }
     Ok(())
 }
 
+/// A card or identity object with every field encrypted; empty values are null.
+fn encrypt_typed(typed: &TypedDraft, key: &[u8]) -> Result<Value, BwError> {
+    let mut object = serde_json::Map::new();
+    for (field, value) in typed.kind.fields().iter().zip(&typed.values) {
+        object.insert(field.key.into(), encrypt_optional(value, key)?);
+    }
+    Ok(Value::Object(object))
+}
+
 /// Builds the `POST /api/ciphers` body for a new personal item: a login when the draft
-/// has login data, otherwise a secure note. Everything is encrypted with the user key.
+/// has login data, a card or identity when it has typed data, otherwise a secure note.
+/// Everything is encrypted with the user key.
 fn build_create_request(draft: &ItemDraft, key: &[u8]) -> Result<Value, BwError> {
     validate_draft(draft)?;
     let fields = draft
@@ -3649,7 +3708,11 @@ fn build_create_request(draft: &ItemDraft, key: &[u8]) -> Result<Value, BwError>
         })
         .collect::<Result<Vec<_>, BwError>>()?;
     let mut body = json!({
-        "type": if draft.login.is_some() { 1 } else { 2 },
+        "type": match (&draft.login, &draft.typed) {
+            (Some(_), _) => 1,
+            (None, Some(typed)) => typed.kind.type_id(),
+            (None, None) => 2,
+        },
         "organizationId": null,
         "folderId": draft.folder_id,
         "name": encrypt_value(&draft.name, key)?,
@@ -3681,7 +3744,10 @@ fn build_create_request(draft: &ItemDraft, key: &[u8]) -> Result<Value, BwError>
                 "uris": if uris.is_empty() { Value::Null } else { Value::Array(uris) },
             });
         }
-        None => body["secureNote"] = json!({ "type": 0 }),
+        None => match &draft.typed {
+            Some(typed) => body[typed.kind.object_key()] = encrypt_typed(typed, key)?,
+            None => body["secureNote"] = json!({ "type": 0 }),
+        },
     }
     Ok(body)
 }
@@ -3714,6 +3780,25 @@ fn build_save_request(
     }
     if draft.favorite != original.favorite {
         body.insert("favorite".into(), Value::Bool(draft.favorite));
+    }
+
+    if let (Some(new), Some(old)) = (&draft.typed, &original.typed)
+        && new.kind == old.kind
+    {
+        let object_key = new.kind.object_key();
+        let mut object = body
+            .get(object_key)
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        for ((field, value), old_value) in
+            new.kind.fields().iter().zip(&new.values).zip(&old.values)
+        {
+            if value != old_value {
+                object.insert(field.key.into(), encrypt_optional(value, key)?);
+            }
+        }
+        body.insert(object_key.into(), Value::Object(object));
     }
 
     if let (Some(new), Some(old)) = (&draft.login, &original.login) {
@@ -4023,18 +4108,25 @@ fn push_identity_fields(
         });
     }
 
+    push_card_field(fields, "Title", identity.title, key, false)?;
     let rest = [
-        ("Username", identity.username),
-        ("Email", identity.email),
-        ("Phone", identity.phone),
-        ("Address", identity.address1),
-        ("City", identity.city),
-        ("State", identity.state),
-        ("Postal Code", identity.postal_code),
-        ("Country", identity.country),
+        ("Username", identity.username, false),
+        ("Company", identity.company, false),
+        ("Email", identity.email, false),
+        ("Phone", identity.phone, false),
+        ("Address", identity.address1, false),
+        ("Address 2", identity.address2, false),
+        ("Address 3", identity.address3, false),
+        ("City", identity.city, false),
+        ("State", identity.state, false),
+        ("Postal Code", identity.postal_code, false),
+        ("Country", identity.country, false),
+        ("SSN", identity.ssn, true),
+        ("Passport Number", identity.passport_number, true),
+        ("License Number", identity.license_number, true),
     ];
-    for (label, encrypted) in rest {
-        push_card_field(fields, label, encrypted, key, false)?;
+    for (label, encrypted, hidden) in rest {
+        push_card_field(fields, label, encrypted, key, hidden)?;
     }
     Ok(())
 }
@@ -4062,20 +4154,27 @@ fn push_identity_data_fields(
     }
 
     let rest = [
-        ("Email", identity.email.as_deref()),
-        ("Phone", identity.phone.as_deref()),
-        ("Address", identity.address1.as_deref()),
-        ("City", identity.city.as_deref()),
-        ("State", identity.state.as_deref()),
-        ("Postal Code", identity.postal_code.as_deref()),
-        ("Country", identity.country.as_deref()),
+        ("Title", identity.title.as_deref(), false),
+        ("Company", identity.company.as_deref(), false),
+        ("Email", identity.email.as_deref(), false),
+        ("Phone", identity.phone.as_deref(), false),
+        ("Address", identity.address1.as_deref(), false),
+        ("Address 2", identity.address2.as_deref(), false),
+        ("Address 3", identity.address3.as_deref(), false),
+        ("City", identity.city.as_deref(), false),
+        ("State", identity.state.as_deref(), false),
+        ("Postal Code", identity.postal_code.as_deref(), false),
+        ("Country", identity.country.as_deref(), false),
+        ("SSN", identity.ssn.as_deref(), true),
+        ("Passport Number", identity.passport_number.as_deref(), true),
+        ("License Number", identity.license_number.as_deref(), true),
     ];
-    for (label, encrypted) in rest {
+    for (label, encrypted, hidden) in rest {
         if let Some(value) = decrypt_opt_string(encrypted, key)? {
             fields.push(CustomField {
                 name: label.into(),
                 value,
-                hidden: false,
+                hidden,
             });
         }
     }
@@ -4919,6 +5018,13 @@ mod tests {
                 state: None,
                 postal_code: None,
                 country: None,
+                title: None,
+                company: None,
+                address2: None,
+                address3: None,
+                ssn: None,
+                passport_number: None,
+                license_number: None,
                 ssh_key: None,
                 private_key: None,
                 public_key: None,
@@ -5036,6 +5142,13 @@ mod tests {
                 state: None,
                 postal_code: None,
                 country: None,
+                title: None,
+                company: None,
+                address2: None,
+                address3: None,
+                ssn: None,
+                passport_number: None,
+                license_number: None,
                 ssh_key: Some(SshKeyResponse {
                     private_key: Some(encrypt_string(
                         "-----BEGIN OPENSSH PRIVATE KEY-----",
@@ -5694,6 +5807,7 @@ mod tests {
                 kind: DraftFieldKind::Hidden,
                 original_index: None,
             }],
+            typed: None,
         };
 
         let mut body = build_create_request(&draft, &key).unwrap();
@@ -5711,6 +5825,88 @@ mod tests {
         assert_eq!(detail.uris, vec!["https://t.example".to_string()]);
         assert_eq!(detail.custom_fields[0].value, "42");
         assert!(detail.custom_fields[0].hidden);
+    }
+
+    #[test]
+    fn card_and_identity_round_trip_and_save_only_changed_fields() {
+        let key = [31u8; 64];
+        let mut card = TypedDraft::new(TypedKind::Card);
+        card.set("cardholderName", "Alex Example".into());
+        card.set("number", "4111 1111 1111 1111".into());
+        card.set("brand", "Visa".into());
+        card.set("expMonth", "4".into());
+        card.set("expYear", "2030".into());
+        card.set("code", "123".into());
+        let draft = ItemDraft {
+            name: "Card".into(),
+            typed: Some(card),
+            ..ItemDraft::default()
+        };
+
+        let mut body = build_create_request(&draft, &key).unwrap();
+        assert_eq!(body["type"], 3);
+        assert!(body["login"].is_null() && body["secureNote"].is_null());
+        body["id"] = json!("card-id");
+        // A field this client doesn't know about must survive edits.
+        body["card"]["futureField"] = json!("kept");
+        let (detail, stored) = decode_cipher(body, &key, &HashMap::new(), &HashMap::new()).unwrap();
+        let shown = |name: &str| {
+            detail
+                .custom_fields
+                .iter()
+                .find(|field| field.name == name)
+                .map(|field| (field.value.clone(), field.hidden))
+        };
+        assert_eq!(shown("Number"), Some(("4111 1111 1111 1111".into(), true)));
+        assert_eq!(shown("Exp Month"), Some(("4".into(), false)));
+
+        let mut edited = draft_from_raw(&stored.raw, &stored.item_key).unwrap();
+        assert_eq!(edited.typed, draft.typed);
+        edited.typed.as_mut().unwrap().set("expYear", "2031".into());
+        let saved = build_save_request(&stored, &edited, "now").unwrap();
+        assert_eq!(saved["card"]["number"], stored.raw["card"]["number"]);
+        assert_ne!(saved["card"]["expYear"], stored.raw["card"]["expYear"]);
+        assert_eq!(saved["card"]["futureField"], "kept");
+        assert_eq!(
+            decrypt_string(saved["card"]["expYear"].as_str().unwrap(), &key).unwrap(),
+            Some("2031".to_string())
+        );
+
+        let mut identity = TypedDraft::new(TypedKind::Identity);
+        identity.set("firstName", "Alex".into());
+        identity.set("passportNumber", "X1234567".into());
+        let draft = ItemDraft {
+            name: "Me".into(),
+            typed: Some(identity),
+            ..ItemDraft::default()
+        };
+        let mut body = build_create_request(&draft, &key).unwrap();
+        assert_eq!(body["type"], 4);
+        assert!(body["identity"]["lastName"].is_null());
+        body["id"] = json!("identity-id");
+        let (detail, stored) = decode_cipher(body, &key, &HashMap::new(), &HashMap::new()).unwrap();
+        assert!(
+            detail
+                .custom_fields
+                .iter()
+                .any(|f| f.name == "Passport Number" && f.value == "X1234567" && f.hidden)
+        );
+        assert_eq!(
+            draft_from_raw(&stored.raw, &stored.item_key).unwrap().typed,
+            draft.typed
+        );
+    }
+
+    #[test]
+    fn invalid_card_expiry_is_refused() {
+        let mut card = TypedDraft::new(TypedKind::Card);
+        card.set("expMonth", "13".into());
+        let draft = ItemDraft {
+            name: "Card".into(),
+            typed: Some(card),
+            ..ItemDraft::default()
+        };
+        assert!(build_create_request(&draft, &[1u8; 64]).is_err());
     }
 
     #[test]

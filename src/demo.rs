@@ -12,7 +12,7 @@ use crate::model::{
     BwItem, BwItemDetail, CustomField, DraftField, DraftFieldKind, DraftPasskey, DraftUri, Folder,
     HealthReport, ItemAction, ItemDates, ItemDraft, ItemState, LoginDraft, Passkey,
     SshAgentClientInfo, SshApprovalKind, SshApprovalRequest, SshApprovalStatus,
-    SshApprovalStatusKind, SshKey, SyncStatus, TotpCode,
+    SshApprovalStatusKind, SshKey, SyncStatus, TotpCode, TypedDraft, TypedKind,
 };
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -155,7 +155,21 @@ impl DemoBackend {
     }
 
     pub fn edit_draft(&self, id: &str) -> Result<ItemDraft, BackendError> {
-        let item = self.get_item(id)?;
+        let mut item = self.get_item(id)?;
+        // Demo cards and identities keep their data as named fields, the way the item
+        // view shows it; the editor works on the typed fields.
+        let typed = typed_kind(&item.item_type).map(|kind| {
+            let mut typed = TypedDraft::new(kind);
+            item.custom_fields
+                .retain(|field| match demo_field_key(kind, &field.name) {
+                    Some(key) => {
+                        typed.set(key, field.value.clone());
+                        false
+                    }
+                    None => true,
+                });
+            typed
+        });
         let login = (item.item_type == "login").then(|| LoginDraft {
             username: item.username.clone().unwrap_or_default(),
             password: item.password.clone().unwrap_or_default(),
@@ -200,6 +214,7 @@ impl DemoBackend {
                 .collect(),
             folder_id: item.folder_id,
             favorite: item.favorite,
+            typed,
         })
     }
 
@@ -301,7 +316,12 @@ impl DemoBackend {
         let mut item = detail(&id, &draft.name, None, None);
         item.password = None;
         if draft.login.is_none() {
-            item.item_type = "secureNote".into();
+            item.item_type = match draft.typed.as_ref().map(|typed| typed.kind) {
+                Some(TypedKind::Card) => "card",
+                Some(TypedKind::Identity) => "identity",
+                None => "secureNote",
+            }
+            .into();
         }
         self.items()?.push(item);
         self.save_item(&id, draft)
@@ -355,6 +375,21 @@ impl DemoBackend {
                 hidden: field.kind == DraftFieldKind::Hidden,
             })
             .collect();
+        if let Some(typed) = &draft.typed {
+            let typed_fields = typed
+                .kind
+                .fields()
+                .iter()
+                .zip(&typed.values)
+                .filter(|(_, value)| !value.is_empty())
+                .map(|(field, value)| CustomField {
+                    name: demo_field_name(typed.kind, field.key).to_string(),
+                    value: value.clone(),
+                    hidden: field.secret,
+                });
+            item.custom_fields
+                .splice(0..0, typed_fields.collect::<Vec<_>>());
+        }
         Ok(item.clone())
     }
 
@@ -414,6 +449,46 @@ fn folders() -> Vec<Folder> {
             name,
         })
         .collect()
+}
+
+fn typed_kind(item_type: &str) -> Option<TypedKind> {
+    match item_type {
+        "card" => Some(TypedKind::Card),
+        "identity" => Some(TypedKind::Identity),
+        _ => None,
+    }
+}
+
+/// The item view's name for a typed field: the card names the server path uses, and
+/// the editor's labels for identities.
+fn demo_field_name(kind: TypedKind, key: &str) -> &'static str {
+    const CARD: [(&str, &str); 6] = [
+        ("cardholderName", "Cardholder"),
+        ("number", "Number"),
+        ("brand", "Brand"),
+        ("expMonth", "Exp Month"),
+        ("expYear", "Exp Year"),
+        ("code", "CVV"),
+    ];
+    let card = CARD.iter().find(|(k, _)| *k == key).map(|(_, name)| *name);
+    match kind {
+        TypedKind::Card => card,
+        TypedKind::Identity => None,
+    }
+    .or_else(|| {
+        kind.fields()
+            .iter()
+            .find(|field| field.key == key)
+            .map(|field| field.label)
+    })
+    .unwrap_or("")
+}
+
+fn demo_field_key(kind: TypedKind, name: &str) -> Option<&'static str> {
+    kind.fields()
+        .iter()
+        .map(|field| field.key)
+        .find(|key| demo_field_name(kind, key) == name)
 }
 
 fn detail(id: &str, name: &str, username: Option<&str>, folder: Option<&str>) -> BwItemDetail {
