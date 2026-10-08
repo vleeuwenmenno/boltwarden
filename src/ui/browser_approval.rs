@@ -104,6 +104,7 @@ pub fn draw_browser_approval(
         !state.in_flight && state.shown_at.is_some_and(|at| at.elapsed() >= INPUT_GUARD);
     let mut selection_changed = false;
     let mut approve_requested = false;
+    let mut quick_approve = false;
     let Some(request) = state.request.clone() else {
         egui::CentralPanel::default()
             .frame(widgets::body_frame())
@@ -254,9 +255,41 @@ pub fn draw_browser_approval(
                         for choice in &request.choices {
                             let selected = state.selected_id.as_ref() == Some(&choice.id);
                             let (rect, response) = widgets::row(ui, selected, widgets::ROW_HEIGHT);
+                            // Hovering a choice that needs no password offers a one-click
+                            // approve button, so the bottom button is not the only way in.
+                            let quick_button = request
+                                .action_label
+                                .as_deref()
+                                .filter(|_| {
+                                    ui.rect_contains_pointer(rect)
+                                        && request.requires_password_for(Some(&choice.id))
+                                            == Ok(false)
+                                })
+                                .map(|label| {
+                                    let galley = ui.painter().layout_no_wrap(
+                                        label.to_owned(),
+                                        t.font(t.body()),
+                                        t.text_strong,
+                                    );
+                                    let size = egui::vec2(
+                                        galley.size().x + 2.0 * ui.spacing().button_padding.x,
+                                        (widgets::ROW_HEIGHT - 12.0).min(rect.height()),
+                                    );
+                                    let button_rect = egui::Rect::from_min_size(
+                                        egui::pos2(
+                                            rect.right() - 8.0 - size.x,
+                                            rect.center().y - size.y / 2.0,
+                                        ),
+                                        size,
+                                    );
+                                    (label, button_rect)
+                                });
+                            let content_rect = quick_button.map_or(rect, |(_, button_rect)| {
+                                rect.with_max_x(button_rect.left() - 4.0)
+                            });
                             widgets::paint_row_content(
                                 ui,
-                                rect,
+                                content_rect,
                                 t.item_icon("login"),
                                 None,
                                 &choice.label,
@@ -275,14 +308,32 @@ pub fn draw_browser_approval(
                             if selected && scroll_to_selection {
                                 response.scroll_to_me(None);
                             }
-                            if response.clicked() {
+                            let quick_clicked = quick_button.is_some_and(|(label, button_rect)| {
+                                ui.put(
+                                    button_rect,
+                                    egui::Button::new(label).sense(if ready {
+                                        egui::Sense::click()
+                                    } else {
+                                        egui::Sense::hover()
+                                    }),
+                                )
+                                .clicked()
+                            });
+                            if quick_clicked {
+                                // The button names its row, so it approves that choice
+                                // directly instead of re-arming the selection guard.
+                                state.selected_id = Some(choice.id.clone());
+                                quick_approve = true;
+                            } else if response.clicked() {
                                 selection_changed |= state.select(&choice.id);
                             }
                         }
                     });
                 });
         });
-    if selection_changed {
+    if quick_approve && action.is_none() {
+        action = state.decision(true).map(BrowserApprovalAction::Decide);
+    } else if selection_changed {
         // Choices paint after the footer; defer constructing an approval until
         // their clicks have been handled, including Enter in the same frame.
         ctx.input_mut(|input| {
@@ -359,6 +410,58 @@ mod tests {
         .textures_delta
         .clear();
         action
+    }
+
+    fn draw_events(
+        ctx: &egui::Context,
+        state: &mut BrowserApprovalUiState,
+        events: Vec<egui::Event>,
+    ) -> Option<BrowserApprovalAction> {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(680.0, 420.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut action = None;
+        ctx.run_ui(input, |root| {
+            action = draw_browser_approval(root, state);
+        })
+        .textures_delta
+        .clear();
+        action
+    }
+
+    /// Hovers then clicks near the right edge of the window at height `y`.
+    fn click_row_button(y: f32) -> Option<BrowserApprovalAction> {
+        let ctx = egui::Context::default();
+        let mut state = account_prompt();
+        let pos = egui::pos2(640.0, y);
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        draw_events(&ctx, &mut state, vec![egui::Event::PointerMoved(pos)]);
+        draw_events(&ctx, &mut state, vec![button(true), button(false)])
+    }
+
+    #[test]
+    fn hover_button_approves_only_rows_without_a_password() {
+        let approved: Vec<_> = (0..420)
+            .step_by(4)
+            .filter_map(|y| match click_row_button(y as f32) {
+                Some(BrowserApprovalAction::Decide(decision)) if decision.approved => {
+                    Some(decision.selected_id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(approved.contains(&Some("plain".into())));
+        assert!(!approved.contains(&Some("protected".into())));
     }
 
     #[test]
