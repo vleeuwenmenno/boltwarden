@@ -620,18 +620,26 @@ fn handle_rpc_request(
             );
         }
         RpcRequest::VaultHealth => {
-            // The list downloads can take seconds; don't hold the vault lock for them.
+            // The list downloads and password lookups can take seconds; don't hold the
+            // vault lock for them.
             let directory = health::directory();
             let breaches = health::breaches();
+            let exposure_enabled = config::load_settings().check_exposed_passwords;
+            let lookups = match vault.lock() {
+                Ok(state) => state.bw.exposure_lookups(exposure_enabled),
+                Err(_) => Vec::new(),
+            };
+            let lookup = health::check_exposure(&lookups);
             let Ok(mut state) = vault.lock() else {
                 return RpcResponse::Health(Err(RpcError::Message(
                     "vault state lock poisoned".into(),
                 )));
             };
+            state.bw.record_exposure(&lookup.counts);
             return RpcResponse::Health(
                 state
                     .bw
-                    .health_report(&directory, &breaches)
+                    .health_report(&directory, &breaches, exposure_enabled, lookup.error)
                     .map_err(rpc_error_from_bw),
             );
         }

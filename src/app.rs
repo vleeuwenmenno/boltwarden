@@ -1721,6 +1721,10 @@ impl App {
                 }
                 self.save_and_apply_settings();
             }
+            SearchAction::SetCheckExposedPasswords(check) => {
+                self.settings.check_exposed_passwords = check;
+                self.save_and_apply_settings();
+            }
             SearchAction::SetObscureScreenCapture(obscure) => {
                 self.apply_capture_preference(obscure, true);
             }

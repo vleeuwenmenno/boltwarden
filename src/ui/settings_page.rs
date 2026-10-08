@@ -4,9 +4,9 @@
 use crate::config::{AppSettings, PasskeyVerification, StartList};
 use crate::model::SshAgentStatus;
 use crate::ui::search::{
-    self, BROWSER_SETUP_ROW, DEFAULT_URI_MATCH_ROW, IDLE_TIMEOUT_ROW, PAIRED_BROWSERS_ROW,
-    PASSKEY_VERIFICATION_ROW, SCREEN_CAPTURE_ROW, SETTING_TEXT, SHORTCUT_ROW, START_AT_LOGIN_ROW,
-    START_LIST_ROW, SearchAction, SearchState, SettingsGroup,
+    self, BROWSER_SETUP_ROW, DEFAULT_URI_MATCH_ROW, EXPOSED_PASSWORDS_ROW, IDLE_TIMEOUT_ROW,
+    PAIRED_BROWSERS_ROW, PASSKEY_VERIFICATION_ROW, SCREEN_CAPTURE_ROW, SETTING_TEXT, SHORTCUT_ROW,
+    START_AT_LOGIN_ROW, START_LIST_ROW, SearchAction, SearchState, SettingsGroup,
 };
 use crate::ui::{theme::theme, widgets};
 use crate::uri_match::UriMatchType;
@@ -411,6 +411,20 @@ pub fn draw_page(
                     } else {
                         "Capture protection is unavailable on this desktop"
                     }),
+                ));
+                section(ui, "Breach monitoring");
+                take(switch(
+                    ui,
+                    state,
+                    settings,
+                    EXPOSED_PASSWORDS_ROW,
+                    settings.check_exposed_passwords,
+                    true,
+                    Some(
+                        "Send the first 5 characters of each password's SHA-1 hash to \
+                         Pwned Passwords and match the answer on this device. Off by \
+                         default; your passwords and full hashes never leave it.",
+                    ),
                 ));
             }
             SettingsGroup::Browser => {

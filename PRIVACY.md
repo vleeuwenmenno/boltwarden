@@ -60,6 +60,11 @@ cloud accounts). Disable that setting to stop requests and clear the icon cache.
 The action center downloads public two-factor and passkey support lists from
 2fa.directory, and the public breach list from Have I Been Pwned; it does not send
 your vault's hostnames or other vault data with those list downloads.
+If you turn on **Check passwords against breaches**, the desktop app sends the
+first 5 hexadecimal characters of the SHA-1 hash of each saved password to the Pwned
+Passwords service (api.pwnedpasswords.com) and compares its padded answer locally.
+Passwords and full hashes are not sent, and the results are not stored on disk. This
+setting is off by default.
 These services receive normal connection metadata such as your IP address.
 
 ## Controls and removal

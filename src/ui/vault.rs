@@ -2,7 +2,7 @@
 //! and the action center.
 
 use crate::icons::IconCache;
-use crate::model::{BwItem, Folder, HealthCheck, HealthReport, ItemAction, ItemState};
+use crate::model::{BreachNote, BwItem, Folder, HealthCheck, HealthReport, ItemAction, ItemState};
 use crate::ui::theme::theme;
 use crate::ui::widgets;
 use egui::{Color32, RichText, Ui};
@@ -1080,7 +1080,7 @@ pub fn draw_action_center(
                         RichText::new(
                             "Problems and suggestions for the logins in your vault. The score \
                              is the share of passwords that are strong, unique, only sent over \
-                             https and not exposed in a known breach.",
+                             https and not known from a breach.",
                         )
                         .color(t.text_muted),
                     );
@@ -1116,7 +1116,14 @@ pub fn draw_action_center(
                         HealthCheck::TwoFactorAvailable | HealthCheck::PasskeysAvailable => {
                             report.directory_error.is_some()
                         }
-                        HealthCheck::BreachedWebsites => report.breach_error.is_some(),
+                        HealthCheck::BreachedWebsites | HealthCheck::DataBreaches => {
+                            report.breach_error.is_some()
+                        }
+                        // Partial results still count what was checked.
+                        HealthCheck::ExposedPasswords => {
+                            !report.exposure_enabled
+                                || (report.exposure_error.is_some() && count == 0)
+                        }
                         _ => false,
                     };
                     if draw_card(ui, rect, *check, count, unavailable) {
@@ -1128,18 +1135,35 @@ pub fn draw_action_center(
             let note = |ui: &mut Ui, text: String| {
                 ui.label(RichText::new(text).size(t.small()).color(t.text_faint));
             };
-            match &report.breach_error {
-                Some(error) => note(
+            match (&report.exposure_error, report.exposure_enabled) {
+                (_, false) => note(
                     ui,
-                    format!("The breached websites check is unavailable: {error}"),
+                    "Exposed passwords is off. Turn on \"Check passwords against breaches\" \
+                     in Settings → Security to look up 5-character hash prefixes with Pwned \
+                     Passwords; your passwords never leave this device."
+                        .into(),
                 ),
+                (Some(error), true) => {
+                    note(ui, format!("Exposed passwords check incomplete: {error}"))
+                }
+                (None, true) => note(
+                    ui,
+                    "Exposed passwords sends only the first 5 characters of each password's \
+                     SHA-1 hash to Pwned Passwords and matches the padded answer here."
+                        .into(),
+                ),
+            }
+            match &report.breach_error {
+                Some(error) => note(ui, format!("The breach checks are unavailable: {error}")),
                 None => {
                     // The breach list is CC BY 4.0: credit Have I Been Pwned with a link.
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 0.0;
                         note(
                             ui,
-                            "Breached websites use the public breach list from ".into(),
+                            "Breached websites and data breaches use the public breach list \
+                             from "
+                                .into(),
                         );
                         ui.hyperlink_to(
                             RichText::new("Have I Been Pwned").size(t.small()),
@@ -1314,7 +1338,60 @@ fn check_icon(check: HealthCheck) -> &'static str {
         HealthCheck::TwoFactorAvailable => t.icon("\u{f10b}", "📱"),
         HealthCheck::PasskeysAvailable => t.icon("\u{f084}", "🔑"),
         HealthCheck::BreachedWebsites => t.icon("\u{f1e2}", "💥"),
+        HealthCheck::ExposedPasswords => t.icon("\u{f06e}", "👁"),
+        HealthCheck::DataBreaches => t.icon("\u{f2c2}", "🪪"),
     }
+}
+
+/// Known breaches of an item's website, shown above the item. Lists what leaked and
+/// what to do about it.
+pub fn draw_breach_notes<'a>(ui: &mut Ui, notes: impl IntoIterator<Item = &'a BreachNote>) {
+    let notes = notes.into_iter().collect::<Vec<_>>();
+    if notes.is_empty() {
+        return;
+    }
+    let t = theme();
+    let password = notes.iter().any(|note| note.exposed_passwords);
+    egui::Frame::new()
+        .fill(mix(t.bg, t.warning, 0.12))
+        .stroke(egui::Stroke::new(1.0, mix(t.bg, t.warning, 0.5)))
+        .corner_radius(6.0)
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .outer_margin(egui::Margin {
+            left: 8,
+            right: 8,
+            top: 8,
+            bottom: 0,
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                RichText::new(format!(
+                    "{}  {}",
+                    t.icon("\u{f071}", "⚠"),
+                    if password {
+                        "This website leaked passwords after you set yours. Change it."
+                    } else {
+                        "This website leaked personal data in a breach. Watch for phishing \
+                         and fraud that uses it."
+                    }
+                ))
+                .color(t.text_strong),
+            );
+            for note in notes {
+                ui.label(
+                    RichText::new(format!(
+                        "{} · {} · {}",
+                        note.title,
+                        note.date,
+                        note.data_classes.join(", ")
+                    ))
+                    .size(t.small())
+                    .color(t.text_muted),
+                );
+            }
+        });
+    ui.add_space(8.0);
 }
 
 /// One check as a card; returns whether "Show items" was clicked.

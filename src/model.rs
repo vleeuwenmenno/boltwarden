@@ -382,10 +382,13 @@ pub enum HealthCheck {
     TwoFactorAvailable,
     PasskeysAvailable,
     BreachedWebsites,
+    ExposedPasswords,
+    DataBreaches,
 }
 
 impl HealthCheck {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
+        Self::ExposedPasswords,
         Self::BreachedWebsites,
         Self::ReusedPasswords,
         Self::WeakPasswords,
@@ -393,6 +396,7 @@ impl HealthCheck {
         Self::Duplicates,
         Self::TwoFactorAvailable,
         Self::PasskeysAvailable,
+        Self::DataBreaches,
         Self::Expiring,
     ];
 
@@ -406,6 +410,8 @@ impl HealthCheck {
             Self::TwoFactorAvailable => "Two-factor authentication",
             Self::PasskeysAvailable => "Passkeys available",
             Self::BreachedWebsites => "Breached websites",
+            Self::ExposedPasswords => "Exposed passwords",
+            Self::DataBreaches => "Data breaches",
         }
     }
 
@@ -431,6 +437,12 @@ impl HealthCheck {
             Self::BreachedWebsites => {
                 "These sites leaked passwords in a breach after you last changed yours. Change them."
             }
+            Self::ExposedPasswords => {
+                "These passwords appear in known data breaches. Change them everywhere you use them."
+            }
+            Self::DataBreaches => {
+                "These sites leaked personal data, but no passwords. Watch for phishing and fraud."
+            }
         }
     }
 
@@ -442,6 +454,7 @@ impl HealthCheck {
                 | Self::WeakPasswords
                 | Self::UnsecuredWebsites
                 | Self::BreachedWebsites
+                | Self::ExposedPasswords
         )
     }
 }
@@ -453,7 +466,8 @@ pub struct HealthReport {
     pub passwords: usize,
     /// How many passwords got each strength score, from 0 (very weak) to 4 (strong).
     pub strength: [usize; 5],
-    /// Share of those logins with no risk (reused, weak, unsecured or breached), 0..=100.
+    /// Share of those logins with no risk (reused, weak, unsecured, breached or
+    /// exposed), 0..=100.
     pub score: u8,
     pub findings: Vec<(HealthCheck, Vec<String>)>,
     /// Why the two-factor and passkey checks are missing, if they are.
@@ -461,9 +475,36 @@ pub struct HealthReport {
     /// Why the breached websites check is missing, if it is.
     #[serde(default)]
     pub breach_error: Option<String>,
+    /// The breaches behind the two breach checks, one entry per item and breach.
+    #[serde(default)]
+    pub breach_notes: Vec<BreachNote>,
+    /// Whether the opt-in exposed passwords check is on.
+    #[serde(default)]
+    pub exposure_enabled: bool,
+    /// Why some or all passwords could not be checked against known breaches.
+    #[serde(default)]
+    pub exposure_error: Option<String>,
+}
+
+/// A public website breach that affects one vault item.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BreachNote {
+    pub item_id: String,
+    pub title: String,
+    /// `YYYY-MM-DD`
+    pub date: String,
+    /// What leaked, as Have I Been Pwned names it.
+    pub data_classes: Vec<String>,
+    pub exposed_passwords: bool,
 }
 
 impl HealthReport {
+    pub fn breaches_for<'a>(&'a self, item_id: &'a str) -> impl Iterator<Item = &'a BreachNote> {
+        self.breach_notes
+            .iter()
+            .filter(move |note| note.item_id == item_id)
+    }
+
     pub fn items(&self, check: HealthCheck) -> &[String] {
         self.findings
             .iter()

@@ -70,6 +70,9 @@ pub struct BwClient {
     /// The last action center report and the vault state it was computed for. Strength
     /// checks are slow enough to matter on every sync of a big vault.
     health_cache: Option<(u64, HealthReport)>,
+    /// Pwned Passwords counts by password hash, for the opt-in exposed passwords check.
+    /// In memory only: a lock replaces the client and drops them.
+    exposure_counts: HashMap<crate::health::PasswordHash, u64>,
 }
 
 #[derive(Clone)]
@@ -272,6 +275,9 @@ impl Drop for BwClient {
         for key in self.organization_keys.values_mut() {
             key.zeroize();
         }
+        for (mut hash, _) in self.exposure_counts.drain() {
+            hash.zeroize();
+        }
     }
 }
 impl Drop for StoredCipher {
@@ -441,6 +447,7 @@ impl BwClient {
             last_sync_attempt: None,
             generation: next_generation(),
             health_cache: None,
+            exposure_counts: HashMap::new(),
         }
     }
 
@@ -1694,13 +1701,51 @@ impl BwClient {
         Ok(folders)
     }
 
+    /// Hashes of active login passwords the exposed passwords check has not looked up
+    /// yet. Empty when the check is off.
+    pub fn exposure_lookups(&self, enabled: bool) -> Vec<crate::health::PasswordHash> {
+        if !enabled || self.require_unlocked().is_err() {
+            return Vec::new();
+        }
+        let mut hashes = self
+            .health_passwords()
+            .map(|(_, password)| crate::health::password_hash(password))
+            .filter(|hash| !self.exposure_counts.contains_key(hash))
+            .collect::<Vec<_>>();
+        hashes.sort_unstable();
+        hashes.dedup();
+        hashes
+    }
+
+    pub fn record_exposure(&mut self, counts: &[(crate::health::PasswordHash, u64)]) {
+        self.exposure_counts.extend(counts.iter().copied());
+    }
+
+    fn health_passwords(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.items
+            .iter()
+            .filter(|item| item.state == ItemState::Active && item.item_type == "login")
+            .filter_map(|item| {
+                let password = item.password.as_deref().filter(|p| !p.is_empty())?;
+                Some((item.id.as_str(), password))
+            })
+    }
+
     pub fn health_report(
         &mut self,
         directory: &crate::health::Directory,
         breaches: &crate::health::Breaches,
+        exposure_enabled: bool,
+        exposure_error: Option<String>,
     ) -> Result<HealthReport, BwError> {
         use std::hash::{Hash, Hasher};
         self.require_unlocked()?;
+        if !exposure_enabled {
+            // Turning the check off forgets what it found.
+            for (mut hash, _) in self.exposure_counts.drain() {
+                hash.zeroize();
+            }
+        }
         // Every edit changes the revision date, so this covers all inputs of the report.
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for item in &self.items {
@@ -1708,6 +1753,12 @@ impl BwClient {
         }
         directory.fingerprint().hash(&mut hasher);
         breaches.fingerprint().hash(&mut hasher);
+        (
+            exposure_enabled,
+            &exposure_error,
+            self.exposure_counts.len(),
+        )
+            .hash(&mut hasher);
         crate::health::days_since_epoch(SystemTime::now()).hash(&mut hasher);
         let key = hasher.finish();
         if let Some((cached, report)) = &self.health_cache
@@ -1715,7 +1766,26 @@ impl BwClient {
         {
             return Ok(report.clone());
         }
-        let report = crate::health::report(&self.items, directory, breaches, SystemTime::now());
+        let exposure = crate::health::Exposure {
+            enabled: exposure_enabled,
+            items: self
+                .health_passwords()
+                .filter(|(_, password)| {
+                    self.exposure_counts
+                        .get(&crate::health::password_hash(password))
+                        .is_some_and(|count| *count > 0)
+                })
+                .map(|(id, _)| id.to_string())
+                .collect(),
+            error: exposure_error,
+        };
+        let report = crate::health::report(
+            &self.items,
+            directory,
+            breaches,
+            &exposure,
+            SystemTime::now(),
+        );
         self.health_cache = Some((key, report.clone()));
         Ok(report)
     }
@@ -6151,6 +6221,7 @@ mod tests {
             last_sync_attempt: None,
             generation: next_generation(),
             health_cache: None,
+            exposure_counts: HashMap::new(),
         };
         client.verify_master_password("correct").unwrap();
         client.verified_unlock = true;
@@ -6437,6 +6508,36 @@ mod tests {
                 .unwrap()
                 .insecure_downgrade
         );
+    }
+
+    #[test]
+    fn exposure_lookups_are_opt_in_and_cleared_when_turned_off() {
+        use crate::health::{Breaches, Directory, password_hash};
+        use crate::model::HealthCheck;
+        let mut client = protected_fixture();
+        client.items[0].password = Some("password".into());
+        let mut copy = client.items[0].clone();
+        copy.id = "copy".into();
+        client.items.push(copy);
+
+        assert!(client.exposure_lookups(false).is_empty());
+        // Two logins with one password need one lookup.
+        let lookups = client.exposure_lookups(true);
+        assert_eq!(lookups, [password_hash("password")]);
+
+        client.record_exposure(&[(lookups[0], 42)]);
+        assert!(client.exposure_lookups(true).is_empty());
+        let report = client
+            .health_report(&Directory::default(), &Breaches::default(), true, None)
+            .unwrap();
+        assert_eq!(report.items(HealthCheck::ExposedPasswords).len(), 2);
+
+        let report = client
+            .health_report(&Directory::default(), &Breaches::default(), false, None)
+            .unwrap();
+        assert!(report.items(HealthCheck::ExposedPasswords).is_empty());
+        assert!(!report.exposure_enabled);
+        assert!(client.exposure_counts.is_empty());
     }
 
     #[test]

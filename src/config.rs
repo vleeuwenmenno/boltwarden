@@ -113,6 +113,9 @@ pub struct AppSettings {
     /// Start the daemon at login (macOS LaunchAgent, XDG autostart entry on Linux).
     #[serde(default)]
     pub start_at_login: bool,
+    /// Send 5-character password hash prefixes to Pwned Passwords (k-anonymity).
+    #[serde(default)]
+    pub check_exposed_passwords: bool,
 }
 
 impl Default for AppSettings {
@@ -134,6 +137,7 @@ impl Default for AppSettings {
             obscure_screen_capture: true,
             start_list: StartList::None,
             start_at_login: false,
+            check_exposed_passwords: false,
         }
     }
 }

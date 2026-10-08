@@ -677,6 +677,11 @@ impl WindowApp {
                     let _ = config::clear_recent_item();
                 }
             }
+            SearchAction::SetCheckExposedPasswords(value) => {
+                self.settings.check_exposed_passwords = value;
+                // Recheck when the action center opens next.
+                self.health_stale = true;
+            }
             SearchAction::SetShowWebsiteIcons(value) => {
                 self.settings.show_website_icons = value;
                 self.icons.set_enabled(value);
@@ -2322,6 +2327,9 @@ impl WindowApp {
             return;
         }
 
+        if let (Some(report), Some(id)) = (&self.health, &self.summary_state.detail_id) {
+            vault::draw_breach_notes(ui, report.breaches_for(id));
+        }
         let copy_id = self.summary_state.detail_id.clone().unwrap_or_default();
         let copy_version = self
             .summary_state

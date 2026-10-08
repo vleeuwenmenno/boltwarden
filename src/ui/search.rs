@@ -9,7 +9,8 @@ use egui::{Context, RichText, Ui};
 
 const SEARCH_INPUT_ID: &str = "vault-search-input";
 const SSH_PATH_INPUT_ID: &str = "settings-ssh-socket-path";
-const SETTINGS_ROWS: usize = 18;
+const SETTINGS_ROWS: usize = 19;
+pub(crate) const EXPOSED_PASSWORDS_ROW: usize = 18;
 /// Shown on macOS and Linux; the Windows installer offers start at sign-in instead.
 pub(crate) const START_AT_LOGIN_ROW: usize = 17;
 /// Rows 0 to 10 except the start list are plain switches, drawn from one table.
@@ -94,6 +95,10 @@ pub(crate) const SETTING_TEXT: [(&str, &str); SETTINGS_ROWS] = [
         "Start at login",
         "Start Boltwarden in the background when you log in",
     ),
+    (
+        "Check passwords against breaches",
+        "Look up 5-character hash prefixes with Pwned Passwords",
+    ),
 ];
 
 /// Rows this platform offers; the others are hidden and skipped by the keyboard.
@@ -133,7 +138,13 @@ impl SettingsGroup {
                 &[START_AT_LOGIN_ROW, 1, 2, START_LIST_ROW, SHORTCUT_ROW, 0, 4]
             }
             Self::General => &[1, 2, START_LIST_ROW, SHORTCUT_ROW, 0, 4],
-            Self::Security => &[6, IDLE_TIMEOUT_ROW, 9, SCREEN_CAPTURE_ROW],
+            Self::Security => &[
+                6,
+                IDLE_TIMEOUT_ROW,
+                9,
+                SCREEN_CAPTURE_ROW,
+                EXPOSED_PASSWORDS_ROW,
+            ],
             Self::Browser => &[
                 10,
                 DEFAULT_URI_MATCH_ROW,
@@ -1383,6 +1394,9 @@ pub(crate) fn toggle_setting(row: usize, settings: &AppSettings) -> Option<Searc
         START_AT_LOGIN_ROW if row_supported(START_AT_LOGIN_ROW) => {
             SearchAction::SetStartAtLogin(!settings.start_at_login)
         }
+        EXPOSED_PASSWORDS_ROW => {
+            SearchAction::SetCheckExposedPasswords(!settings.check_exposed_passwords)
+        }
         _ => return None,
     })
 }
@@ -1673,6 +1687,25 @@ pub fn draw_settings(
                     state.shortcut_setup.activate();
                 }
             }
+            if visible(EXPOSED_PASSWORDS_ROW) {
+                let response = widgets::toggle_row(
+                    ui,
+                    state.settings_selected == EXPOSED_PASSWORDS_ROW,
+                    settings.check_exposed_passwords,
+                    SETTING_TEXT[EXPOSED_PASSWORDS_ROW].0,
+                    SETTING_TEXT[EXPOSED_PASSWORDS_ROW].1,
+                );
+                if state.settings_selected == EXPOSED_PASSWORDS_ROW
+                    && state.settings_scrolled_to != Some(EXPOSED_PASSWORDS_ROW)
+                {
+                    response.scroll_to_me(None);
+                    state.settings_scrolled_to = Some(EXPOSED_PASSWORDS_ROW);
+                }
+                if response.clicked() {
+                    state.settings_selected = EXPOSED_PASSWORDS_ROW;
+                    action = toggle_setting(EXPOSED_PASSWORDS_ROW, settings);
+                }
+            }
             if visible(8)
                 && let Some(path) = draw_ssh_socket_path(ui, state, settings, ssh_agent_status)
             {
@@ -1775,6 +1808,7 @@ pub enum SearchAction {
     SetCloseAfterCopy(bool),
     SetRestoreRecentItem(bool),
     SetShowWebsiteIcons(bool),
+    SetCheckExposedPasswords(bool),
     SetObscureScreenCapture(bool),
     SetLockOnSystemLock(bool),
     SetLockAfterIdleTimeout(bool),
@@ -2103,7 +2137,8 @@ mod tests {
     fn passkey_verification_setting_cycles_after_existing_browser_rows() {
         let mut settings = AppSettings::default();
         assert_eq!(PASSKEY_VERIFICATION_ROW, PAIRED_BROWSERS_ROW + 1);
-        assert_eq!(START_AT_LOGIN_ROW, SETTINGS_ROWS - 1);
+        assert_eq!(EXPOSED_PASSWORDS_ROW, SETTINGS_ROWS - 1);
+        assert_eq!(START_AT_LOGIN_ROW, EXPOSED_PASSWORDS_ROW - 1);
         assert_eq!(SHORTCUT_ROW, START_AT_LOGIN_ROW - 1);
         if row_supported(START_AT_LOGIN_ROW) {
             assert!(matches!(

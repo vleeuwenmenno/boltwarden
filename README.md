@@ -341,21 +341,37 @@ The action center checks active logins for reused passwords, weak passwords (zxc
 score below 3), websites saved with `http://` (local network addresses excepted),
 duplicate logins (same website, username and password), and cards that expired or
 expire within 30 days. The score is the share of passwords with none of the first
-three problems and no breached website (see below). Each card lists its items.
+three problems, no breached website, and no exposed password (see below). Each card lists its items.
 
 **Breached websites** lists logins for sites that leaked passwords in a breach on
 or after the day you last set that login's password (its creation date when the
 password never changed, or always when neither date is known). It downloads the
 public breach list from [Have I Been Pwned](https://haveibeenpwned.com) whole
 (licensed CC BY 4.0) and matches it locally, so no vault data or hostnames leave
-the machine. Only verified breaches that exposed passwords count. Breached websites
-count as a risk in the score.
+the machine. Only verified breaches count. Breached websites count as a risk in the
+score.
+
+**Data breaches** lists logins for sites with a verified breach that leaked personal
+data such as names, addresses, or ID numbers, but no passwords. Changing the password
+does not help there, so it is a suggestion that does not affect the score: watch for
+phishing and fraud that uses the leaked data. Opening an affected item shows each
+breach with its date and what leaked.
+
+**Exposed passwords** is opt-in: turn on **Check passwords against breaches** in
+**Settings → Security**. It looks up each unique password with the free
+[Pwned Passwords](https://haveibeenpwned.com/API/v3#PwnedPasswords) range API using
+k-anonymity: the daemon hashes the password with SHA-1, sends only the first 5 hex
+characters (shared by hundreds of unrelated hashes) in random order, asks for a padded
+answer, and compares the rest of the hash locally. Passwords, full hashes, usernames,
+and websites never leave the machine. Results stay in memory and are discarded when
+the vault locks or the setting is turned off. Checking stops after 20 seconds; the
+action center continues with the remaining passwords the next time it opens.
 
 It also suggests sites that offer two-factor login when no one-time code is saved,
 and sites that support passkeys when none is stored. Those two checks download the
 public [2fa.directory](https://2fa.directory) lists whole, so no vault data or
 hostnames leave the machine. The lists are cached for a day in
-`~/.cache/boltwarden/` (`2fa-directory.json` and `hibp-breaches.json`); without
+`~/.cache/boltwarden/` (`2fa-directory.json` and `hibp-breaches-v2.json`); without
 network access the affected cards show as unavailable. All checks run in the daemon:
 the window only receives item ids.
 
