@@ -383,10 +383,11 @@ pub enum HealthCheck {
     PasskeysAvailable,
     BreachedWebsites,
     ExposedPasswords,
+    DataBreaches,
 }
 
 impl HealthCheck {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::ExposedPasswords,
         Self::BreachedWebsites,
         Self::ReusedPasswords,
@@ -395,6 +396,7 @@ impl HealthCheck {
         Self::Duplicates,
         Self::TwoFactorAvailable,
         Self::PasskeysAvailable,
+        Self::DataBreaches,
         Self::Expiring,
     ];
 
@@ -409,6 +411,7 @@ impl HealthCheck {
             Self::PasskeysAvailable => "Passkeys available",
             Self::BreachedWebsites => "Breached websites",
             Self::ExposedPasswords => "Exposed passwords",
+            Self::DataBreaches => "Data breaches",
         }
     }
 
@@ -436,6 +439,9 @@ impl HealthCheck {
             }
             Self::ExposedPasswords => {
                 "These passwords appear in known data breaches. Change them everywhere you use them."
+            }
+            Self::DataBreaches => {
+                "These sites leaked personal data, but no passwords. Watch for phishing and fraud."
             }
         }
     }
@@ -469,6 +475,9 @@ pub struct HealthReport {
     /// Why the breached websites check is missing, if it is.
     #[serde(default)]
     pub breach_error: Option<String>,
+    /// The breaches behind the two breach checks, one entry per item and breach.
+    #[serde(default)]
+    pub breach_notes: Vec<BreachNote>,
     /// Whether the opt-in exposed passwords check is on.
     #[serde(default)]
     pub exposure_enabled: bool,
@@ -477,7 +486,25 @@ pub struct HealthReport {
     pub exposure_error: Option<String>,
 }
 
+/// A public website breach that affects one vault item.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BreachNote {
+    pub item_id: String,
+    pub title: String,
+    /// `YYYY-MM-DD`
+    pub date: String,
+    /// What leaked, as Have I Been Pwned names it.
+    pub data_classes: Vec<String>,
+    pub exposed_passwords: bool,
+}
+
 impl HealthReport {
+    pub fn breaches_for<'a>(&'a self, item_id: &'a str) -> impl Iterator<Item = &'a BreachNote> {
+        self.breach_notes
+            .iter()
+            .filter(move |note| note.item_id == item_id)
+    }
+
     pub fn items(&self, check: HealthCheck) -> &[String] {
         self.findings
             .iter()
