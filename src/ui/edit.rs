@@ -106,6 +106,8 @@ impl EditState {
 /// replaces the password with a new one, like pressing Generate again.
 struct GeneratorState<'a> {
     open: &'a mut bool,
+    /// Whether the password field shows its value.
+    reveal: &'a mut bool,
     changed: &'a mut bool,
     error: &'a mut Option<String>,
 }
@@ -133,6 +135,10 @@ fn draw_generator(
             };
             if ui.button(toggle).clicked() {
                 *state.open = !*state.open;
+                // Show what the options produce while they are open.
+                if *state.open {
+                    *state.reveal = true;
+                }
             }
             let bits = options.entropy_bits();
             ui.label(
@@ -200,6 +206,7 @@ fn draw_generator(
                 use zeroize::Zeroize;
                 login.password.zeroize();
                 login.password = password;
+                *state.reveal = true;
             }
             Err(error) => *state.error = Some(format!("Could not generate password: {error}")),
         }
@@ -486,6 +493,7 @@ fn draw_form(ui: &mut Ui, state: &mut EditState, generator: &mut GeneratorOption
             ui,
             GeneratorState {
                 open: &mut state.generator_open,
+                reveal: &mut state.reveal_password,
                 changed: &mut state.generator_changed,
                 error: &mut state.error,
             },
