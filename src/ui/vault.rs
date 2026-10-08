@@ -1080,7 +1080,7 @@ pub fn draw_action_center(
                         RichText::new(
                             "Problems and suggestions for the logins in your vault. The score \
                              is the share of passwords that are strong, unique, only sent over \
-                             https and not exposed in a known breach.",
+                             https and not known from a breach.",
                         )
                         .color(t.text_muted),
                     );
@@ -1117,6 +1117,11 @@ pub fn draw_action_center(
                             report.directory_error.is_some()
                         }
                         HealthCheck::BreachedWebsites => report.breach_error.is_some(),
+                        // Partial results still count what was checked.
+                        HealthCheck::ExposedPasswords => {
+                            !report.exposure_enabled
+                                || (report.exposure_error.is_some() && count == 0)
+                        }
                         _ => false,
                     };
                     if draw_card(ui, rect, *check, count, unavailable) {
@@ -1128,6 +1133,24 @@ pub fn draw_action_center(
             let note = |ui: &mut Ui, text: String| {
                 ui.label(RichText::new(text).size(t.small()).color(t.text_faint));
             };
+            match (&report.exposure_error, report.exposure_enabled) {
+                (_, false) => note(
+                    ui,
+                    "Exposed passwords is off. Turn on \"Check passwords against breaches\" \
+                     in Settings → Security to look up 5-character hash prefixes with Pwned \
+                     Passwords; your passwords never leave this device."
+                        .into(),
+                ),
+                (Some(error), true) => {
+                    note(ui, format!("Exposed passwords check incomplete: {error}"))
+                }
+                (None, true) => note(
+                    ui,
+                    "Exposed passwords sends only the first 5 characters of each password's \
+                     SHA-1 hash to Pwned Passwords and matches the padded answer here."
+                        .into(),
+                ),
+            }
             match &report.breach_error {
                 Some(error) => note(
                     ui,
@@ -1314,6 +1337,7 @@ fn check_icon(check: HealthCheck) -> &'static str {
         HealthCheck::TwoFactorAvailable => t.icon("\u{f10b}", "📱"),
         HealthCheck::PasskeysAvailable => t.icon("\u{f084}", "🔑"),
         HealthCheck::BreachedWebsites => t.icon("\u{f1e2}", "💥"),
+        HealthCheck::ExposedPasswords => t.icon("\u{f06e}", "👁"),
     }
 }
 

@@ -6,6 +6,11 @@
 //! 2fa.directory lists, and the breach check against the public Have I Been Pwned
 //! breach list. Those lists are downloaded whole, so no vault data leaves the machine;
 //! they are cached on disk for a day.
+//!
+//! The opt-in exposed passwords check uses the Pwned Passwords range API with
+//! k-anonymity: only the first 5 hex characters of each password's SHA-1 hash are
+//! sent, responses are padded, and the matching happens here. Results live in memory
+//! only, with the unlocked vault.
 
 use crate::model::{BwItemDetail, HealthCheck, HealthReport, ItemState};
 use std::collections::{HashMap, HashSet};
@@ -16,6 +21,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const TWO_FACTOR_URL: &str = "https://api.2fa.directory/v3/totp.json";
 const PASSKEYS_URL: &str = "https://passkeys-api.2fa.directory/v1/all.json";
 const BREACHES_URL: &str = "https://haveibeenpwned.com/api/v3/breaches";
+const PWNED_RANGE_URL: &str = "https://api.pwnedpasswords.com/range/";
+/// Stop sending range requests after this long, so the action center never waits on
+/// a slow network; unchecked passwords are checked the next time.
+const EXPOSURE_BUDGET: Duration = Duration::from_secs(20);
+const EXPOSURE_WORKERS: usize = 6;
 const DIRECTORY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// After a failed download, wait this long before trying again.
 const DIRECTORY_RETRY: Duration = Duration::from_secs(10 * 60);
@@ -397,10 +407,154 @@ fn write_cache<T: serde::Serialize>(path: &PathBuf, list: &T) -> std::io::Result
     std::fs::rename(tmp, path)
 }
 
+/// SHA-1 of a password, as the Pwned Passwords API indexes it.
+pub type PasswordHash = [u8; 20];
+
+pub fn password_hash(password: &str) -> PasswordHash {
+    use sha1::Digest;
+    sha1::Sha1::digest(password.as_bytes()).into()
+}
+
+/// Which logins have a password seen in known breaches, for one report.
+#[derive(Debug, Default)]
+pub struct Exposure {
+    /// The opt-in setting is on.
+    pub enabled: bool,
+    pub items: HashSet<String>,
+    /// Why some or all passwords could not be checked.
+    pub error: Option<String>,
+}
+
+/// Breach counts from the range API: 0 for hashes that were checked and not found.
+/// Hashes missing from `counts` were not checked; `error` says why.
+#[derive(Debug, Default)]
+pub struct ExposureLookup {
+    pub counts: Vec<(PasswordHash, u64)>,
+    pub error: Option<String>,
+}
+
+/// Looks up password hashes with the Pwned Passwords range API. Only each hash's
+/// 5-character prefix is sent, in random order, with padded responses. Call this
+/// without holding the vault lock.
+pub fn check_exposure(hashes: &[PasswordHash]) -> ExposureLookup {
+    if hashes.is_empty() {
+        return ExposureLookup::default();
+    }
+    let client = match http_client() {
+        Ok(client) => client,
+        Err(error) => {
+            return ExposureLookup {
+                counts: Vec::new(),
+                error: Some(error),
+            };
+        }
+    };
+    let mut by_prefix: HashMap<String, Vec<PasswordHash>> = HashMap::new();
+    for hash in hashes {
+        by_prefix
+            .entry(hex_upper(hash)[..5].to_string())
+            .or_default()
+            .push(*hash);
+    }
+    let mut prefixes = by_prefix.keys().cloned().collect::<Vec<_>>();
+    shuffle(&mut prefixes);
+    let queue = Mutex::new(prefixes);
+    let results = Mutex::new(ExposureLookup::default());
+    let deadline = Instant::now() + EXPOSURE_BUDGET;
+    std::thread::scope(|scope| {
+        for _ in 0..EXPOSURE_WORKERS {
+            scope.spawn(|| {
+                loop {
+                    if Instant::now() >= deadline {
+                        return;
+                    }
+                    let Some(prefix) = queue.lock().ok().and_then(|mut queue| queue.pop()) else {
+                        return;
+                    };
+                    let range = fetch_range(&client, &prefix);
+                    let Ok(mut results) = results.lock() else {
+                        return;
+                    };
+                    match range {
+                        Ok(range) => {
+                            for hash in &by_prefix[&prefix] {
+                                let suffix = &hex_upper(hash)[5..];
+                                let count = range.get(suffix).copied().unwrap_or(0);
+                                results.counts.push((*hash, count));
+                            }
+                        }
+                        Err(error) => {
+                            results.error.get_or_insert(error);
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let mut results = results.into_inner().unwrap_or_default();
+    let unchecked = hashes.len().saturating_sub(results.counts.len());
+    if unchecked > 0 && results.error.is_none() {
+        results.error = Some(format!(
+            "{unchecked} passwords are not checked yet; open the action center again to \
+             continue"
+        ));
+    }
+    results
+}
+
+/// Suffix to breach count for one prefix. Padding entries have a count of 0.
+fn fetch_range(
+    client: &reqwest::blocking::Client,
+    prefix: &str,
+) -> Result<HashMap<String, u64>, String> {
+    let response = client
+        .get(format!("{PWNED_RANGE_URL}{prefix}"))
+        .header("Add-Padding", "true")
+        .send()
+        .map_err(|e| format!("could not reach Pwned Passwords: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Pwned Passwords answered HTTP {}",
+            response.status().as_u16()
+        ));
+    }
+    let body = response
+        .text()
+        .map_err(|e| format!("could not read the Pwned Passwords answer: {e}"))?;
+    Ok(parse_range(&body))
+}
+
+/// `SUFFIX:COUNT` lines, 35 hex characters each.
+fn parse_range(body: &str) -> HashMap<String, u64> {
+    body.lines()
+        .filter_map(|line| {
+            let (suffix, count) = line.trim().split_once(':')?;
+            let count = count.trim().parse().ok()?;
+            (suffix.len() == 35).then(|| (suffix.to_ascii_uppercase(), count))
+        })
+        .collect()
+}
+
+fn hex_upper(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02X}")).collect()
+}
+
+/// Fisher-Yates with kernel randomness, so request order does not follow the vault.
+fn shuffle<T>(items: &mut [T]) {
+    for i in (1..items.len()).rev() {
+        let Ok(bytes) = crate::random::random_bytes::<8>() else {
+            return;
+        };
+        let j = (u64::from_le_bytes(bytes) % (i as u64 + 1)) as usize;
+        items.swap(i, j);
+    }
+}
+
 pub fn report(
     items: &[BwItemDetail],
     directory: &Directory,
     breaches: &Breaches,
+    exposure: &Exposure,
     now: SystemTime,
 ) -> HealthReport {
     let active = items
@@ -447,6 +601,10 @@ pub fn report(
         }
         if reused.contains(item.id.as_str()) {
             flag(&mut findings, HealthCheck::ReusedPasswords, &item.id);
+            risky.insert(item.id.as_str());
+        }
+        if exposure.items.contains(&item.id) {
+            flag(&mut findings, HealthCheck::ExposedPasswords, &item.id);
             risky.insert(item.id.as_str());
         }
         if password_predates_breach(item, breaches) {
@@ -519,6 +677,8 @@ pub fn report(
             .collect(),
         directory_error: directory.error.clone(),
         breach_error: breaches.error.clone(),
+        exposure_enabled: exposure.enabled,
+        exposure_error: exposure.error.clone(),
     }
 }
 
@@ -699,6 +859,7 @@ mod tests {
             &items,
             &Directory::default(),
             &Breaches::default(),
+            &Exposure::default(),
             at(2026, 9, 30),
         );
 
@@ -729,6 +890,7 @@ mod tests {
             &[with_totp, with_passkey, plain, other],
             &directory,
             &Breaches::default(),
+            &Exposure::default(),
             at(2026, 9, 30),
         );
 
@@ -773,6 +935,7 @@ mod tests {
             &items,
             &Directory::default(),
             &Breaches::default(),
+            &Exposure::default(),
             at(2026, 10, 5),
         );
 
@@ -825,7 +988,13 @@ mod tests {
         ];
         let breaches = Breaches::from_sites(&[("breached.com", "2020-05-01")]);
 
-        let report = report(&items, &Directory::default(), &breaches, at(2026, 9, 30));
+        let report = report(
+            &items,
+            &Directory::default(),
+            &breaches,
+            &Exposure::default(),
+            at(2026, 9, 30),
+        );
 
         assert_eq!(
             report.items(HealthCheck::BreachedWebsites),
@@ -862,6 +1031,82 @@ mod tests {
                 day: days_from_civil(2019, 1, 31),
             }
         );
+    }
+
+    #[test]
+    fn flags_exposed_passwords_as_a_risk() {
+        let items = vec![
+            login("a", "vX7#qL9!tR2$wM5&", "https://one.example.com"),
+            login("b", "Zr8@kP3^nB6*yH1%", "https://two.example.com"),
+        ];
+        let exposure = Exposure {
+            enabled: true,
+            items: HashSet::from(["b".to_string()]),
+            error: None,
+        };
+
+        let report = report(
+            &items,
+            &Directory::default(),
+            &Breaches::default(),
+            &exposure,
+            at(2026, 9, 30),
+        );
+
+        assert_eq!(report.items(HealthCheck::ExposedPasswords), ["b"]);
+        assert!(report.exposure_enabled);
+        assert_eq!(report.score, 50);
+    }
+
+    #[test]
+    fn matches_range_suffixes_and_ignores_padding() {
+        let hash = password_hash("password");
+        let hex = hex_upper(&hash);
+        assert_eq!(hex, "5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8");
+        let body = format!(
+            "{}:52256179\r\n0018A45C4D1DEF81644B54AB7F969B88D65:0\r\nnot a line\r\n",
+            hex[5..].to_ascii_lowercase()
+        );
+
+        let range = parse_range(&body);
+
+        assert_eq!(range.get(&hex[5..]), Some(&52_256_179));
+        assert_eq!(range.get("0018A45C4D1DEF81644B54AB7F969B88D65"), Some(&0));
+        assert_eq!(range.len(), 2);
+    }
+
+    /// Talks to the real API: `cargo test -- --ignored live_pwned_passwords`.
+    #[test]
+    #[ignore]
+    fn live_pwned_passwords_finds_a_common_password() {
+        let common = password_hash("password");
+        let random = password_hash("Zr8@kP3^nB6*yH1%-boltwarden-test");
+        let lookup = check_exposure(&[common, random]);
+        assert_eq!(lookup.error, None);
+        let count = |hash| {
+            lookup
+                .counts
+                .iter()
+                .find(|(h, _)| *h == hash)
+                .map(|(_, c)| *c)
+        };
+        assert!(count(common).unwrap() > 1_000_000);
+        assert_eq!(count(random), Some(0));
+    }
+
+    #[test]
+    fn checking_nothing_sends_nothing() {
+        let lookup = check_exposure(&[]);
+        assert!(lookup.counts.is_empty());
+        assert!(lookup.error.is_none());
+    }
+
+    #[test]
+    fn shuffle_keeps_every_item() {
+        let mut items = (0..50).collect::<Vec<_>>();
+        shuffle(&mut items);
+        items.sort();
+        assert_eq!(items, (0..50).collect::<Vec<_>>());
     }
 
     #[test]

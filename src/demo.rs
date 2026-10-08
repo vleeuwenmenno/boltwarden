@@ -287,6 +287,11 @@ impl DemoBackend {
             &self.items()?,
             &directory,
             &crate::health::Breaches::demo(),
+            &crate::health::Exposure {
+                enabled: true,
+                items: ["jenkins".to_string()].into(),
+                error: None,
+            },
             std::time::SystemTime::now(),
         ))
     }

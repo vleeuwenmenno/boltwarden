@@ -382,10 +382,12 @@ pub enum HealthCheck {
     TwoFactorAvailable,
     PasskeysAvailable,
     BreachedWebsites,
+    ExposedPasswords,
 }
 
 impl HealthCheck {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
+        Self::ExposedPasswords,
         Self::BreachedWebsites,
         Self::ReusedPasswords,
         Self::WeakPasswords,
@@ -406,6 +408,7 @@ impl HealthCheck {
             Self::TwoFactorAvailable => "Two-factor authentication",
             Self::PasskeysAvailable => "Passkeys available",
             Self::BreachedWebsites => "Breached websites",
+            Self::ExposedPasswords => "Exposed passwords",
         }
     }
 
@@ -431,6 +434,9 @@ impl HealthCheck {
             Self::BreachedWebsites => {
                 "These sites leaked passwords in a breach after you last changed yours. Change them."
             }
+            Self::ExposedPasswords => {
+                "These passwords appear in known data breaches. Change them everywhere you use them."
+            }
         }
     }
 
@@ -442,6 +448,7 @@ impl HealthCheck {
                 | Self::WeakPasswords
                 | Self::UnsecuredWebsites
                 | Self::BreachedWebsites
+                | Self::ExposedPasswords
         )
     }
 }
@@ -453,7 +460,8 @@ pub struct HealthReport {
     pub passwords: usize,
     /// How many passwords got each strength score, from 0 (very weak) to 4 (strong).
     pub strength: [usize; 5],
-    /// Share of those logins with no risk (reused, weak, unsecured or breached), 0..=100.
+    /// Share of those logins with no risk (reused, weak, unsecured, breached or
+    /// exposed), 0..=100.
     pub score: u8,
     pub findings: Vec<(HealthCheck, Vec<String>)>,
     /// Why the two-factor and passkey checks are missing, if they are.
@@ -461,6 +469,12 @@ pub struct HealthReport {
     /// Why the breached websites check is missing, if it is.
     #[serde(default)]
     pub breach_error: Option<String>,
+    /// Whether the opt-in exposed passwords check is on.
+    #[serde(default)]
+    pub exposure_enabled: bool,
+    /// Why some or all passwords could not be checked against known breaches.
+    #[serde(default)]
+    pub exposure_error: Option<String>,
 }
 
 impl HealthReport {

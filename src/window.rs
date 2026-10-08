@@ -677,6 +677,11 @@ impl WindowApp {
                     let _ = config::clear_recent_item();
                 }
             }
+            SearchAction::SetCheckExposedPasswords(value) => {
+                self.settings.check_exposed_passwords = value;
+                // Recheck when the action center opens next.
+                self.health_stale = true;
+            }
             SearchAction::SetShowWebsiteIcons(value) => {
                 self.settings.show_website_icons = value;
                 self.icons.set_enabled(value);

@@ -554,11 +554,19 @@ impl AppBackend {
             Self::Local(local) => {
                 let directory = crate::health::directory();
                 let breaches = crate::health::breaches();
-                local
+                let exposure_enabled = config::load_settings().check_exposed_passwords;
+                let poisoned = || BackendError::Message("session lock poisoned".into());
+                let lookups = local
                     .lock()
-                    .map_err(|_| BackendError::Message("session lock poisoned".into()))?
+                    .map_err(|_| poisoned())?
                     .bw
-                    .health_report(&directory, &breaches)
+                    .exposure_lookups(exposure_enabled);
+                let lookup = crate::health::check_exposure(&lookups);
+                let mut local = local.lock().map_err(|_| poisoned())?;
+                local.bw.record_exposure(&lookup.counts);
+                local
+                    .bw
+                    .health_report(&directory, &breaches, exposure_enabled, lookup.error)
                     .map_err(BackendError::from)
             }
             Self::Demo(demo) => demo.health_report(),
