@@ -1,5 +1,30 @@
 # Repository instructions
 
+## Issues and the project board
+
+Track work in GitHub issues on the **Boltwarden** project board
+(GitHub Projects, owner `vleeuwenmenno`). Every feature, bug fix, refactor, and
+release starts from an issue. Only trivial changes (typos, comment fixes, routine
+dependency bumps) may skip one.
+
+1. Before starting work, find the matching issue or create one. Describe the
+   problem or goal, the acceptance criteria, and a task checklist (`- [ ]`).
+2. Label each issue with exactly one `type:` label (`type:feature`, `type:bug`,
+   `type:chore`, `type:docs`, `type:epic`) and any matching `platform:`
+   (`platform:linux`, `platform:windows`, `platform:macos`, `platform:browser`) and
+   `area:` labels (`area:auth`, `area:vault`, `area:health`, `area:ui`,
+   `area:packaging`). Add `blocked` while an issue waits on something else. Add a `priority:` label (`priority:high`, `priority:medium`,
+   `priority:low`) when known.
+3. Split large work into an epic with sub-issues. The epic holds the design and
+   links each sub-issue; each sub-issue should fit in one pull request.
+4. Add every issue to the project board. Move it through the Status column as work
+   progresses: **Backlog** (not yet planned), **Ready** (planned and unblocked),
+   **In progress**, **In review** (pull request open), **Done**.
+5. Branch from `main` per issue, tick off its tasks as they land, and reference it
+   in the pull request with `Closes #N` (or `Part of #N` for an epic or partial work).
+6. Record design decisions, findings, and changes of plan as issue comments, so the
+   issue remains the source of truth.
+
 ## Preparing a release
 
 Follow [docs/releasing.md](docs/releasing.md) and the GitHub Actions workflow in
