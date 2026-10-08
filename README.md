@@ -341,14 +341,23 @@ The action center checks active logins for reused passwords, weak passwords (zxc
 score below 3), websites saved with `http://` (local network addresses excepted),
 duplicate logins (same website, username and password), and cards that expired or
 expire within 30 days. The score is the share of passwords with none of the first
-three problems. Each card lists its items.
+three problems and no breached website (see below). Each card lists its items.
+
+**Breached websites** lists logins for sites that leaked passwords in a breach on
+or after the day you last set that login's password (its creation date when the
+password never changed, or always when neither date is known). It downloads the
+public breach list from [Have I Been Pwned](https://haveibeenpwned.com) whole
+(licensed CC BY 4.0) and matches it locally, so no vault data or hostnames leave
+the machine. Only verified breaches that exposed passwords count. Breached websites
+count as a risk in the score.
 
 It also suggests sites that offer two-factor login when no one-time code is saved,
 and sites that support passkeys when none is stored. Those two checks download the
 public [2fa.directory](https://2fa.directory) lists whole, so no vault data or
 hostnames leave the machine. The lists are cached for a day in
-`~/.cache/boltwarden/2fa-directory.json`; without network access the two cards
-show as unavailable. All checks run in the daemon: the window only receives item ids.
+`~/.cache/boltwarden/` (`2fa-directory.json` and `hibp-breaches.json`); without
+network access the affected cards show as unavailable. All checks run in the daemon:
+the window only receives item ids.
 
 ### Passkeys
 

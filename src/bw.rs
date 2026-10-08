@@ -1697,6 +1697,7 @@ impl BwClient {
     pub fn health_report(
         &mut self,
         directory: &crate::health::Directory,
+        breaches: &crate::health::Breaches,
     ) -> Result<HealthReport, BwError> {
         use std::hash::{Hash, Hasher};
         self.require_unlocked()?;
@@ -1706,6 +1707,7 @@ impl BwClient {
             (&item.id, &item.dates.revision_date, item.state).hash(&mut hasher);
         }
         directory.fingerprint().hash(&mut hasher);
+        breaches.fingerprint().hash(&mut hasher);
         crate::health::days_since_epoch(SystemTime::now()).hash(&mut hasher);
         let key = hasher.finish();
         if let Some((cached, report)) = &self.health_cache
@@ -1713,7 +1715,7 @@ impl BwClient {
         {
             return Ok(report.clone());
         }
-        let report = crate::health::report(&self.items, directory, SystemTime::now());
+        let report = crate::health::report(&self.items, directory, breaches, SystemTime::now());
         self.health_cache = Some((key, report.clone()));
         Ok(report)
     }
@@ -3136,6 +3138,10 @@ fn decode_cipher(
         .map(str::to_string);
     detail.dates.revision_date = revision_date.clone();
     detail.dates.creation_date = raw_get(&raw, "creationDate")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    detail.dates.password_changed_at = raw_get(&raw, "login")
+        .and_then(|login| raw_get(login, "passwordRevisionDate"))
         .and_then(Value::as_str)
         .map(str::to_string);
     Ok((

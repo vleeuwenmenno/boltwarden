@@ -1,6 +1,6 @@
 # Boltwarden privacy notice
 
-Last updated: 2026-10-02. Maintainer: Menno van Leeuwen.
+Last updated: 2026-10-08. Maintainer: Menno van Leeuwen.
 
 Boltwarden is an unofficial desktop client and browser extension for Bitwarden
 and Vaultwarden. It has no advertising, analytics, or telemetry service operated
@@ -58,7 +58,8 @@ When **Show website icons** is enabled, public website hostnames from your vault
 are sent to your server's icon service (Bitwarden's icon service for Bitwarden
 cloud accounts). Disable that setting to stop requests and clear the icon cache.
 The action center downloads public two-factor and passkey support lists from
-2fa.directory; it does not send your vault's hostnames with those list downloads.
+2fa.directory, and the public breach list from Have I Been Pwned; it does not send
+your vault's hostnames or other vault data with those list downloads.
 These services receive normal connection metadata such as your IP address.
 
 ## Controls and removal

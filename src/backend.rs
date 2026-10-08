@@ -553,11 +553,12 @@ impl AppBackend {
         match self {
             Self::Local(local) => {
                 let directory = crate::health::directory();
+                let breaches = crate::health::breaches();
                 local
                     .lock()
                     .map_err(|_| BackendError::Message("session lock poisoned".into()))?
                     .bw
-                    .health_report(&directory)
+                    .health_report(&directory, &breaches)
                     .map_err(BackendError::from)
             }
             Self::Demo(demo) => demo.health_report(),
