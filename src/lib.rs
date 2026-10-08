@@ -14,6 +14,7 @@ mod bw;
 mod clipboard;
 mod config;
 mod demo;
+mod generator;
 mod health;
 mod icons;
 mod instance;

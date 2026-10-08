@@ -1571,7 +1571,18 @@ impl App {
         let Some(edit) = self.edit_state.as_mut() else {
             return;
         };
-        match draw_edit(root, edit, self.settings.show_keyboard_shortcuts) {
+        let action = draw_edit(
+            root,
+            edit,
+            self.settings.show_keyboard_shortcuts,
+            &mut self.settings.generator,
+        );
+        // Save generator options once a slider drag or click is over.
+        let save_generator = edit.generator_changed && !ctx.input(|i| i.pointer.any_down());
+        if save_generator {
+            edit.generator_changed = false;
+        }
+        match action {
             Some(EditAction::Save(draft)) => {
                 edit.saving = true;
                 edit.error = None;
@@ -1589,6 +1600,9 @@ impl App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
             None => {}
+        }
+        if save_generator {
+            self.save_and_apply_settings();
         }
     }
 

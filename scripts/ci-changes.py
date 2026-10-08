@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 # Extension files the desktop build embeds (see packaging/Dockerfile).
-DESKTOP_SHARED = re.compile(r'extension/(public/|protocol/|lib/browser-identities\.json$)')
+DESKTOP_SHARED = re.compile(r'extension/(public/|protocol/|lib/browser-identities\.json$|lib/password-words\.ts$)')
 # Files that only affect the extension build.
 EXTENSION_ONLY = re.compile(r'extension/|packaging/Dockerfile\.extension$|scripts/third-party-notices\.py$')
 WEBSITE = re.compile(r'website/')

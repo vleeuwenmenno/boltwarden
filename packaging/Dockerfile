@@ -9,6 +9,7 @@ COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY extension/public ./extension/public
 COPY extension/lib/browser-identities.json ./extension/lib/browser-identities.json
+COPY extension/lib/password-words.ts ./extension/lib/password-words.ts
 COPY extension/protocol ./extension/protocol
 COPY packaging ./packaging
 COPY scripts ./scripts

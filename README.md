@@ -856,9 +856,14 @@ writes report an error; there is no plaintext fallback. Previous backups of a
 legacy session are not rewritten, and this does not protect a weak master password
 against offline guessing.
 
-The editor generates 24-character random passwords from an unbiased 64-character
-alphabet (144 bits of entropy). Desktop passphrase generation and card/identity
-editors are not implemented; the browser inline generator supports passphrases. Vault sync runs approximately every 60 seconds while the
+The editor's **Generate** button creates a password or passphrase; **Options** sets
+the length (8–128 characters), character classes (each enabled class appears at
+least once), and whether to avoid ambiguous characters, or for passphrases the
+number of words (3–20) from the EFF Long Wordlist, the separator, capitalization,
+and an added digit. Characters and words are drawn uniformly with kernel randomness.
+The editor shows the estimated entropy, remembers the options in the settings, and
+never stores generated values until you save the item. Card and identity editors are
+not implemented. Vault sync runs approximately every 60 seconds while the
 search screen is active, or on browser listing/fill requests once the same interval
 has elapsed; a failed sync keeps cached results and shows a warning.
 A muted footer label shows sync state. Hover for the last-sync time; click it or

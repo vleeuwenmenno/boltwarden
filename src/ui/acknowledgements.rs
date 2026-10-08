@@ -28,6 +28,15 @@ pub fn draw(ui: &mut egui::Ui) {
             ui.heading("Acknowledgements");
             ui.label("Thank you to the maintainers and contributors of the libraries that make Boltwarden possible.");
             ui.label("Boltwarden is an independent client for Bitwarden and Vaultwarden. It is not affiliated with or endorsed by those projects.");
+            ui.add_space(8.0);
+            ui.label("The passphrase generator uses the EFF Long Wordlist by Joseph Bonneau, Electronic Frontier Foundation (2016), licensed under CC BY 3.0 US.");
+            ui.hyperlink_to("EFF Dice-Generated Passphrases", "https://www.eff.org/dice");
+            ui.hyperlink_to(
+                "CC BY 3.0 US license",
+                "https://creativecommons.org/licenses/by/3.0/us/",
+            );
+            ui.label("Breach data from Have I Been Pwned is licensed under CC BY 4.0.");
+            ui.hyperlink_to("Have I Been Pwned", "https://haveibeenpwned.com");
             ui.add_space(12.0);
             ui.heading("Third-party licenses");
             if THIRD_PARTY_NOTICES.is_empty() {

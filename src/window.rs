@@ -2288,7 +2288,16 @@ impl WindowApp {
         let shortcuts = self.settings.show_keyboard_shortcuts;
 
         if let Some(edit) = self.edit_state.as_mut() {
-            match draw_edit(ui, edit, shortcuts) {
+            let action = draw_edit(ui, edit, shortcuts, &mut self.settings.generator);
+            // Save generator options once a slider drag or click is over.
+            if edit.generator_changed && !ui.ctx().input(|i| i.pointer.any_down()) {
+                edit.generator_changed = false;
+                self.save_settings();
+            }
+            let Some(edit) = self.edit_state.as_mut() else {
+                return;
+            };
+            match action {
                 Some(EditAction::Save(draft)) => {
                     edit.saving = true;
                     edit.error = None;

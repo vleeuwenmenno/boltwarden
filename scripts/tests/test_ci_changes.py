@@ -14,6 +14,7 @@ class CiChangesTests(unittest.TestCase):
             (['extension/entrypoints/content.ts'], (False, True, False)),
             (['extension/protocol/fixtures/list-matches.json'], (True, True, False)),
             (['extension/lib/browser-identities.json'], (True, True, False)),
+            (['extension/lib/password-words.ts'], (True, True, False)),
             (['extension/lib/other.ts'], (False, True, False)),
             (['docs/releasing.md', 'README.md'], (False, False, False)),
             (['.github/workflows/ci.yml'], (True, True, True)),

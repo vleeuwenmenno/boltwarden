@@ -1,6 +1,7 @@
 //! Edit form for an item: name, folder, login credentials, passkeys, websites, custom
 //! fields and notes.
 
+use crate::generator::{GeneratorMode, GeneratorOptions};
 use crate::model::{DraftField, DraftFieldKind, DraftUri, Folder, ItemDraft, LoginDraft};
 use crate::ui::shortcuts as sc;
 use crate::ui::theme::theme;
@@ -33,6 +34,9 @@ pub struct EditState {
     reveal_fields: HashSet<usize>,
     /// Input to focus on the next frame, such as the name of a field just added.
     focus: Option<egui::Id>,
+    generator_open: bool,
+    /// The generator options changed since the caller last saved them.
+    pub generator_changed: bool,
 }
 
 pub enum EditAction {
@@ -72,6 +76,8 @@ impl EditState {
             reveal_totp: false,
             reveal_fields: HashSet::new(),
             focus: Some(name_id()),
+            generator_open: false,
+            generator_changed: false,
         }
     }
 
@@ -96,6 +102,117 @@ impl EditState {
     }
 }
 
+/// The Generate button and its options under the password field. Changing an option
+/// replaces the password with a new one, like pressing Generate again.
+struct GeneratorState<'a> {
+    open: &'a mut bool,
+    /// Whether the password field shows its value.
+    reveal: &'a mut bool,
+    changed: &'a mut bool,
+    error: &'a mut Option<String>,
+}
+
+fn draw_generator(
+    ui: &mut Ui,
+    state: GeneratorState,
+    login: &mut LoginDraft,
+    options: &mut GeneratorOptions,
+) {
+    let t = theme();
+    let before = options.clone();
+    let mut regenerate = false;
+    labeled_row(ui, "", |ui| {
+        ui.horizontal(|ui| {
+            let label = match options.mode {
+                GeneratorMode::Password => "Generate password",
+                GeneratorMode::Passphrase => "Generate passphrase",
+            };
+            regenerate |= ui.button(label).clicked();
+            let toggle = if *state.open {
+                "Hide options"
+            } else {
+                "Options"
+            };
+            if ui.button(toggle).clicked() {
+                *state.open = !*state.open;
+                // Show what the options produce while they are open.
+                if *state.open {
+                    *state.reveal = true;
+                }
+            }
+            let bits = options.entropy_bits();
+            ui.label(
+                RichText::new(format!(
+                    "{} · {:.0} bits",
+                    crate::generator::strength_label(bits),
+                    bits
+                ))
+                .size(t.small())
+                .color(t.text_muted),
+            );
+        });
+    });
+    if *state.open {
+        labeled_row(ui, "", |ui| {
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut options.mode, GeneratorMode::Password, "Password");
+                    ui.radio_value(&mut options.mode, GeneratorMode::Passphrase, "Passphrase");
+                });
+                match options.mode {
+                    GeneratorMode::Password => {
+                        ui.add(
+                            egui::Slider::new(&mut options.length, crate::generator::LENGTH_RANGE)
+                                .text("characters"),
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            ui.checkbox(&mut options.uppercase, "A–Z");
+                            ui.checkbox(&mut options.lowercase, "a–z");
+                            ui.checkbox(&mut options.digits, "0–9");
+                            ui.checkbox(&mut options.symbols, "!@#$%");
+                            ui.checkbox(
+                                &mut options.avoid_ambiguous,
+                                "Avoid ambiguous (I l 1 O 0)",
+                            );
+                        });
+                    }
+                    GeneratorMode::Passphrase => {
+                        ui.add(
+                            egui::Slider::new(&mut options.words, crate::generator::WORDS_RANGE)
+                                .text("words"),
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("Separator");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut options.separator)
+                                    .char_limit(3)
+                                    .desired_width(36.0),
+                            );
+                            ui.checkbox(&mut options.capitalize, "Capitalize");
+                            ui.checkbox(&mut options.include_number, "Add a number");
+                        });
+                    }
+                }
+            });
+        });
+    }
+    if *options != before {
+        *state.changed = true;
+        regenerate = true;
+    }
+    if regenerate {
+        match crate::generator::generate(options) {
+            Ok(password) => {
+                use zeroize::Zeroize;
+                login.password.zeroize();
+                login.password = password;
+                *state.reveal = true;
+            }
+            Err(error) => *state.error = Some(format!("Could not generate password: {error}")),
+        }
+    }
+}
+
 fn name_id() -> egui::Id {
     egui::Id::new(("edit", "name"))
 }
@@ -112,6 +229,7 @@ pub fn draw_edit(
     root: &mut egui::Ui,
     state: &mut EditState,
     show_shortcuts: bool,
+    generator: &mut GeneratorOptions,
 ) -> Option<EditAction> {
     let ctx = &root.ctx().clone();
     let t = theme();
@@ -199,7 +317,7 @@ pub fn draw_edit(
             ui.add_enabled_ui(enabled, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .show(ui, |ui| draw_form(ui, state));
+                    .show(ui, |ui| draw_form(ui, state, generator));
             });
         });
 
@@ -289,7 +407,7 @@ pub fn validate(draft: &ItemDraft) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn draw_form(ui: &mut Ui, state: &mut EditState) {
+fn draw_form(ui: &mut Ui, state: &mut EditState, generator: &mut GeneratorOptions) {
     let t = theme();
     let focus = state.focus.take();
     let Some(draft) = state.draft.as_mut() else {
@@ -371,21 +489,17 @@ fn draw_form(ui: &mut Ui, state: &mut EditState) {
                 );
             });
         });
-        labeled_row(ui, "", |ui| {
-            if ui.button("Generate password (24 characters)").clicked() {
-                match crate::random::password() {
-                    Ok(password) => {
-                        use zeroize::Zeroize;
-                        login.password.zeroize();
-                        login.password = password;
-                        state.reveal_password = false;
-                    }
-                    Err(error) => {
-                        state.error = Some(format!("Could not generate password: {error}"))
-                    }
-                }
-            }
-        });
+        draw_generator(
+            ui,
+            GeneratorState {
+                open: &mut state.generator_open,
+                reveal: &mut state.reveal_password,
+                changed: &mut state.generator_changed,
+                error: &mut state.error,
+            },
+            login,
+            generator,
+        );
         labeled_row(ui, "TOTP secret", |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if reveal_button(ui, state.reveal_totp).clicked() {
@@ -728,11 +842,11 @@ mod tests {
         };
         // egui lays windows out invisibly on their first frame.
         let mut out = ctx.run_ui(input(Vec::new()), |ui| {
-            draw_edit(ui, state, true);
+            draw_edit(ui, state, true, &mut GeneratorOptions::default());
         });
         out.textures_delta.clear();
         let mut out = ctx.run_ui(input(events), |ui| {
-            draw_edit(ui, state, true);
+            draw_edit(ui, state, true, &mut GeneratorOptions::default());
         });
         out.textures_delta.clear();
         out.shapes
@@ -821,7 +935,7 @@ mod tests {
             ..Default::default()
         };
         let mut out = ctx.run_ui(input, |ctx| {
-            draw_edit(ctx, &mut state, true);
+            draw_edit(ctx, &mut state, true, &mut GeneratorOptions::default());
         });
         out.textures_delta.clear();
         assert!(!out.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text.contains("AUDITSECRETSEED"))));
