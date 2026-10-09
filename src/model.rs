@@ -85,6 +85,241 @@ pub struct ItemDraft {
     pub folder_id: Option<String>,
     #[serde(default)]
     pub favorite: bool,
+    /// Card or identity data; `None` for logins and secure notes.
+    #[serde(default)]
+    pub typed: Option<TypedDraft>,
+}
+
+/// Item types whose data is a fixed list of text fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum TypedKind {
+    Card,
+    Identity,
+}
+
+/// One field of a card or identity, as the server stores it.
+pub struct TypedField {
+    /// Key inside the item's `card` or `identity` object.
+    pub key: &'static str,
+    pub label: &'static str,
+    /// Masked until revealed.
+    pub secret: bool,
+}
+
+const fn field(key: &'static str, label: &'static str, secret: bool) -> TypedField {
+    TypedField { key, label, secret }
+}
+
+const CARD_FIELDS: [TypedField; 6] = [
+    field("cardholderName", "Cardholder name", false),
+    field("number", "Number", true),
+    field("brand", "Brand", false),
+    field("expMonth", "Expiry month", false),
+    field("expYear", "Expiry year", false),
+    field("code", "Security code", true),
+];
+
+const IDENTITY_FIELDS: [TypedField; 18] = [
+    field("title", "Title", false),
+    field("firstName", "First name", false),
+    field("middleName", "Middle name", false),
+    field("lastName", "Last name", false),
+    field("username", "Username", false),
+    field("company", "Company", false),
+    field("email", "Email", false),
+    field("phone", "Phone", false),
+    field("address1", "Address 1", false),
+    field("address2", "Address 2", false),
+    field("address3", "Address 3", false),
+    field("city", "City", false),
+    field("state", "State / province", false),
+    field("postalCode", "Postal code", false),
+    field("country", "Country", false),
+    field("ssn", "Social security number", true),
+    field("passportNumber", "Passport number", true),
+    field("licenseNumber", "License number", true),
+];
+
+impl TypedKind {
+    pub const ALL: [Self; 2] = [Self::Card, Self::Identity];
+
+    pub fn fields(self) -> &'static [TypedField] {
+        match self {
+            Self::Card => &CARD_FIELDS,
+            Self::Identity => &IDENTITY_FIELDS,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Card => "Card",
+            Self::Identity => "Identity",
+        }
+    }
+
+    /// The server's cipher type.
+    pub fn type_id(self) -> i64 {
+        match self {
+            Self::Card => 3,
+            Self::Identity => 4,
+        }
+    }
+
+    /// The top-level object that holds the fields.
+    pub fn object_key(self) -> &'static str {
+        match self {
+            Self::Card => "card",
+            Self::Identity => "identity",
+        }
+    }
+
+    pub fn from_type_id(type_id: i64) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.type_id() == type_id)
+    }
+
+    fn index(self, key: &str) -> Option<usize> {
+        self.fields().iter().position(|field| field.key == key)
+    }
+}
+
+/// Card or identity values, in the order of `kind.fields()`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TypedDraft {
+    pub kind: TypedKind,
+    pub values: Vec<String>,
+}
+
+impl TypedDraft {
+    pub fn new(kind: TypedKind) -> Self {
+        Self {
+            kind,
+            values: vec![String::new(); kind.fields().len()],
+        }
+    }
+
+    pub fn get(&self, key: &str) -> &str {
+        self.kind
+            .index(key)
+            .and_then(|idx| self.values.get(idx))
+            .map_or("", String::as_str)
+    }
+
+    pub fn set(&mut self, key: &str, value: String) {
+        if let Some(slot) = self
+            .kind
+            .index(key)
+            .and_then(|idx| self.values.get_mut(idx))
+        {
+            use zeroize::Zeroize;
+            slot.zeroize();
+            *slot = value;
+        }
+    }
+
+    /// Why the values can't be saved, if they can't.
+    pub fn problem(&self) -> Option<&'static str> {
+        if self.kind != TypedKind::Card {
+            return None;
+        }
+        let month = self.get("expMonth").trim();
+        if !month.is_empty() && !month.parse::<u8>().is_ok_and(|m| (1..=12).contains(&m)) {
+            return Some("Expiry month must be a number from 1 to 12");
+        }
+        let year = self.get("expYear").trim();
+        if !year.is_empty() && !(matches!(year.len(), 2 | 4) && year.parse::<u16>().is_ok()) {
+            return Some("Expiry year must have 2 or 4 digits");
+        }
+        None
+    }
+}
+
+/// The card brand for a number, by its issuer prefix, using the official clients' names.
+pub fn card_brand(number: &str) -> Option<&'static str> {
+    let digits = number
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .collect::<String>();
+    if digits.len() < 2 || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let prefix = |len: usize| digits.get(..len).and_then(|p| p.parse::<u32>().ok());
+    let in_range =
+        |len: usize, low: u32, high: u32| prefix(len).is_some_and(|p| (low..=high).contains(&p));
+    Some(if digits.starts_with('4') {
+        "Visa"
+    } else if in_range(2, 34, 34) || in_range(2, 37, 37) {
+        "Amex"
+    } else if in_range(2, 51, 55) || in_range(4, 2221, 2720) {
+        "Mastercard"
+    } else if digits.starts_with("6011") || digits.starts_with("65") || in_range(3, 644, 649) {
+        "Discover"
+    } else if in_range(4, 3528, 3589) {
+        "JCB"
+    } else if in_range(3, 300, 305) || in_range(2, 36, 36) || in_range(2, 38, 39) {
+        "Diners Club"
+    } else if digits.starts_with("62") {
+        "UnionPay"
+    } else if in_range(2, 50, 50) || in_range(2, 56, 58) || digits.starts_with('6') {
+        "Maestro"
+    } else {
+        return None;
+    })
+}
+
+#[cfg(test)]
+mod typed_tests {
+    use super::*;
+
+    #[test]
+    fn detects_card_brands_by_prefix() {
+        let cases = [
+            ("4111 1111 1111 1111", Some("Visa")),
+            ("5500-0000-0000-0004", Some("Mastercard")),
+            ("2221000000000009", Some("Mastercard")),
+            ("378282246310005", Some("Amex")),
+            ("6011111111111117", Some("Discover")),
+            ("3530111333300000", Some("JCB")),
+            ("30569309025904", Some("Diners Club")),
+            ("6200000000000005", Some("UnionPay")),
+            ("6759649826438453", Some("Maestro")),
+            ("9", None),
+            ("abcd", None),
+            ("", None),
+        ];
+        for (number, brand) in cases {
+            assert_eq!(card_brand(number), brand, "{number}");
+        }
+    }
+
+    #[test]
+    fn validates_card_expiry_and_ignores_identities() {
+        let card = |month: &str, year: &str| {
+            let mut card = TypedDraft::new(TypedKind::Card);
+            card.set("expMonth", month.into());
+            card.set("expYear", year.into());
+            card.problem()
+        };
+        assert_eq!(card("", ""), None);
+        assert_eq!(card("04", "2030"), None);
+        assert_eq!(card("12", "30"), None);
+        assert!(card("0", "").is_some());
+        assert!(card("13", "").is_some());
+        assert!(card("", "203").is_some());
+        assert!(card("", "20x0").is_some());
+        assert_eq!(TypedDraft::new(TypedKind::Identity).problem(), None);
+    }
+
+    #[test]
+    fn typed_values_follow_the_field_list() {
+        let mut identity = TypedDraft::new(TypedKind::Identity);
+        assert_eq!(identity.values.len(), TypedKind::Identity.fields().len());
+        identity.set("city", "Utrecht".into());
+        identity.set("unknown", "ignored".into());
+        assert_eq!(identity.get("city"), "Utrecht");
+        assert_eq!(identity.get("unknown"), "");
+        assert_eq!(TypedKind::from_type_id(3), Some(TypedKind::Card));
+        assert_eq!(TypedKind::from_type_id(1), None);
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -604,6 +839,16 @@ impl zeroize::Zeroize for ItemDraft {
         for field in &mut self.fields {
             field.name.zeroize();
             field.value.zeroize();
+        }
+        if let Some(typed) = &mut self.typed {
+            typed.zeroize();
+        }
+    }
+}
+impl zeroize::Zeroize for TypedDraft {
+    fn zeroize(&mut self) {
+        for value in &mut self.values {
+            value.zeroize();
         }
     }
 }
