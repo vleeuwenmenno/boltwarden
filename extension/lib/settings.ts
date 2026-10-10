@@ -1,6 +1,8 @@
 // User preferences shared by the popup, options page, and content scripts.
 // Stored in storage.local so they survive restarts; nothing here is secret.
 export type Theme = 'system' | 'light' | 'dark';
+/** What a passkey request does when the desktop app cannot take it: ask, hand it to the browser, or cancel it. */
+export type PasskeyUnavailable = 'ask' | 'browser' | 'cancel';
 export interface Settings {
   /** Open the inline login menu when a login field is clicked. */
   autoOpen: boolean;
@@ -14,8 +16,10 @@ export interface Settings {
   autoSubmit: boolean;
   /** Advanced: set autocomplete="off" on the focused login field to hide the browser's typed history. */
   suppressFormHistory: boolean;
+  /** Passkey requests while Boltwarden is unpaired or not responding. */
+  passkeyUnavailable: PasskeyUnavailable;
 }
-export const DEFAULT_SETTINGS: Settings = { autoOpen: true, theme: 'system', copyTotp: false, clearClipboardSeconds: 30, autoSubmit: true, suppressFormHistory: true };
+export const DEFAULT_SETTINGS: Settings = { autoOpen: true, theme: 'system', copyTotp: false, clearClipboardSeconds: 30, autoSubmit: true, suppressFormHistory: true, passkeyUnavailable: 'ask' };
 
 type Area = { get(key: string): Promise<Record<string, unknown>>; set(items: Record<string, unknown>): Promise<void> };
 type Changes = { addListener(callback: (changes: Record<string, { newValue?: unknown }>, area: string) => void): void;
@@ -34,6 +38,7 @@ export function parseSettings(value: unknown): Settings {
       ? Math.round(stored.clearClipboardSeconds) : DEFAULT_SETTINGS.clearClipboardSeconds,
     autoSubmit: typeof stored.autoSubmit === 'boolean' ? stored.autoSubmit : DEFAULT_SETTINGS.autoSubmit,
     suppressFormHistory: typeof stored.suppressFormHistory === 'boolean' ? stored.suppressFormHistory : DEFAULT_SETTINGS.suppressFormHistory,
+    passkeyUnavailable: stored.passkeyUnavailable === 'browser' || stored.passkeyUnavailable === 'cancel' ? stored.passkeyUnavailable : DEFAULT_SETTINGS.passkeyUnavailable,
   };
 }
 

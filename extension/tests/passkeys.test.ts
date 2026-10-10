@@ -201,6 +201,30 @@ describe('trusted passkey broker', () => {
     await vi.waitFor(() => expect(page.messages.at(-1)?.type).toBe('fallback'), { timeout: 2000 });
     expect(native.request).not.toHaveBeenCalled();
   });
+  it.each([['unpaired', 'unpaired'], ['disconnected', 'disconnected']])('asks the page what to do when the desktop app is %s', async (state, reason) => {
+    native.snapshot = { state, epoch: 1 };
+    const page = port(); page.call();
+    await vi.waitFor(() => expect(page.messages.at(-1)).toMatchObject({ type: 'unavailable', reason, id: 'request' }));
+    expect(native.request).not.toHaveBeenCalled();
+  });
+  it('falls back quietly when browser integration is switched off in the desktop app', async () => {
+    native.snapshot = { state: 'disabled', epoch: 1 };
+    const page = port(); page.call();
+    await vi.waitFor(() => expect(page.messages.at(-1)).toMatchObject({ type: 'fallback', reason: 'native-disabled' }));
+  });
+  it('reports a native host that does not finish connecting as not responding', async () => {
+    native.connect.mockImplementation(() => new Promise(() => {}));
+    const page = port(); page.call();
+    await vi.waitFor(() => expect(page.messages.at(-1)).toMatchObject({ type: 'unavailable', reason: 'not-responding' }), { timeout: 6000 });
+    expect(native.request).not.toHaveBeenCalled();
+  }, 8000);
+  it('asks when the connection drops before the desktop owns the request', async () => {
+    native.snapshot = { state: 'locked', epoch: 1 };
+    native.request.mockRejectedValueOnce(new NativeError('Disconnected', 'Native host disconnected.'));
+    const page = port(); page.call();
+    await vi.waitFor(() => expect(page.messages.at(-1)).toMatchObject({ type: 'unavailable', reason: 'disconnected' }));
+    expect(native.request).toHaveBeenCalledWith(expect.objectContaining({ type: 'RequestUnlock' }), expect.anything());
+  });
   it('keeps explicit denial separate from native fallback', async () => {
     native.request.mockRejectedValueOnce(new NativeError('NotAllowedError', 'Declined'));
     const page = port(); page.call(); await vi.waitFor(() => expect(page.messages.at(-1)).toMatchObject({ type: 'error', name: 'NotAllowedError' }));
