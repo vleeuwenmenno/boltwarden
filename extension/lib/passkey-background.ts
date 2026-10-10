@@ -8,6 +8,12 @@ interface Policy { requestId: string; url: string; get: boolean; create: boolean
 interface Pending { id: string; controller: AbortController; phase: 'preflight' | 'unlock' | 'request'; requestEpoch?: number; wake?: () => void }
 interface Document { port: Port; tabId: number; windowId: number; documentId?: string; token?: string; navigationStart?: number; bindingEnd?: number; url: string; generation: string; ready: boolean; completedAt?: number; navigating: boolean; navigation?: string; navigationStarted?: number; requestId?: string; policy?: Policy; pending?: Pending }
 const changed = () => new DOMException('The page changed. Try again.', 'AbortError');
+/** A native host that has not finished connecting by then counts as not responding. */
+const CONNECT_LIMIT = 4000;
+/** Disabled integration is the user's choice, so it falls back quietly; other states ask. */
+const stateError = (state: string) => state === 'disabled' ? new NativeError('Unavailable', 'Desktop vault is unavailable.')
+  : new NativeError(state === 'unpaired' ? 'Unpaired' : 'Disconnected', 'Desktop vault is unavailable.');
+const unreachable: Record<string, string> = { Disconnected: 'disconnected', Unpaired: 'unpaired', Unauthorized: 'unpaired', Timeout: 'not-responding' };
 const withoutFragment = (url: string) => url.split('#')[0];
 
 /** Only a known top-level response can supply fallback policy information. A
@@ -214,7 +220,7 @@ export function installPasskeyBroker(native: NativeClient) {
       pending.wake = () => {
         if (pending.controller.signal.aborted) reject(pending.controller.signal.reason);
         else if (native.snapshot.state === 'ready') resolve();
-        else if (native.snapshot.state !== 'locked') reject(new NativeError('Unavailable', 'Desktop vault is unavailable.'));
+        else if (native.snapshot.state !== 'locked') reject(stateError(native.snapshot.state));
       };
       pending.wake();
     });
@@ -238,8 +244,14 @@ export function installPasskeyBroker(native: NativeClient) {
         reply({ type: 'fallback', reason: 'document-policy-or-visibility' }); return;
       }
       await validate(document, generation, pending.controller.signal);
-      await native.connect();
-      if (!['ready', 'locked'].includes(native.snapshot.state)) { reply({ type: 'fallback', reason: `native-${native.snapshot.state}` }); return; }
+      let limit: ReturnType<typeof setTimeout> | undefined;
+      // Connection errors leave the snapshot disconnected or unpaired, which is checked below.
+      const connected = await Promise.race([native.connect().then(() => true, () => true),
+        new Promise<false>(resolve => { limit = setTimeout(() => resolve(false), CONNECT_LIMIT); })]).finally(() => clearTimeout(limit));
+      if (pending.controller.signal.aborted) throw pending.controller.signal.reason;
+      if (!connected) { reply({ type: 'unavailable', reason: 'not-responding' }); return; }
+      if (native.snapshot.state === 'disabled') { reply({ type: 'fallback', reason: 'native-disabled' }); return; }
+      if (!['ready', 'locked'].includes(native.snapshot.state)) { reply({ type: 'unavailable', reason: native.snapshot.state === 'unpaired' ? 'unpaired' : 'disconnected' }); return; }
       await unlock(document, pending);
       const context = await validate(document, generation, pending.controller.signal);
       const remaining = Math.floor(deadline - Date.now());
@@ -254,8 +266,10 @@ export function installPasskeyBroker(native: NativeClient) {
       reply({ type: 'result', result: response });
     } catch (error) {
       const reason = pending.controller.signal.aborted ? pending.controller.signal.reason : error;
-      if (reason instanceof NativeError && (['FallbackRequested', 'Unsupported', 'Unavailable', 'NotSupportedError'].includes(reason.code)
-        || (pending.phase !== 'request' && ['Disconnected', 'Unpaired', 'Disabled'].includes(reason.code)))) reply({ type: 'fallback', reason: `native-${reason.code}` });
+      // Before the desktop owns the request, a broken pairing or silent host lets the user choose.
+      if (reason instanceof NativeError && pending.phase !== 'request' && reason.code in unreachable) reply({ type: 'unavailable', reason: unreachable[reason.code] });
+      else if (reason instanceof NativeError && (['FallbackRequested', 'Unsupported', 'Unavailable', 'NotSupportedError'].includes(reason.code)
+        || (pending.phase !== 'request' && reason.code === 'Disabled'))) reply({ type: 'fallback', reason: `native-${reason.code}` });
       else reply({ type: 'error', name: reason instanceof DOMException ? reason.name
         : reason instanceof NativeError ? ({ Cancelled: 'AbortError', Timeout: 'NotAllowedError', Locked: 'NotAllowedError', Busy: 'NotAllowedError' }[reason.code] ?? reason.code) : 'UnknownError',
       message: reason instanceof Error ? reason.message : 'The passkey request failed.' });
@@ -309,7 +323,7 @@ export function installPasskeyBroker(native: NativeClient) {
         if (document.pending.phase === 'request'
           && (snapshot.state === 'locked' || snapshot.epoch !== document.pending.requestEpoch)) cancel(document);
         if (['disabled', 'unpaired', 'disconnected'].includes(snapshot.state)) cancel(document,
-          document.pending.phase === 'request' ? changed() : new NativeError('Unavailable', 'Desktop vault is unavailable.'));
+          document.pending.phase === 'request' ? changed() : stateError(snapshot.state));
         document.pending.wake?.();
       }
     },

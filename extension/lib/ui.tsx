@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { browser } from 'wxt/browser';
 import type { UiFrame, UiPage, UiResult, UiState, UiStateChange } from './ui-types';
 import { PROTOCOL_VERSION, type Match } from './protocol';
-import { applyTheme, DEFAULT_SETTINGS, watchSettings, writeSettings, type Settings, type Theme } from './settings';
+import { applyTheme, DEFAULT_SETTINGS, watchSettings, writeSettings, type PasskeyUnavailable, type Settings, type Theme } from './settings';
 import { CLIPBOARD_PERMISSION } from './clipboard';
 import { autofillState, restoreBrowserAutofill, suppressBrowserAutofill, type AutofillApi, type AutofillState } from './browser-autofill';
 import './ui.css';
@@ -83,6 +83,7 @@ function Settings({ settings }: { settings: Settings }) {
   const [error, setError] = useState('');
   const save = (change: Partial<Settings>) => { setError(''); writeSettings(browser.storage, change).catch(error => setError(errorMessage(error))); };
   const themes: [Theme, string][] = [['system', 'Browser'], ['light', 'Light'], ['dark', 'Dark']];
+  const passkeyChoices: [PasskeyUnavailable, string][] = [['ask', 'Ask me'], ['browser', 'Use browser'], ['cancel', 'Cancel']];
   return <>
     <PrivateWindows />
     {error && <p role="alert" class="notice error">{error}</p>}
@@ -104,6 +105,13 @@ function Settings({ settings }: { settings: Settings }) {
         <div class="segmented" role="radiogroup" aria-labelledby="clear-label">{([[30, '30 s'], [60, '1 min'], [120, '2 min'], [300, '5 min']] as const).map(([seconds, label]) =>
           <button key={seconds} type="button" role="radio" aria-checked={settings.clearClipboardSeconds === seconds} class={settings.clearClipboardSeconds === seconds ? 'active' : ''}
             onClick={() => save({ clearClipboardSeconds: seconds })}>{label}</button>)}</div></div>}
+    </section>
+    <section class="card"><h2>Passkeys</h2>
+      <div class="option"><span class="option-text"><strong id="passkey-unavailable-label">When Boltwarden can’t be reached</strong>
+        <span>For example when this browser is no longer paired or the desktop app does not answer.</span></span>
+        <div class="segmented" role="radiogroup" aria-labelledby="passkey-unavailable-label">{passkeyChoices.map(([value, label]) =>
+          <button key={value} type="button" role="radio" aria-checked={settings.passkeyUnavailable === value} class={settings.passkeyUnavailable === value ? 'active' : ''}
+            onClick={() => save({ passkeyUnavailable: value })}>{label}</button>)}</div></div>
     </section>
     <BrowserAutofill />
     <section class="card"><h2>Look</h2>

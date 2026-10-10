@@ -20,14 +20,21 @@ describe('settings', () => {
   it('falls back to defaults for missing or invalid values', () => {
     expect(parseSettings(undefined)).toEqual(DEFAULT_SETTINGS);
     expect(parseSettings({ autoOpen: 'yes', theme: 'purple' })).toEqual(DEFAULT_SETTINGS);
-    expect(parseSettings({ autoOpen: false, theme: 'light' })).toEqual({ autoOpen: false, theme: 'light', copyTotp: false, clearClipboardSeconds: 30, autoSubmit: true, suppressFormHistory: true });
+    expect(parseSettings({ autoOpen: false, theme: 'light' })).toEqual({ autoOpen: false, theme: 'light', copyTotp: false, clearClipboardSeconds: 30, autoSubmit: true, suppressFormHistory: true, passkeyUnavailable: 'ask' });
+  });
+
+  it('keeps only known passkey fallback choices', () => {
+    expect(DEFAULT_SETTINGS.passkeyUnavailable).toBe('ask');
+    expect(parseSettings({ passkeyUnavailable: 'browser' }).passkeyUnavailable).toBe('browser');
+    expect(parseSettings({ passkeyUnavailable: 'cancel' }).passkeyUnavailable).toBe('cancel');
+    expect(parseSettings({ passkeyUnavailable: 'reject' }).passkeyUnavailable).toBe('ask');
   });
 
   it('reads defaults without storage and merges writes', async () => {
     expect(await readSettings(undefined)).toEqual(DEFAULT_SETTINGS);
     const storage = fakeStorage({ autoOpen: false });
-    expect(await writeSettings(storage, { theme: 'dark' })).toEqual({ autoOpen: false, theme: 'dark', copyTotp: false, clearClipboardSeconds: 30, autoSubmit: true, suppressFormHistory: true });
-    expect(await readSettings(storage)).toEqual({ autoOpen: false, theme: 'dark', copyTotp: false, clearClipboardSeconds: 30, autoSubmit: true, suppressFormHistory: true });
+    expect(await writeSettings(storage, { theme: 'dark' })).toEqual({ autoOpen: false, theme: 'dark', copyTotp: false, clearClipboardSeconds: 30, autoSubmit: true, suppressFormHistory: true, passkeyUnavailable: 'ask' });
+    expect(await readSettings(storage)).toEqual({ autoOpen: false, theme: 'dark', copyTotp: false, clearClipboardSeconds: 30, autoSubmit: true, suppressFormHistory: true, passkeyUnavailable: 'ask' });
   });
 
   it('reports the current value and later changes until unsubscribed', async () => {

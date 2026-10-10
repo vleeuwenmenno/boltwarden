@@ -75,6 +75,15 @@ Choose **Other device** for the browser's native authenticator flow. Creation
 saves a new personal login before returning success; it requires a server
 connection. The extension never receives private keys.
 
+If Boltwarden cannot take a passkey request, because this browser is no longer
+paired, the desktop app is not running, or the app or extension does not respond
+within a few seconds, the page shows a Boltwarden dialog: **Try again**, **Use
+browser instead**, or **Cancel**. Extension settings → **Passkeys** → **When
+Boltwarden can’t be reached** sets this to **Ask me** (the default), **Use
+browser** (hand the request to the browser without asking), or **Cancel** (reject
+it without asking). Turning off browser integration in the desktop app always
+hands passkey requests to the browser without asking.
+
 The first profile supports top-level HTTPS, ES256/P-256, zero signature counters,
 discoverable credentials, `none` attestation, and `credProps`. Unsupported contexts
 or options delegate to native WebAuthn. Iframes, conditional mediation, PRF,
