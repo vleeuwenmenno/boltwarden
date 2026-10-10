@@ -19,6 +19,7 @@ vi.mock('wxt/utils/define-background', () => ({ defineBackground: (main: unknown
 vi.mock('../lib/native', () => ({ NativeClient: class { constructor() { return h.native; } } }));
 vi.mock('../lib/pairing', () => ({ publicIdentity: async () => ({ fingerprint: 'TEST' }) }));
 import main from '../entrypoints/background';
+import { BUILD, UNKNOWN_ACTION } from '../lib/build';
 
 const one = { id: 'login', name: 'Example', username: 'alice', reprompt: false, requires_confirmation: false, revision: '1' };
 let tab: { id: number; windowId: number; active: boolean; url: string };
@@ -121,6 +122,10 @@ describe('trusted document routing', () => {
     expect(port.disconnect).toHaveBeenCalledOnce();
     expect(ui({ type: 'pair' }, tab.url)).toBeUndefined();
     expect(h.native.pair).not.toHaveBeenCalled();
+  });
+  it('reports its build with the state and answers unknown actions with the stale-build message', async () => {
+    expect((await ui({ type: 'state' })).value.build).toBe(BUILD);
+    expect(await ui({ type: 'no-such-action' })).toEqual({ ok: false, error: UNKNOWN_ACTION });
   });
   it('fills exactly one eligible shortcut match using background-derived URLs', async () => {
     const { messages } = documentPort(); await shortcut();

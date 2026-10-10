@@ -13,6 +13,7 @@ const h = vi.hoisted(() => {
 vi.mock('wxt/browser', () => ({ browser: h.browser }));
 vi.mock('../lib/passkey-dialog', () => ({ showUnavailableDialog: (...args: unknown[]) => { h.dialog.show(...args); return { close: h.dialog.close }; } }));
 vi.mock('wxt/utils/define-content-script', () => ({ defineContentScript: (value: unknown) => value }));
+import { BUILD } from '../lib/build';
 import relay from '../entrypoints/passkey-relay.content';
 
 let listeners: Map<string, (event: any) => void>;
@@ -28,10 +29,10 @@ function setup() {
   relay.main!({ isInvalid: false, addEventListener(_target: unknown, type: string, listener: (event: any) => void) { listeners.set(type, listener); }, onInvalidated() {} } as never);
   return port;
 }
-function request() {
+function request(id = 'request') {
   const channel = { postMessage: vi.fn(), close: vi.fn(), onmessage: undefined as undefined | ((event: any) => void) };
   listeners.get('message')!({ isTrusted: true, source: window, origin: location.origin,
-    data: { source: 'boltwarden-webauthn-v1', type: 'request', id: 'request', kind: 'get', options: {
+    data: { source: 'boltwarden-webauthn-v1', type: 'request', id, kind: 'get', options: {
       challenge: 'AQID', allow_credentials: [], user_verification: 'required', timeout_ms: 60000,
     } }, ports: [channel] });
   return channel;
@@ -47,7 +48,7 @@ const operations = () => connection.postMessage.mock.calls.map(([message]) => me
 const chosen = () => (h.dialog.show.mock.calls.at(-1)![1] as { choose(choice: string): void }).choose;
 function sent() {
   const channel = request();
-  connection.onMessage.emit({ type: 'generation', generation: 'current', ready: true });
+  connection.onMessage.emit({ type: 'generation', build: BUILD, generation: 'current', ready: true });
   connection.onMessage.emit({ type: 'unavailable', id: 'request', generation: 'current', reason: 'unpaired' });
   return channel;
 }
@@ -73,33 +74,33 @@ describe('passkey relay document readiness', () => {
   it('preserves an unsent request through startup generations, then cancels a sent request on replacement', () => {
     const channel = request();
     expect(channel.postMessage).toHaveBeenCalledWith({ type: 'ack', id: 'request' });
-    connection.onMessage.emit({ type: 'generation', generation: 'initial', ready: false });
-    connection.onMessage.emit({ type: 'generation', generation: 'current', ready: false });
+    connection.onMessage.emit({ type: 'generation', build: BUILD, generation: 'initial', ready: false });
+    connection.onMessage.emit({ type: 'generation', build: BUILD, generation: 'current', ready: false });
     expect(connection.postMessage.mock.calls.some(([message]) => message.type === 'operation')).toBe(false);
     expect(channel.close).not.toHaveBeenCalled();
-    connection.onMessage.emit({ type: 'generation', generation: 'current', ready: true });
+    connection.onMessage.emit({ type: 'generation', build: BUILD, generation: 'current', ready: true });
     expect(connection.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'operation', generation: 'current' }));
-    connection.onMessage.emit({ type: 'generation', generation: 'replacement', ready: false });
+    connection.onMessage.emit({ type: 'generation', build: BUILD, generation: 'replacement', ready: false });
     expect(channel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'error', name: 'AbortError' }));
     expect(channel.close).toHaveBeenCalled();
   });
   it('does not fall back after 1.5 seconds on a slow-loading page', async () => {
     const channel = request();
-    connection.onMessage.emit({type: 'generation', generation: 'loading', ready: false});
+    connection.onMessage.emit({type: 'generation', build: BUILD, generation: 'loading', ready: false});
     await vi.advanceTimersByTimeAsync(2500);
     expect(channel.close).not.toHaveBeenCalled();
-    connection.onMessage.emit({type: 'generation', generation: 'loading', ready: true});
+    connection.onMessage.emit({type: 'generation', build: BUILD, generation: 'loading', ready: true});
     expect(connection.postMessage).toHaveBeenCalledWith(expect.objectContaining({type: 'operation', generation: 'loading'}));
   });
   it('treats a background that never marks the page ready as not responding, and never sends afterwards', async () => {
     h.settings.passkeyUnavailable = 'browser';
     const channel = request();
-    connection.onMessage.emit({ type: 'generation', generation: 'unknown', ready: false });
+    connection.onMessage.emit({ type: 'generation', build: BUILD, generation: 'unknown', ready: false });
     await vi.advanceTimersByTimeAsync(9900);
     expect(channel.close).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(200);
     expect(channel.postMessage).toHaveBeenCalledWith({ type: 'fallback', reason: 'unavailable-not-responding', id: 'request' });
-    connection.onMessage.emit({ type: 'generation', generation: 'unknown', ready: true });
+    connection.onMessage.emit({ type: 'generation', build: BUILD, generation: 'unknown', ready: true });
     expect(operations()).toHaveLength(0);
   });
 });
@@ -108,7 +109,7 @@ describe('passkey relay when Boltwarden is unavailable', () => {
   it('asks by default and holds the request while the dialog is open', async () => {
     const channel = sent();
     await vi.waitFor(() => expect(h.dialog.show).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ reason: 'unpaired', site: undefined })));
-    connection.onMessage.emit({ type: 'generation', generation: 'current', ready: true });
+    connection.onMessage.emit({ type: 'generation', build: BUILD, generation: 'current', ready: true });
     expect(operations()).toHaveLength(1);
     expect(channel.close).not.toHaveBeenCalled();
   });
@@ -146,5 +147,41 @@ describe('passkey relay when Boltwarden is unavailable', () => {
     channel.onmessage!({ data: { type: 'cancel', id: 'request' } });
     expect(h.dialog.close).toHaveBeenCalled();
     expect(channel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'error', name: 'AbortError' }));
+  });
+});
+
+describe('passkey relay with an outdated background or overlapping requests', () => {
+  it('reports a background from another build as outdated instead of sending to it', async () => {
+    h.settings.passkeyUnavailable = 'browser';
+    const channel = request();
+    connection.onMessage.emit({ type: 'generation', generation: 'old', ready: true });
+    await vi.waitFor(() => expect(channel.postMessage).toHaveBeenCalledWith({ type: 'fallback', reason: 'unavailable-outdated', id: 'request' }));
+    expect(operations()).toHaveLength(0);
+  });
+  it('lets a newer request replace one that never reached Boltwarden', () => {
+    const first = request('first');
+    connection.onMessage.emit({ type: 'generation', build: BUILD, generation: 'loading', ready: false });
+    const second = request('second');
+    expect(first.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'error', name: 'AbortError', id: 'first' }));
+    expect(first.close).toHaveBeenCalled();
+    connection.onMessage.emit({ type: 'generation', build: BUILD, generation: 'loading', ready: true });
+    expect(operations()).toEqual([expect.objectContaining({ id: 'second' })]);
+    expect(second.close).not.toHaveBeenCalled();
+  });
+  it('lets a newer request replace one waiting on the dialog', async () => {
+    const first = sent();
+    await vi.waitFor(() => expect(h.dialog.show).toHaveBeenCalled());
+    request('second');
+    expect(h.dialog.close).toHaveBeenCalled();
+    expect(first.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'error', name: 'AbortError', id: 'request' }));
+    expect(operations().at(-1)).toMatchObject({ id: 'second' });
+  });
+  it('rejects a newer request while the earlier one is with Boltwarden', () => {
+    const first = request('first');
+    connection.onMessage.emit({ type: 'generation', build: BUILD, generation: 'current', ready: true });
+    const second = request('second');
+    expect(second.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'error', name: 'NotAllowedError', id: 'second' }));
+    expect(second.close).toHaveBeenCalled();
+    expect(first.close).not.toHaveBeenCalled();
   });
 });

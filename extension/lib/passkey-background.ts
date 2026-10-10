@@ -2,6 +2,7 @@ import { browser } from 'wxt/browser';
 import { NativeClient, type NativeSnapshot } from './native';
 import { expect, NativeError, webUrl, type Push } from './protocol';
 import { isOperation, PASSKEY_PORT, type PasskeyOperation } from './passkey-types';
+import { BUILD } from './build';
 
 type Port = ReturnType<typeof browser.runtime.connect>;
 interface Policy { requestId: string; url: string; get: boolean; create: boolean }
@@ -59,7 +60,7 @@ export function installPasskeyBroker(native: NativeClient) {
     return true;
   }
   function announce(document: Document) {
-    try { document.port.postMessage({ type: 'generation', generation: document.generation, ready: document.ready }); } catch { /* disconnected */ }
+    try { document.port.postMessage({ type: 'generation', generation: document.generation, ready: document.ready, build: BUILD }); } catch { /* disconnected */ }
   }
   function completedNavigation(document: Document, url: string, timeStamp: number) {
     return document.ready && document.completedAt !== undefined && document.navigationStart !== undefined
@@ -311,7 +312,7 @@ export function installPasskeyBroker(native: NativeClient) {
       if (document.pending) { port.postMessage({ type: 'error', id, generation: document.generation, name: 'NotAllowedError', message: 'Another passkey request is pending.' }); return; }
       void run(document, { ...message, id, generation, policy_allowed, visible });
     });
-    port.onDisconnect.addListener(() => { cancel(document); if (documents.get(document.tabId) === document) documents.delete(document.tabId); });
+    port.onDisconnect.addListener(() => { void browser.runtime.lastError; cancel(document); if (documents.get(document.tabId) === document) documents.delete(document.tabId); });
     announce(document);
   });
   return {

@@ -11,6 +11,11 @@ npm run build
 
 The Firefox Manifest V3 extension is generated in `.output/firefox-mv3`.
 The Chromium Manifest V3 extension is generated in `.output/chrome-mv3`.
+Each bundle contains a 16-character build ID: a SHA-256 hash of the files in
+`entrypoints/` and `lib/` plus the package version, computed in `wxt.config.ts`.
+It contains no timestamp, so building the same source again produces the same
+ID. The popup, settings page and passkey relay compare it with the running
+background to detect a browser that still runs an older copy of the extension.
 All dependencies are locked in `package-lock.json`. WXT generates the manifest
 and bundles the locally included TypeScript and Preact sources. The extension
 does not download executable code or include a vault. Its native messaging host,

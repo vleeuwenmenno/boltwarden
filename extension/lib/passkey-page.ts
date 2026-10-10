@@ -94,11 +94,8 @@ export function installPageBridge() {
     || !globalThis.PublicKeyCredential || !navigator.credentials) return;
   const container = navigator.credentials;
   const native = { get: container.get, create: container.create };
-  let pending = false;
   const request = async (operation: PasskeyOperation, original: CredentialRequestOptions | CredentialCreationOptions): Promise<PublicKeyCredential | null> => {
     if (original.signal?.aborted) throw original.signal.reason ?? new DOMException('The request was aborted.', 'AbortError');
-    if (pending) throw new DOMException('Another passkey request is pending.', 'NotAllowedError');
-    pending = true;
     const channel = new MessageChannel();
     const id = crypto.randomUUID();
     let timer: ReturnType<typeof setTimeout> | undefined, startup: ReturnType<typeof setTimeout> | undefined;
@@ -133,7 +130,7 @@ export function installPageBridge() {
       if (original.signal?.aborted) throw original.signal.reason ?? new DOMException('The request was aborted.', 'AbortError');
       return credential(result);
     } finally {
-      pending = false; clearTimeout(timer); clearTimeout(startup); original.signal?.removeEventListener('abort', abort);
+      clearTimeout(timer); clearTimeout(startup); original.signal?.removeEventListener('abort', abort);
       channel.port1.close(); channel.port2.close();
     }
   };

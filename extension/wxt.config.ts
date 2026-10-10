@@ -4,7 +4,28 @@ import { defineConfig } from 'wxt';
 import identities from "./lib/browser-identities.json";
 import packageJson from './package.json';
 import { readFile, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/** A stable hash of the extension code, so pages and content scripts can tell when the
+ * browser still runs an older background. It depends only on source files, which keeps
+ * builds from the source archive reproducible. */
+function sourceDigest() {
+  const root = fileURLToPath(new URL('.', import.meta.url));
+  const hash = createHash('sha256');
+  const walk = (directory: string) => {
+    for (const entry of readdirSync(resolve(root, directory), { withFileTypes: true }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else hash.update(path.replaceAll('\\', '/')).update('\0').update(readFileSync(resolve(root, path))).update('\0');
+    }
+  };
+  walk('entrypoints'); walk('lib');
+  hash.update(packageJson.version);
+  return hash.digest('hex').slice(0, 16);
+}
 
 let unpackedManifest: string | undefined;
 
@@ -63,5 +84,6 @@ export default defineConfig({
     },
     options_ui: { open_in_tab: true },
   }),
-  vite: () => ({ oxc: { jsx: { runtime: 'automatic' as const, importSource: 'preact' } } }),
+  vite: () => ({ oxc: { jsx: { runtime: 'automatic' as const, importSource: 'preact' } },
+    define: { 'import.meta.env.BOLTWARDEN_BUILD': JSON.stringify(sourceDigest()) } }),
 });

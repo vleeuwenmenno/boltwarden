@@ -8,6 +8,7 @@ const REASONS: Record<string, string> = {
   unpaired: 'This browser is not paired with the Boltwarden desktop app. Open Boltwarden from the toolbar to pair it again.',
   disconnected: 'Boltwarden cannot reach the desktop app. Make sure it is running.',
   'not-responding': 'The Boltwarden desktop app or this extension is not responding. If this keeps happening, reload the extension.',
+  outdated: 'Boltwarden was updated, but the browser is still running the previous version. Reload the extension from the browser’s extensions page, then reload this page.',
 };
 
 /** Isolated-world dialog in a closed shadow root. Only trusted clicks and keys choose. */
