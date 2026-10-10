@@ -124,7 +124,8 @@ try {
   });
   await send('Marionette:SetContext', { value: 'content' });
   await send('WebDriver:Navigate', { url: `moz-extension://${hostname}/popup.html` });
-  await until(() => evaluate('document.body.innerText.includes("Pair with Boltwarden")'), 'Pairing page');
+  // The button stays disabled until the browser fingerprint loads; a click before then is ignored.
+  await until(() => evaluate('[...document.querySelectorAll("button")].some(button => button.textContent.includes("Pair with Boltwarden") && !button.disabled)'), 'Enabled pairing button');
   await evaluate('([...document.querySelectorAll("button")].find(button => button.textContent.includes("Pair with Boltwarden")).click(), true)');
   await until(() => existsSync(join(directory, 'pairing.json')), 'Authenticated native pairing');
   await until(() => evaluate('document.body.innerText.includes("Connected") && !document.body.innerText.includes("Pair with Boltwarden")'), 'Authenticated extension state');
