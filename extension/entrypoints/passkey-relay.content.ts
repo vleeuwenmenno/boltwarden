@@ -3,6 +3,7 @@ import { browser } from 'wxt/browser';
 import { isOperation, PASSKEY_CHANNEL, PASSKEY_PORT } from '../lib/passkey-types';
 import { readSettings } from '../lib/settings';
 import { showUnavailableDialog, type UnavailableChoice } from '../lib/passkey-dialog';
+import { BUILD } from '../lib/build';
 
 /** A background that has not marked this document ready by then is treated as not responding. */
 const READY_LIMIT = 10_000;
@@ -19,6 +20,8 @@ export default defineContentScript({
     let connection: ReturnType<typeof browser.runtime.connect> | undefined;
     let generation = '';
     let ready = false;
+    // A background from another build may not understand this script's requests.
+    let outdated = false;
     let readyTimer: ReturnType<typeof setTimeout> | undefined;
     // `held` keeps a request back while the user decides what to do with it.
     let pending: { id: string; channel: MessagePort; message: Record<string, unknown>; options: { timeout_ms: number }; deadline: number; sent: boolean; held: boolean } | undefined;
@@ -60,6 +63,7 @@ export default defineContentScript({
     };
     const flush = () => {
       if (pending && !pending.sent && !pending.held && generation && ready && connection) {
+        if (outdated) { void unavailable('outdated'); return; }
         clearTimeout(readyTimer); readyTimer = undefined;
         pending.sent = true; connection.postMessage({ ...pending.message, generation });
       }
@@ -71,7 +75,7 @@ export default defineContentScript({
         if (connection !== port || !message || typeof message !== 'object') return;
         if (message.type === 'generation') {
           if (pending?.sent && generation && message.generation !== generation) finish({ type: 'error', name: 'AbortError', message: 'The page changed.' });
-          generation = message.generation; ready = message.ready === true; flush();
+          generation = message.generation; ready = message.ready === true; outdated = message.build !== BUILD; flush();
         } else if (pending && message.id === pending.id && message.generation === generation) {
           if (message.type === 'unavailable') void unavailable(typeof message.reason === 'string' ? message.reason : 'unknown');
           else finish(message);
@@ -91,7 +95,7 @@ export default defineContentScript({
           : navigation && navigation.responseStart > 0 ? performance.timeOrigin + navigation.responseStart : undefined });
       port.onDisconnect.addListener(() => {
         if (connection !== port) return;
-        connection = undefined; generation = ''; ready = false;
+        connection = undefined; generation = ''; ready = false; outdated = false;
         finish({ type: 'error', name: 'AbortError', message: 'The browser connection was interrupted.' });
       });
     };
@@ -101,7 +105,13 @@ export default defineContentScript({
         || typeof event.data.id !== 'string' || event.data.id.length > 64 || event.ports.length !== 1) return;
       const channel = event.ports[0]!;
       const id: string = event.data.id;
-      if (!isOperation(event.data) || pending) { channel.postMessage({ id: event.data.id, type: 'fallback' }); channel.close(); return; }
+      if (!isOperation(event.data)) { channel.postMessage({ id: event.data.id, type: 'fallback' }); channel.close(); return; }
+      if (pending?.sent && !pending.held) {
+        // The earlier request is with Boltwarden or the desktop prompt, which the user can see.
+        channel.postMessage({ id, type: 'error', name: 'NotAllowedError', message: 'Another passkey request is pending.' }); channel.close(); return;
+      }
+      // An earlier request that never reached Boltwarden, or waits on the dialog, gives way to the newer one.
+      finish({ type: 'error', name: 'AbortError', message: 'A newer passkey request replaced this one.' });
       const policy = (document as Document & { featurePolicy?: { allowsFeature(name: string): boolean }; permissionsPolicy?: { allowsFeature(name: string): boolean } });
       let allowed: boolean | undefined;
       try { allowed = (policy.permissionsPolicy ?? policy.featurePolicy)?.allowsFeature(`publickey-credentials-${event.data.kind}`); } catch { /* require trusted response headers instead */ }

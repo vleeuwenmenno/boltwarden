@@ -5,7 +5,8 @@ import { browser } from 'wxt/browser';
 import { NativeClient } from '../lib/native';
 import { publicIdentity } from '../lib/pairing';
 import { clearCard, expect, HOST_NAME, NativeError, webUrl, type Match, type PageContext } from '../lib/protocol';
-import type { UiFrame, UiPage, UiResult } from '../lib/ui-types';
+import type { UiFrame, UiPage, UiResult, UiState } from '../lib/ui-types';
+import { BUILD, UNKNOWN_ACTION } from '../lib/build';
 import { installPasskeyBroker } from '../lib/passkey-background';
 import { PASSKEY_PORT } from '../lib/passkey-types';
 import { readSettings } from '../lib/settings';
@@ -146,7 +147,7 @@ export default defineBackground(() => {
     if (port.name === 'boltwarden-ui-v1') {
       if (!trustedUi(sender)) { port.disconnect(); return; }
       uiPorts.add(port);
-      port.onDisconnect.addListener(() => uiPorts.delete(port));
+      port.onDisconnect.addListener(() => { void browser.runtime.lastError; uiPorts.delete(port); });
       notifyUi('state', [port]);
       return;
     }
@@ -189,6 +190,8 @@ export default defineBackground(() => {
       else pending.resolve(message);
     });
     port.onDisconnect.addListener(() => {
+      // Reading lastError marks a back/forward-cache disconnect as expected instead of logging it.
+      void browser.runtime.lastError;
       invalidate(document);
       if (documents.get(key) === document) { documents.delete(key); notifyPage(document.tabId); }
     });
@@ -574,7 +577,7 @@ export default defineBackground(() => {
       switch (data.type) {
         case 'state': {
           await native.connect().catch(() => {});
-          return { connection: native.snapshot, fingerprint: (await publicIdentity()).fingerprint };
+          return { connection: native.snapshot, fingerprint: (await publicIdentity()).fingerprint, build: BUILD } satisfies UiState;
         }
         case 'pending-saves': return saves.list();
         case 'retry-save': await saves.retry(String(data.id)); return null;
@@ -614,7 +617,7 @@ export default defineBackground(() => {
           target.warning = matches.warning;
           return page([target]).frames[0];
         }
-        default: throw new NativeError('InvalidRequest', 'Unknown browser action.');
+        default: throw new NativeError('InvalidRequest', UNKNOWN_ACTION);
       }
     };
     return run().then(value => ({ ok: true, value } satisfies UiResult<unknown>), error => ({ ok: false, error: error instanceof Error ? error.message : 'Browser request failed.' } satisfies UiResult<never>));

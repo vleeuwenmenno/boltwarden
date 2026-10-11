@@ -18,6 +18,7 @@ const h = vi.hoisted(() => {
 });
 vi.mock('wxt/browser', () => ({ browser: h.browser }));
 import { installPasskeyBroker, policyAllows } from '../lib/passkey-background';
+import { BUILD } from '../lib/build';
 const get = { publicKey: { challenge: Uint8Array.of(1, 2, 3) } };
 const create: CredentialCreationOptions = { publicKey: { challenge: Uint8Array.of(1, 2, 3), rp: { name: 'Example' },
   user: { id: Uint8Array.of(4), name: 'alice', displayName: 'Alice' }, pubKeyCredParams: [{ type: 'public-key', alg: -7 }] } };
@@ -206,6 +207,9 @@ describe('trusted passkey broker', () => {
     const page = port(); page.call();
     await vi.waitFor(() => expect(page.messages.at(-1)).toMatchObject({ type: 'unavailable', reason, id: 'request' }));
     expect(native.request).not.toHaveBeenCalled();
+  });
+  it('tells the relay which build the background runs', () => {
+    expect(port().messages[0]).toMatchObject({ type: 'generation', build: BUILD });
   });
   it('falls back quietly when browser integration is switched off in the desktop app', async () => {
     native.snapshot = { state: 'disabled', epoch: 1 };

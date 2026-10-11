@@ -8,10 +8,11 @@ import type { NativeSnapshot } from '../lib/native';
 const h = vi.hoisted(() => {
   const event = () => ({ listeners: [] as Array<(value: any) => void>, addListener(callback: (value: any) => void) { this.listeners.push(callback); }, emit(value?: any) { this.listeners.forEach(callback => callback(value)); } });
   const port = { onMessage: event(), onDisconnect: event(), disconnect: vi.fn() };
-  return { port, extension: { isAllowedIncognitoAccess: vi.fn(async () => true) }, runtime: { getManifest: vi.fn(() => ({ version: '9.8.7' })), connect: vi.fn(() => port), sendMessage: vi.fn(), openOptionsPage: vi.fn() } };
+  return { port, extension: { isAllowedIncognitoAccess: vi.fn(async () => true) }, runtime: { getManifest: vi.fn(() => ({ version: '9.8.7' })), connect: vi.fn(() => port), sendMessage: vi.fn(), openOptionsPage: vi.fn(), reload: vi.fn() } };
 });
 vi.mock('wxt/browser', () => ({ browser: { runtime: h.runtime, extension: h.extension } }));
 import { mount } from '../lib/ui';
+import { BUILD, STALE_MESSAGE, UNKNOWN_ACTION } from '../lib/build';
 
 const login = { id: 'one', name: 'Work login', username: 'alice', revision: '1', reprompt: false, requires_confirmation: false };
 const frame = { targetId: 'document-one', origin: 'https://example.com', crossOrigin: false, items: [login, { ...login, id: 'two', name: 'Personal login', username: 'bob' }], more: false };
@@ -45,7 +46,7 @@ beforeEach(() => {
   vi.clearAllMocks(); h.port.onMessage.listeners.length = 0; h.port.onDisconnect.listeners.length = 0;
   document.body.innerHTML = '<div id="app"></div>'; app = document.getElementById('app')!;
   page = structuredClone({ frames: [frame] }); connection = { state: 'ready', epoch: 1 };
-  h.runtime.sendMessage.mockImplementation(async ({ type }) => response(type === 'state' ? { connection, fingerprint: 'ABCD:1234' } : type === 'list' ? page : null));
+  h.runtime.sendMessage.mockImplementation(async ({ type }) => response(type === 'state' ? { connection, fingerprint: 'ABCD:1234', build: BUILD } : type === 'list' ? page : null));
 });
 afterEach(() => { act(() => render(null, app)); });
 
@@ -143,7 +144,7 @@ describe('popup invalidation', () => {
     h.runtime.sendMessage.mockImplementationOnce(() => snapshot.promise);
     await act(() => mount()); await vi.waitFor(() => expect(calls('state')).toHaveLength(1));
     await push('connecting'); await push('ready');
-    await act(() => snapshot.resolve(response({ connection, fingerprint: 'ABCD:1234' })));
+    await act(() => snapshot.resolve(response({ connection, fingerprint: 'ABCD:1234', build: BUILD })));
     await vi.waitFor(() => expect(rows()).toHaveLength(2));
     expect(calls('list')).toHaveLength(1); expect(calls('state')).toHaveLength(2);
   });
@@ -194,7 +195,7 @@ it('shows retained saves while locked and exposes retry and discard without a pa
   connection = { state: 'locked', epoch: 2 };
   const pending = { id: 'pending-one', origin: 'https://example.test', username: 'alice', message: 'Unlock to finish saving.', busy: false };
   h.runtime.sendMessage.mockImplementation(async ({ type }) => response(type === 'state'
-    ? { connection, fingerprint: 'ABCD:1234' } : type === 'pending-saves' ? [pending] : null));
+    ? { connection, fingerprint: 'ABCD:1234', build: BUILD } : type === 'pending-saves' ? [pending] : null));
   await open(true);
   await vi.waitFor(() => expect(app.textContent).toContain('Password awaiting save'));
   expect(app.textContent).toContain('browser session ends');
@@ -203,6 +204,28 @@ it('shows retained saves while locked and exposes retry and discard without a pa
   expect(h.runtime.sendMessage).toHaveBeenCalledWith({ type: 'retry-save', id: 'pending-one' });
   await act(() => buttons.find(button => button.textContent === 'Discard')!.click());
   expect(h.runtime.sendMessage).toHaveBeenCalledWith({ type: 'discard-save', id: 'pending-one' });
+});
+
+describe('outdated background', () => {
+  it('asks to reload when the background is from an older build', async () => {
+    h.runtime.sendMessage.mockImplementation(async ({ type }) => response(type === 'state' ? { connection, fingerprint: 'ABCD:1234' } : type === 'list' ? page : []));
+    await open(true);
+    await vi.waitFor(() => expect(app.textContent).toContain(STALE_MESSAGE));
+    await click(button('Reload extension'));
+    expect(h.runtime.reload).toHaveBeenCalled();
+  });
+  it('turns an unknown action into the reload notice instead of a raw error', async () => {
+    h.runtime.sendMessage.mockImplementation(async ({ type }) => type === 'pending-saves' ? { ok: false, error: UNKNOWN_ACTION }
+      : response(type === 'state' ? { connection, fingerprint: 'ABCD:1234', build: BUILD } : type === 'list' ? page : null));
+    await open(true);
+    await vi.waitFor(() => expect(app.textContent).toContain('Reload Boltwarden'));
+    expect(app.textContent).not.toContain(UNKNOWN_ACTION);
+    expect(app.textContent).not.toContain('Pending passwords unavailable');
+  });
+  it('shows no notice when the builds match', async () => {
+    await open(true);
+    expect(app.textContent).not.toContain('Reload Boltwarden');
+  });
 });
 
 describe('private windows notice', () => {

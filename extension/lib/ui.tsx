@@ -7,13 +7,27 @@ import { PROTOCOL_VERSION, type Match } from './protocol';
 import { applyTheme, DEFAULT_SETTINGS, watchSettings, writeSettings, type PasskeyUnavailable, type Settings, type Theme } from './settings';
 import { CLIPBOARD_PERMISSION } from './clipboard';
 import { autofillState, restoreBrowserAutofill, suppressBrowserAutofill, type AutofillApi, type AutofillState } from './browser-autofill';
+import { BUILD, STALE_MESSAGE, UNKNOWN_ACTION } from './build';
 import './ui.css';
+
+/** Set by the mounted page; called when the background turns out to be an older build. */
+let staleListener = () => {};
+function staleBackground() { staleListener(); return new Error(STALE_MESSAGE); }
 
 async function call<T>(type: string, fields: Record<string, unknown> = {}): Promise<T> {
   const result = await browser.runtime.sendMessage({ type, ...fields }) as UiResult<T> | undefined;
   if (!result) throw new Error('Reload the extension and try again.');
-  if (!result.ok) throw new Error(result.error);
+  if (!result.ok) throw result.error === UNKNOWN_ACTION ? staleBackground() : new Error(result.error);
   return result.value;
+}
+
+/** Pages load from disk when opened, but the background keeps running the code it started with. */
+function StaleNotice() {
+  return <section class="notice error" role="alert">
+    <strong>Reload Boltwarden</strong>
+    <p>{STALE_MESSAGE}</p>
+    <div class="buttons"><button onClick={() => browser.runtime.reload()}>Reload extension</button></div>
+  </section>;
 }
 
 type Selection = { frame: UiFrame; item: Match };
@@ -157,6 +171,7 @@ function App({ options }: { options: boolean }) {
   const favicon = useTabFavicon();
   useEffect(() => watchSettings(browser.storage, next => { applyTheme(document.documentElement, next.theme); setSettings(next); }), []);
   const [pending, setPending] = useState<PendingSaveSummary[]>([]);
+  const [stale, setStale] = useState(false);
   const [state, setState] = useState<UiState>();
   const [page, setPage] = useState<UiPage>();
   const [error, setError] = useState('');
@@ -203,7 +218,8 @@ function App({ options }: { options: boolean }) {
     try {
       if (retry) await call('retry');
       const next = await call<UiState>('state');
-      void call<PendingSaveSummary[]>('pending-saves').then(items => { if (live()) setPending(items ?? []); }).catch(error => { if (live()) setError(`Pending passwords unavailable: ${errorMessage(error)}`); });
+      if (next.build !== BUILD) staleBackground();
+      void call<PendingSaveSummary[]>('pending-saves').then(items => { if (live()) setPending(items ?? []); }).catch(error => { if (live() && errorMessage(error) !== STALE_MESSAGE) setError(`Pending passwords unavailable: ${errorMessage(error)}`); });
       if (!live()) return;
       // Retain the public fingerprint even when a newer connection event has
       // superseded this response during the native handshake.
@@ -223,7 +239,7 @@ function App({ options }: { options: boolean }) {
   function connectionChanged(event: UiStateChange) {
     if (!live() || event.type !== 'state-changed') return;
     const previous = currentState.current?.connection;
-    void call<PendingSaveSummary[]>('pending-saves').then(items => { if (live()) setPending(items ?? []); }).catch(error => { if (live()) setError(`Pending passwords unavailable: ${errorMessage(error)}`); });
+    void call<PendingSaveSummary[]>('pending-saves').then(items => { if (live()) setPending(items ?? []); }).catch(error => { if (live() && errorMessage(error) !== STALE_MESSAGE) setError(`Pending passwords unavailable: ${errorMessage(error)}`); });
     updateState({ fingerprint: currentState.current?.fingerprint ?? '', connection: event.connection });
     const changed = !previous || previous.state !== event.connection.state;
     const invalid = event.reason !== 'state' || (changed && event.connection.state !== 'ready');
@@ -245,6 +261,7 @@ function App({ options }: { options: boolean }) {
   }
   useEffect(() => {
     mounted.current = true;
+    staleListener = () => { if (live()) setStale(true); };
     const port = browser.runtime.connect({ name: 'boltwarden-ui-v1' });
     port.onMessage.addListener(connectionChanged);
     port.onDisconnect.addListener(() => {
@@ -395,7 +412,8 @@ function App({ options }: { options: boolean }) {
           <div class="buttons"><button disabled={entry.busy} onClick={() => void call('retry-save', { id: entry.id }).catch(error => setError(errorMessage(error)))}>Retry save</button>
           <button class="secondary" disabled={entry.busy} onClick={() => void call('discard-save', { id: entry.id }).catch(error => setError(errorMessage(error)))}>Discard</button></div>
         </section>)}
-        {error && <p role="alert" class="notice error">{error}</p>}
+        {stale && <StaleNotice />}
+        {error && error !== STALE_MESSAGE && <p role="alert" class="notice error">{error}</p>}
         {message && !filled && <p role="status" class="notice">{message}</p>}
         {(!connection || connection.state === 'connecting') && <section class="empty-state"><span class="spinner large" /><h2>Connecting to Boltwarden…</h2></section>}
         {connection?.state === 'disconnected' && <section class="empty-state"><div class="state-icon"><span class="brand-mark" /></div><h2>Connect to Boltwarden</h2><p>Open Boltwarden desktop and enable this browser in Settings → Browser setup, then try again.</p><button disabled={busy} onClick={() => void refresh(true)}>Try again</button>{options && <p class="detail">{connection.error}</p>}</section>}
