@@ -496,8 +496,11 @@ impl BwClient {
             return Err(error);
         }
         if !matches!(error, BwError::Network(_)) {
+            // A refused request is ambiguous: it can be an allowlist or a proxy as well
+            // as a session the server revoked without a 401, so name both possibilities
+            // instead of calling the vault "signed out" or "online".
             self.sync_warning = Some(format!(
-                "Offline: showing encrypted local copy; {}",
+                "Offline: showing the encrypted local copy; {}. Reconnect to sync, and sign in again if you changed your master password or the session was revoked",
                 offline_cause(&error)
             ));
         }
@@ -6070,6 +6073,7 @@ mod tests {
             let warning = client.sync_warning().unwrap();
             assert!(warning.starts_with("Offline:"), "{warning}");
             assert!(warning.contains("403"), "{warning}");
+            assert!(warning.contains("sign in again"), "{warning}");
         });
     }
 
