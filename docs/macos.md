@@ -108,3 +108,25 @@ make package-macos
 This writes the universal ZIP and checksum to `dist/`, the same artifact CI builds and
 smoke-tests (`python3 scripts/macos-smoke.py dist`) for every desktop change and
 release.
+
+Install it with the same target Linux uses:
+
+```bash
+make install
+```
+
+It verifies the ZIP checksum and the ad hoc signature, stops a running copy, and copies
+`Boltwarden.app` to `/Applications`, starting it again afterwards when it was running.
+`APP_DEST` installs into another folder, and `MACOS_ARCHIVE` installs a downloaded
+release ZIP instead of the one in `dist/`:
+
+```bash
+make install MACOS_ARCHIVE="$HOME/Downloads/boltwarden-1.0.0-rc.3-universal-macos.zip"
+```
+
+`make uninstall` removes the app and keeps the settings folders listed above; turn off
+**Start at login** first so the launch agent goes away too.
+
+The app reports the version in `Cargo.toml`. CI stamps it from the release tag, so a
+local build keeps the version of the checkout, which can be older than the code it
+contains.

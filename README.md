@@ -108,11 +108,16 @@ Build a release binary (`make` alone shows help):
 make release
 ```
 
-Install it to `/usr/local/bin/boltwarden`:
+Install the release build:
 
 ```bash
 sudo make install
 ```
+
+`sudo` is needed on Linux, where the target writes `/usr/local/bin/boltwarden`. On
+macOS the same target installs `Boltwarden.app`, so build the universal ZIP first with
+`make package-macos` and omit `sudo`; see [building on macOS](docs/macos.md#building).
+`APP_DEST` picks another folder than `/Applications` and `MACOS_ARCHIVE` another ZIP.
 
 `boltwarden --daemon` starts the tray icon, activation socket, and in-memory vault
 session without opening the popup. Every other command starts it too when it is not
@@ -873,11 +878,14 @@ press `Ctrl+R` to sync manually.
 
 ## Removing a source install
 
-Turn off **Start at login** first, then remove the installed binary:
+Turn off **Start at login** first, then remove what `make install` created:
 
 ```bash
 sudo make uninstall
 ```
+
+On Linux this removes `/usr/local/bin/boltwarden`. On macOS it removes
+`/Applications/Boltwarden.app` and needs no `sudo`.
 
 ## Custom Install Paths
 
@@ -895,6 +903,13 @@ This installs the binary to:
 ```
 
 Start at login writes the path of the running binary into its autostart entry.
+
+On macOS, `APP_DEST` chooses the folder that receives `Boltwarden.app` and
+`MACOS_ARCHIVE` the ZIP that `make install` unpacks:
+
+```bash
+make install APP_DEST="$HOME/Applications"
+```
 
 ## Development
 
