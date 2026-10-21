@@ -8,6 +8,11 @@ DEV_SWAP_PATH ?= /usr/bin/$(BIN_NAME)
 CARGO ?= cargo
 NPM ?= npm
 BROWSER_TARGET ?= all
+DIST ?= dist
+APP_DEST ?= /Applications
+# CI stamps the release tag into Cargo.toml; local builds keep the checked-in version.
+VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+MACOS_ARCHIVE ?= $(DIST)/boltwarden-$(VERSION)-universal-macos.zip
 
 .PHONY: help all build release install install-browser dev-swap uninstall check test clean extension-deps extension-check extension-test extension-build extension-zip extension-release-check playground security package package-macos packaging-test
 
@@ -52,8 +57,8 @@ clean: ## Remove Rust build artifacts
 	$(CARGO) clean
 
 ##@ Installation
-install: ## Install the existing release binary
-	sh scripts/install.sh install-binary "target/release/$(BIN_NAME)" "$(DESTDIR)$(BIN_PATH)"
+install: ## Install the release build: binary on Linux, Boltwarden.app on macOS
+	sh scripts/install.sh install "target/release/$(BIN_NAME)" "$(DESTDIR)$(BIN_PATH)" "$(MACOS_ARCHIVE)" "$(APP_DEST)"
 
 install-browser: ## Register the installed binary with browsers (BROWSER_TARGET=all)
 	"$(BIN_PATH)" install-browser --browser "$(BROWSER_TARGET)" --path "$(BIN_PATH)"
@@ -61,8 +66,8 @@ install-browser: ## Register the installed binary with browsers (BROWSER_TARGET=
 dev-swap: release ## Replace the installed binary with this build and restart it (DEV_SWAP_PATH=/usr/bin/boltwarden)
 	sh scripts/install.sh dev-swap "target/release/$(BIN_NAME)" "$(DEV_SWAP_PATH)"
 
-uninstall: ## Remove the installed binary
-	sh scripts/install.sh uninstall-binary "$(DESTDIR)$(BIN_PATH)"
+uninstall: ## Remove the installed release (Linux binary or macOS app)
+	sh scripts/install.sh uninstall "$(DESTDIR)$(BIN_PATH)" "$(APP_DEST)"
 
 ##@ Browser extension
 extension-deps: ## Install browser extension dependencies
@@ -102,7 +107,7 @@ package-macos: ## Build a universal, ad-hoc signed Boltwarden.app ZIP (on macOS)
 	$(CARGO) build --locked --release --target x86_64-apple-darwin --bins
 	rm -rf target/Boltwarden.iconset
 	$(CARGO) run --locked --example macos_icon -- target/Boltwarden.iconset
-	python3 scripts/package-macos.py --iconset target/Boltwarden.iconset --output dist \
+	python3 scripts/package-macos.py --iconset target/Boltwarden.iconset --output $(DIST) \
 		--binary-dir target/aarch64-apple-darwin/release --binary-dir target/x86_64-apple-darwin/release
 
 packaging-test: ## Check packaging and setup opt-in behavior
