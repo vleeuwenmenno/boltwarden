@@ -5,7 +5,7 @@ use crate::browser::{
 };
 use crate::browser_approval::{BrowserApprovalChoice, BrowserApprovalRequest};
 use crate::{VaultState, interaction, uri_match};
-use std::sync::{Mutex, Weak, mpsc};
+use std::sync::{Arc, Mutex, Weak, mpsc};
 
 pub struct DaemonBrowserBackend {
     pub vault: Weak<Mutex<VaultState>>,
@@ -56,6 +56,36 @@ fn sync_browser_vault(state: &mut VaultState) {
     // requests bypass the desktop RPC wrapper, so run the same daemon cleanup.
     if was_unlocked && !state.bw.has_session() {
         crate::lock_vault_state(state, "session revoked");
+    }
+}
+
+fn refresh_browser_vault(vault: &Arc<Mutex<VaultState>>, state: &mut VaultState) {
+    if state.browser_sync_in_flight {
+        return;
+    }
+    let Some(fetch) = state.bw.begin_sync_if_stale() else {
+        return;
+    };
+    state.browser_sync_in_flight = true;
+    let vault = Arc::clone(vault);
+    if std::thread::Builder::new()
+        .name("browser-vault-sync".into())
+        .spawn(move || {
+            let fetched = fetch.run();
+            if let Ok(mut state) = vault.lock() {
+                state.browser_sync_in_flight = false;
+                // The shared completion path rejects obsolete results and handles
+                // revocation, pending approvals, SSH keys and browser notifications.
+                if crate::finish_vault_sync(&mut state, fetched).is_err() && state.bw.has_session()
+                {
+                    // The first list already returned; push the new warning too.
+                    crate::notify_browser_matches(&state);
+                }
+            }
+        })
+        .is_err()
+    {
+        state.browser_sync_in_flight = false;
     }
 }
 
@@ -245,7 +275,7 @@ impl BrowserHandler for DaemonBrowserBackend {
                 {
                     return error("InvalidContext");
                 }
-                sync_browser_vault(&mut state);
+                refresh_browser_vault(&vault, &mut state);
                 match if card {
                     state.bw.browser_cards()
                 } else if totp {

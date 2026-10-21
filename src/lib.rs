@@ -100,6 +100,8 @@ struct VaultState {
     passkey_verification: config::PasskeyVerification,
     browser_epoch: u64,
     browser_unlock: Option<interaction::Lease>,
+    /// At most one browser-triggered background refresh, including across locks.
+    browser_sync_in_flight: bool,
     popup: PopupChild,
     /// The full vault window, a second client process next to the popup.
     window: PopupChild,
@@ -206,6 +208,7 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
         passkey_verification: config::PasskeyVerification::default(),
         browser_epoch: 0,
         browser_unlock: None,
+        browser_sync_in_flight: false,
         clipboard: clipboard::Clipboard::default(),
         popup: popup.clone(),
         window: window.clone(),
@@ -1170,13 +1173,20 @@ fn sync_vault(vault: &Arc<Mutex<VaultState>>) -> Result<crate::model::SyncStatus
         .map_err(rpc_error_from_bw)?;
     let fetched = fetch.run();
     let mut state = vault.lock().map_err(|_| poisoned())?;
+    finish_vault_sync(&mut state, fetched)
+}
+
+fn finish_vault_sync(
+    state: &mut VaultState,
+    fetched: crate::bw::SyncFetched,
+) -> Result<crate::model::SyncStatus, RpcError> {
     let was_unlocked = state.bw.has_session();
     let result = state.bw.finish_sync(fetched).map_err(rpc_error_from_bw);
-    refresh_ssh_key_store_from_vault(&mut state);
+    refresh_ssh_key_store_from_vault(state);
     if was_unlocked && !state.bw.has_session() {
-        lock_vault_state(&mut state, "session revoked");
+        lock_vault_state(state, "session revoked");
     } else if result.is_ok() {
-        notify_browser_matches(&state);
+        notify_browser_matches(state);
     }
     result
 }
