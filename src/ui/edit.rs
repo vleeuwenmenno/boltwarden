@@ -20,6 +20,8 @@ pub struct EditState {
     /// Item being edited; empty while creating a new one.
     pub id: String,
     pub creating: bool,
+    /// True while this form is a copy of another item, including while that copy loads.
+    pub duplicating: bool,
     /// Login data put aside while a new item is switched to another type.
     stashed_login: Option<LoginDraft>,
     /// Card and identity data put aside the same way.
@@ -74,6 +76,7 @@ impl EditState {
         Self {
             id,
             creating: false,
+            duplicating: false,
             stashed_login: None,
             stashed_typed: Vec::new(),
             draft: None,
@@ -107,6 +110,17 @@ impl EditState {
     pub fn set_draft(&mut self, draft: ItemDraft) {
         self.original = Some(draft.clone());
         self.draft = Some(draft);
+    }
+
+    /// Turns a loaded source draft into a new item. The form stays clean until edited.
+    pub fn finish_duplicate(&mut self, draft: ItemDraft) {
+        self.id.clear();
+        self.creating = true;
+        let focus_username = draft.login.is_some();
+        self.set_draft(draft.into_new_item());
+        if focus_username {
+            self.focus = Some(egui::Id::new(("edit", "username")));
+        }
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -399,7 +413,9 @@ pub fn draw_edit(
                     .color(t.accent),
             );
             ui.add_space(6.0);
-            let title = if state.creating {
+            let title = if state.duplicating {
+                "Duplicate item"
+            } else if state.creating {
                 "New item"
             } else {
                 "Edit item"
@@ -593,7 +609,7 @@ fn draw_form(ui: &mut Ui, state: &mut EditState, generator: &mut GeneratorOption
 
     if let Some(login) = draft.login.as_mut() {
         labeled_row(ui, "Username", |ui| {
-            widgets::text_input(
+            let response = widgets::text_input(
                 ui,
                 egui::Id::new(("edit", "username")),
                 &mut login.username,
@@ -601,6 +617,7 @@ fn draw_form(ui: &mut Ui, state: &mut EditState, generator: &mut GeneratorOption
                 false,
                 t.body(),
             );
+            focus_if(&response, egui::Id::new(("edit", "username")));
         });
         labeled_row(ui, "Password", |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -973,6 +990,38 @@ mod tests {
 
         state.draft.as_mut().unwrap().notes = "changed".into();
         assert!(state.is_dirty());
+    }
+
+    #[test]
+    fn duplicate_opens_as_a_clean_new_item() {
+        let mut state = EditState::loading("github".into());
+        state.duplicating = true;
+        state.finish_duplicate(ItemDraft {
+            name: "GitHub".into(),
+            login: Some(LoginDraft {
+                username: "alex@example.com".into(),
+                passkeys: vec![crate::model::DraftPasskey {
+                    passkey: crate::model::Passkey {
+                        rp_id: "github.com".into(),
+                        ..Default::default()
+                    },
+                    original_index: 0,
+                }],
+                ..LoginDraft::default()
+            }),
+            ..ItemDraft::default()
+        });
+        assert!(state.duplicating);
+        assert!(state.creating);
+        assert!(state.id.is_empty());
+        assert!(!state.is_dirty());
+        assert!(
+            state
+                .draft
+                .as_ref()
+                .and_then(|draft| draft.login.as_ref())
+                .is_some_and(|login| login.passkeys.is_empty())
+        );
     }
     fn with_passkey() -> EditState {
         let mut state = EditState::loading("id".into());

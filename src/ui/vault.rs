@@ -685,6 +685,7 @@ pub enum ItemMenuAction {
     CopyUsername,
     CopyPassword,
     Edit,
+    Duplicate,
     Item(ItemAction),
 }
 
@@ -777,6 +778,10 @@ pub fn draw_item_list(
                     ui.separator();
                     if item.state != ItemState::Deleted {
                         entry(ui, "Edit", true, ItemMenuAction::Edit);
+                        // SSH keys cannot be rebuilt by the editor, so there is no copy to save.
+                        if item.item_type != "sshKey" {
+                            entry(ui, "Duplicate", true, ItemMenuAction::Duplicate);
+                        }
                         entry(
                             ui,
                             if item.state == ItemState::Archived {
@@ -1815,6 +1820,7 @@ mod tests {
             "Copy username",
             "Copy password",
             "Edit",
+            "Duplicate",
             "Archive",
             "Move to trash…",
         ] {
@@ -1836,6 +1842,57 @@ mod tests {
         assert!(
             matches!(action, Some(ListAction::Menu(id, ItemMenuAction::CopyPassword)) if id == "Beta")
         );
+    }
+
+    #[test]
+    fn ssh_keys_have_no_duplicate_action() {
+        let ctx = egui::Context::default();
+        let mut item = list_item("Key", None);
+        item.item_type = "sshKey".into();
+        let items = [item];
+        let refs = items.iter().collect::<Vec<_>>();
+        let mut selection = ItemSelection::default();
+        let mut icons = IconCache::new(false);
+        let mut render = |events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(600., 500.),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    draw_item_list(ui, &refs, Some(0), &mut selection, false, &mut icons, true);
+                },
+            );
+            output.textures_delta.clear();
+            output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) => {
+                        Some((text.galley.job.text.clone(), text.pos + egui::vec2(4., 6.)))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        render(vec![]);
+        let texts = render(vec![]);
+        let pos = texts.iter().find(|(text, _)| text == "Key").unwrap().1;
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        render(vec![egui::Event::PointerMoved(pos), button(true)]);
+        render(vec![button(false)]);
+        let texts = render(vec![]);
+        assert!(texts.iter().any(|(text, _)| text == "Edit"));
+        assert!(texts.iter().all(|(text, _)| text != "Duplicate"));
     }
 
     #[test]
