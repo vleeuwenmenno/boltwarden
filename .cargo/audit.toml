@@ -1,0 +1,14 @@
+[advisories]
+# These standalone crates were merged into zbus 6. The current ksni and
+# AccessKit/AT-SPI dependency chains still require zbus 5, so upgrading our
+# direct dependency alone cannot remove them. These are maintenance notices,
+# not vulnerability advisories; all vulnerability checks remain enabled.
+# Remove these exceptions after the full dependency graph migrates:
+# https://github.com/vleeuwenmenno/boltwarden/issues/75
+# Upstream tray migration: https://github.com/iovxw/ksni/issues/44
+# Review upstream status by 2026-11-04.
+ignore = [
+    "RUSTSEC-2026-0370", # zvariant
+    "RUSTSEC-2026-0371", # zbus_names
+    "RUSTSEC-2026-0372", # zvariant_derive
+]
