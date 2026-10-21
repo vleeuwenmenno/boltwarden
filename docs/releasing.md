@@ -78,8 +78,13 @@ It still requires explicit desktop-denial coverage. For a longer local stress ru
 `BOLTWARDEN_FIREFOX_NAVIGATIONS=100` when running `tests/passkey-firefox-e2e.mjs`
 from the extension directory after building it.
 
-Security checks include formatting and `cargo audit --deny warnings`. No advisory
-is globally ignored. Dependabot proposes dependency, action, and container updates.
+Security checks include formatting and `cargo audit --deny warnings`. Vulnerability
+advisories are not ignored. `.cargo/audit.toml` temporarily excepts three specific
+maintenance notices for the standalone crates merged into zbus 6, while the tray
+and accessibility dependency chains still require zbus 5. Removal is tracked in
+[#75](https://github.com/vleeuwenmenno/boltwarden/issues/75), with an upstream status
+review due by 2026-11-04. All other warnings remain fatal.
+Dependabot proposes dependency, action, and container updates.
 Nix flake outputs cover both CPUs, but the distribution workflows build through
 Docker; Nix builds need separate validation if their expressions or lockfile change.
 
