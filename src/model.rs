@@ -90,6 +90,25 @@ pub struct ItemDraft {
     pub typed: Option<TypedDraft>,
 }
 
+impl ItemDraft {
+    /// A copy that can be saved as a new item. Passkeys stay on the original login,
+    /// linked fields point at that cipher, and row indexes must not be reused.
+    pub fn into_new_item(mut self) -> Self {
+        if let Some(login) = self.login.as_mut() {
+            login.passkeys.clear();
+            for uri in &mut login.uris {
+                uri.original_index = None;
+            }
+        }
+        self.fields
+            .retain(|field| field.kind != DraftFieldKind::Linked);
+        for field in &mut self.fields {
+            field.original_index = None;
+        }
+        self
+    }
+}
+
 /// Item types whose data is a fixed list of text fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TypedKind {
@@ -860,6 +879,67 @@ impl zeroize::Zeroize for LoginDraft {
         for uri in &mut self.uris {
             uri.uri.zeroize();
         }
+    }
+}
+
+#[cfg(test)]
+mod draft_tests {
+    use super::*;
+
+    #[test]
+    fn a_new_item_copy_drops_passkeys_links_and_source_indexes() {
+        let draft = ItemDraft {
+            name: "GitHub".into(),
+            notes: "Personal".into(),
+            favorite: true,
+            folder_id: Some("folder".into()),
+            login: Some(LoginDraft {
+                username: "alex@example.com".into(),
+                password: "secret".into(),
+                totp: "SEED".into(),
+                uris: vec![DraftUri {
+                    uri: "https://github.com/login".into(),
+                    original_index: Some(0),
+                }],
+                passkeys: vec![DraftPasskey {
+                    passkey: Passkey {
+                        rp_id: "github.com".into(),
+                        ..Passkey::default()
+                    },
+                    original_index: 0,
+                }],
+            }),
+            fields: vec![
+                DraftField {
+                    name: "Recovery".into(),
+                    value: "code".into(),
+                    kind: DraftFieldKind::Hidden,
+                    original_index: Some(0),
+                },
+                DraftField {
+                    name: "Username".into(),
+                    value: String::new(),
+                    kind: DraftFieldKind::Linked,
+                    original_index: Some(1),
+                },
+            ],
+            typed: None,
+        };
+        let copy = draft.into_new_item();
+        assert_eq!(copy.name, "GitHub");
+        assert_eq!(copy.notes, "Personal");
+        assert!(copy.favorite);
+        assert_eq!(copy.folder_id.as_deref(), Some("folder"));
+        let login = copy.login.unwrap();
+        assert_eq!(login.username, "alex@example.com");
+        assert_eq!(login.password, "secret");
+        assert_eq!(login.totp, "SEED");
+        assert_eq!(login.uris[0].uri, "https://github.com/login");
+        assert!(login.uris[0].original_index.is_none());
+        assert!(login.passkeys.is_empty());
+        assert_eq!(copy.fields.len(), 1);
+        assert_eq!(copy.fields[0].name, "Recovery");
+        assert!(copy.fields[0].original_index.is_none());
     }
 }
 
