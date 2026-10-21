@@ -39,6 +39,7 @@ class InstallScriptTests(unittest.TestCase):
         self.shim('uname', '#!/bin/sh\necho Darwin\n')
         self.shim('codesign')
         self.shim('xattr')
+        self.shim('shasum')
         self.shim('open', f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{self.log}"\n')
         # Extract a stand-in bundle for -x and copy it verbatim otherwise.
         self.shim('ditto', '''#!/bin/sh
