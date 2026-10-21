@@ -397,6 +397,18 @@ impl BwClient {
     }
 
     #[cfg(test)]
+    pub(crate) fn browser_test_sync_from(&mut self, url: &str) {
+        self.base_url = url.into();
+        self.access_token = Some("fixture-access".into());
+        self.last_sync_attempt = None;
+        self.client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+    }
+
+    #[cfg(test)]
     pub(crate) fn browser_test_revoke_on_next_sync(&mut self) -> std::thread::JoinHandle<()> {
         let (url, server) =
             tests::serve_responses(vec![(400, json!({"error": "invalid_grant"}).to_string())]);
@@ -727,11 +739,22 @@ impl BwClient {
     }
 
     pub fn sync_if_stale(&mut self) {
+        if let Some(fetch) = self.begin_sync_if_stale() {
+            let fetched = fetch.run();
+            let _ = self.finish_sync(fetched);
+        }
+    }
+
+    /// Reserves a due refresh without doing network I/O. Starting it advances the
+    /// retry schedule, so concurrent readers keep using the current vault.
+    pub(crate) fn begin_sync_if_stale(&mut self) -> Option<SyncFetch> {
         if self
             .last_sync_attempt
             .is_none_or(|at| at.elapsed() >= Duration::from_secs(self.retry_seconds))
         {
-            let _ = self.sync_now();
+            self.begin_sync().ok()
+        } else {
+            None
         }
     }
 

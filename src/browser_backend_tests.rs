@@ -23,6 +23,78 @@ use std::time::{Duration, Instant};
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
+/// Keep a real sync request open until the test has exercised cached reads.
+struct DelayedSync {
+    url: String,
+    started: mpsc::Receiver<()>,
+    release: Option<mpsc::Sender<()>>,
+    server: Option<std::thread::JoinHandle<()>>,
+}
+
+impl DelayedSync {
+    fn new(status: u16) -> Self {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let (ready, started) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "background sync never connected");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("sync accept failed: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+                assert!(request.len() < 8192);
+            }
+            assert!(request.starts_with(b"GET /api/sync?excludeDomains=true "));
+            ready.send(()).unwrap();
+            let _ = wait.recv_timeout(Duration::from_secs(5));
+            let body = r#"{"profile":{"organizations":[]},"folders":[],"ciphers":[]}"#;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status} Response\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        });
+        Self {
+            url,
+            started,
+            release: Some(release),
+            server: Some(server),
+        }
+    }
+
+    fn finish(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+        if let Some(server) = self.server.take() {
+            server.join().unwrap();
+        }
+    }
+}
+
+impl Drop for DelayedSync {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
 struct Harness {
     vault: Arc<Mutex<VaultState>>,
     hub: BrowserHub,
@@ -50,6 +122,7 @@ impl Harness {
             passkey_verification: crate::config::PasskeyVerification::Always,
             browser_epoch: 1,
             browser_unlock: None,
+            browser_sync_in_flight: false,
             popup: Arc::new(Mutex::new(None)),
             window: Arc::new(Mutex::new(None)),
             clipboard: crate::clipboard::Clipboard::default(),
@@ -313,6 +386,117 @@ impl Drop for Harness {
         }
         let _ = std::fs::remove_dir_all(&self.directory);
     }
+}
+
+#[test]
+fn browser_lists_and_status_return_cached_data_while_sync_is_pending() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    crate::config::with_test_config(|_| {
+        for kind in ["login", "totp", "card"] {
+            let mut h = Harness::paired();
+            let mut server = DelayedSync::new(200);
+            {
+                let mut state = h.vault.lock().unwrap();
+                state.bw = match kind {
+                    "card" => BwClient::browser_card_test_fixture(false),
+                    "totp" => BwClient::browser_totp_test_fixture(),
+                    _ => BwClient::browser_test_fixture(),
+                };
+                state.bw.browser_test_sync_from(&server.url);
+            }
+            let request = || match kind {
+                "card" => BrowserRequest::ListCards {
+                    top_url: "https://one.example/".into(),
+                    frame_url: "https://one.example/login".into(),
+                    document_id: "document-1".into(),
+                    offset: 0,
+                },
+                "totp" => BrowserRequest::ListTotpMatches {
+                    top_url: "https://one.example/".into(),
+                    frame_url: "https://one.example/login".into(),
+                    document_id: "document-1".into(),
+                    offset: 0,
+                },
+                _ => BrowserRequest::ListMatches {
+                    top_url: "https://one.example/".into(),
+                    frame_url: "https://one.example/login".into(),
+                    document_id: "document-1".into(),
+                    offset: 0,
+                },
+            };
+            h.send("cached-list", request());
+            server.started.recv_timeout(Duration::from_secs(2)).unwrap();
+            session::set_read_timeout(&h.client, Some(Duration::from_millis(500))).unwrap();
+            let cached = h.read("cached-list");
+            assert_eq!(cached["type"], "Matches");
+            assert_eq!(cached["items"].as_array().unwrap().len(), 1, "{kind}");
+            h.send("cached-again", request());
+            assert_eq!(h.read("cached-again")["items"], cached["items"]);
+            h.send("responsive-status", BrowserRequest::Status);
+            assert_eq!(h.read("responsive-status")["unlocked"], true);
+            assert!(h.vault.lock().unwrap().browser_sync_in_flight);
+
+            session::set_read_timeout(&h.client, Some(Duration::from_secs(2))).unwrap();
+            server.finish();
+            let event: Value =
+                serde_json::from_slice(&session::read_frame(&mut h.client, false).unwrap())
+                    .unwrap();
+            assert_eq!(event["type"], "MatchesChanged");
+            h.send("refreshed-list", request());
+            assert!(
+                h.read("refreshed-list")["items"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(!h.vault.lock().unwrap().browser_sync_in_flight);
+        }
+    });
+}
+
+#[test]
+fn browser_background_refresh_preserves_cache_on_failure_and_cannot_undo_lock() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    crate::config::with_test_config(|_| {
+        for lock_during_refresh in [false, true] {
+            let mut h = Harness::paired();
+            let mut server = DelayedSync::new(if lock_during_refresh { 200 } else { 503 });
+            h.vault
+                .lock()
+                .unwrap()
+                .bw
+                .browser_test_sync_from(&server.url);
+            let revision = h.revision();
+            server.started.recv_timeout(Duration::from_secs(2)).unwrap();
+            if lock_during_refresh {
+                crate::lock_vault_state(&mut h.vault.lock().unwrap(), "test lock during refresh");
+            }
+            server.finish();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let state = h.vault.lock().unwrap();
+                if !state.browser_sync_in_flight {
+                    if lock_during_refresh {
+                        assert!(!state.bw.has_session());
+                    } else {
+                        assert!(state.bw.has_session());
+                        assert!(state.bw.sync_warning().unwrap().contains("503"));
+                    }
+                    break;
+                }
+                drop(state);
+                assert!(Instant::now() < deadline, "refresh did not complete");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if !lock_during_refresh {
+                let event: Value =
+                    serde_json::from_slice(&session::read_frame(&mut h.client, false).unwrap())
+                        .unwrap();
+                assert_eq!(event["type"], "MatchesChanged");
+                assert_eq!(h.revision(), revision);
+            }
+        }
+    });
 }
 
 #[test]

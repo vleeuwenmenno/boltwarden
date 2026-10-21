@@ -622,8 +622,11 @@ in the desktop daemon; seeds are never sent to the extension. Item verification 
 matching still apply. Expired codes and changed forms are rejected. Boltwarden does not
 submit the form or copy codes automatically.
 
-Listing or filling logins follows the daemon's sync schedule: normally after 60
-seconds, with retries backing off to five minutes while offline. Connection
+Matching lists come directly from the unlocked vault in desktop memory. A due
+server refresh runs in the background without blocking suggestions or holding the
+vault lock; refreshed matches are pushed to the extension. Filling still validates
+the selected item and its permissions. Refreshes follow the daemon's sync schedule:
+normally after 60 seconds, with retries backing off to five minutes while offline. Connection
 failures leave the unlocked local copy available and show a warning in the
 extension. Confirmed session revocation locks the vault and cancels pending
 fills. There is no separate browser vault to synchronize.
@@ -876,8 +879,9 @@ never stores generated values until you save the item. New items can be logins,
 secure notes, cards, or identities; card and identity fields are edited in place, card
 numbers, security codes, and identity document numbers stay masked until revealed, and
 a card number fills in the brand. Vault sync runs approximately every 60 seconds while the
-search screen is active, or on browser listing/fill requests once the same interval
-has elapsed; a failed sync keeps cached results and shows a warning.
+search screen is active, or on browser requests once the same interval has elapsed.
+Browser listings use cached results immediately and refresh in the background;
+a failed sync keeps cached results and shows a warning.
 A muted footer label shows sync state. Hover for the last-sync time; click it or
 press `Ctrl+R` to sync manually.
 
