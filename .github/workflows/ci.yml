@@ -209,6 +209,14 @@ jobs:
             --binary-dir target/x86_64-apple-darwin/release
       - name: Smoke-test the ZIP as users receive it
         run: python3 scripts/macos-smoke.py dist
+      - name: Install and remove the app with make install
+        run: |
+          make install APP_DEST="$RUNNER_TEMP/Applications"
+          installed="$RUNNER_TEMP/Applications/Boltwarden.app/Contents/MacOS/boltwarden"
+          test -x "$installed"
+          "$installed" --version
+          make uninstall APP_DEST="$RUNNER_TEMP/Applications"
+          test ! -e "$RUNNER_TEMP/Applications/Boltwarden.app"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-universal

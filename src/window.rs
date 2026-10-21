@@ -809,6 +809,24 @@ impl WindowApp {
         });
     }
 
+    fn start_duplicate(&mut self) {
+        if self.offline() {
+            return;
+        }
+        let Some(id) = self.selected.clone() else {
+            return;
+        };
+        self.summary_state.error = None;
+        let mut edit = EditState::loading(id.clone());
+        edit.duplicating = true;
+        edit.folders = self.folders.clone();
+        self.edit_state = Some(edit);
+        self.spawn(move |backend| {
+            let result = backend.edit_draft(&id);
+            Reply::EditDraft { id, result }
+        });
+    }
+
     fn lock(&mut self) {
         match self.backend.lock_vault() {
             Ok(()) => self.reset_locked(),
@@ -1158,11 +1176,14 @@ impl WindowApp {
                     let Some(edit) = self.edit_state.as_mut().filter(|edit| edit.id == id) else {
                         continue;
                     };
+                    let duplicating = edit.duplicating;
                     match result {
+                        Ok(draft) if duplicating => edit.finish_duplicate(draft),
                         Ok(draft) => edit.set_draft(draft),
                         Err(error) => {
                             self.edit_state = None;
-                            self.summary_state.error = Some(format!("could not edit: {error}"));
+                            let verb = if duplicating { "duplicate" } else { "edit" };
+                            self.summary_state.error = Some(format!("could not {verb}: {error}"));
                         }
                     }
                 }
@@ -2267,6 +2288,7 @@ impl WindowApp {
                 }
             }
             ItemMenuAction::Edit => self.start_edit(),
+            ItemMenuAction::Duplicate => self.start_duplicate(),
             ItemMenuAction::Item(ItemAction::Trash) => {
                 self.summary_state.confirm = Some(ItemAction::Trash)
             }
@@ -2972,8 +2994,16 @@ mod tests {
         app.selected = Some(item.id.clone());
         app.summary_state.detail_id = Some(item.id.clone());
         app.summary_state.detail = Some(detail);
-        app.pending_menu = Some(ItemMenuAction::Item(ItemAction::Trash));
         app.reprompt_id = Some(item.id.clone());
+        app.pending_menu = Some(ItemMenuAction::Duplicate);
+        app.run_pending_menu();
+        assert!(
+            app.pending_menu.is_some(),
+            "duplicate waits for verification"
+        );
+        assert!(app.edit_state.is_none());
+
+        app.pending_menu = Some(ItemMenuAction::Item(ItemAction::Trash));
         app.run_pending_menu();
         assert!(app.pending_menu.is_some());
         assert!(app.summary_state.confirm.is_none());
@@ -2988,5 +3018,51 @@ mod tests {
         app.pending_menu = Some(ItemMenuAction::CopyPassword);
         app.clear_selection();
         assert!(app.pending_menu.is_none());
+    }
+
+    #[test]
+    fn duplicate_fills_a_new_item_form_and_leaves_the_original() {
+        let backend = AppBackend::demo();
+        let detail = backend.get_item("github").unwrap();
+        let (_, commands) = mpsc::channel();
+        let mut app = WindowApp::with_settings(backend.clone(), commands, AppSettings::default());
+        app.selected = Some(detail.id.clone());
+        app.summary_state.detail_id = Some(detail.id.clone());
+        app.summary_state.detail = Some(detail);
+        app.pending_menu = Some(ItemMenuAction::Duplicate);
+        app.run_pending_menu();
+
+        let ctx = egui::Context::default();
+        let started = std::time::Instant::now();
+        while app
+            .edit_state
+            .as_ref()
+            .is_none_or(|edit| edit.draft.is_none())
+        {
+            app.process_background(&ctx);
+            if started.elapsed() > std::time::Duration::from_secs(2) {
+                panic!("duplicate draft did not load");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let edit = app.edit_state.as_ref().unwrap();
+        assert!(edit.creating);
+        assert!(edit.duplicating);
+        assert!(edit.id.is_empty());
+        let draft = edit.draft.as_ref().unwrap();
+        assert_eq!(draft.name, "GitHub");
+        let login = draft.login.as_ref().unwrap();
+        assert_eq!(login.username, "alex@example.com");
+        assert_eq!(login.uris[0].uri, "https://github.com/login");
+        assert!(login.uris[0].original_index.is_none());
+        assert!(login.passkeys.is_empty());
+        assert_eq!(draft.fields[0].name, "Recovery code");
+        assert!(draft.fields[0].original_index.is_none());
+        assert!(!edit.is_dirty());
+
+        let original = backend.get_item("github").unwrap();
+        assert_eq!(original.passkeys.len(), 1);
+        assert_eq!(original.username.as_deref(), Some("alex@example.com"));
     }
 }
