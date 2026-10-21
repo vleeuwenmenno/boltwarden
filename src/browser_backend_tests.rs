@@ -51,6 +51,8 @@ impl DelayedSync {
                     Err(error) => panic!("sync accept failed: {error}"),
                 }
             };
+            // Accepted sockets can inherit the listener's nonblocking mode on macOS.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
@@ -84,7 +86,10 @@ impl DelayedSync {
             let _ = release.send(());
         }
         if let Some(server) = self.server.take() {
-            server.join().unwrap();
+            let result = server.join();
+            if !std::thread::panicking() {
+                result.unwrap();
+            }
         }
     }
 }
