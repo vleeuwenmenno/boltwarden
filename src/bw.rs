@@ -478,18 +478,33 @@ impl BwClient {
         self.user_key = Some(user_key);
         self.generation = next_generation();
         let result = match self.refresh_session().and_then(|_| self.sync()) {
-            Err(error @ BwError::Network(_)) => {
-                self.last_sync_attempt = Some(Instant::now());
-                if self.load_offline_cache().is_ok() {
-                    Ok(())
-                } else {
-                    Err(error)
-                }
-            }
+            Err(error) => self.fall_back_to_offline(error),
             result => result,
         };
         self.verified_unlock = result.is_ok();
         result
+    }
+
+    /// Keeps the vault usable when the server cannot serve this unlock. A request the
+    /// server refuses (an IP allowlist, a reverse proxy, an outage, or a rejected body)
+    /// leaves the cached copy as the only way in, exactly like an unreachable server. A
+    /// confirmed revocation clears the session key first, so only that failure keeps the
+    /// vault locked.
+    fn fall_back_to_offline(&mut self, error: BwError) -> Result<(), BwError> {
+        self.last_sync_attempt = Some(Instant::now());
+        if self.user_key.is_none() || self.load_offline_cache().is_err() {
+            return Err(error);
+        }
+        if !matches!(error, BwError::Network(_)) {
+            // A refused request is ambiguous: it can be an allowlist or a proxy as well
+            // as a session the server revoked without a 401, so name both possibilities
+            // instead of calling the vault "signed out" or "online".
+            self.sync_warning = Some(format!(
+                "Offline: showing the encrypted local copy; {}. Reconnect to sync, and sign in again if you changed your master password or the session was revoked",
+                offline_cause(&error)
+            ));
+        }
+        Ok(())
     }
 
     pub fn login(
@@ -2351,6 +2366,21 @@ fn transport_error(error: reqwest::Error, context: &str) -> BwError {
     } else {
         BwError::Cli(message)
     }
+}
+
+/// One compact line for the offline status tooltip. A rejected request can carry a
+/// whole HTML error page from a reverse proxy.
+fn offline_cause(error: &BwError) -> String {
+    let mut summary = error
+        .to_string()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if summary.chars().count() > 140 {
+        summary = summary.chars().take(140).collect::<String>();
+        summary.push('…');
+    }
+    summary
 }
 
 fn sync_client_name_header() -> (&'static str, &'static str) {
@@ -6015,6 +6045,78 @@ mod tests {
             .unwrap();
             assert_eq!(snapshot.synced_at_unix, 123);
             assert_eq!(snapshot.ciphers.len(), 2);
+        });
+    }
+
+    #[test]
+    fn rejected_server_falls_back_to_the_offline_copy() {
+        config::with_test_config(|_| {
+            let (mut client, _) = offline_fixture();
+            client.access_token = None;
+            client.items.clear();
+            client.ciphers.clear();
+            client.sync_status.offline = false;
+            client
+                .fall_back_to_offline(BwError::Cli(
+                    "refresh failed with HTTP 403 Forbidden: forbidden".into(),
+                ))
+                .unwrap();
+            assert!(client.sync_status.offline);
+            assert_eq!(client.sync_status.cache_synced_unix, Some(123));
+            assert_eq!(
+                client
+                    .list_items_in(ItemState::Active, "Example")
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let warning = client.sync_warning().unwrap();
+            assert!(warning.starts_with("Offline:"), "{warning}");
+            assert!(warning.contains("403"), "{warning}");
+            assert!(warning.contains("sign in again"), "{warning}");
+        });
+    }
+
+    #[test]
+    fn refresh_rejection_keeps_the_session_while_revocation_clears_it() {
+        config::with_test_config(|_| {
+            // A 403 from an allowlist or proxy must leave the session for the fallback.
+            let (mut client, _) = offline_fixture();
+            let (url, thread) = serve_responses(vec![(403, "forbidden".to_string())]);
+            client.base_url = url;
+            client.access_token = None;
+            client.refresh_token = Some("refresh".into());
+            let error = client.refresh_session().unwrap_err();
+            thread.join().unwrap();
+            assert!(matches!(error, BwError::Cli(_)));
+            assert!(client.user_key.is_some());
+
+            // A 401 is a confirmed revocation: the session must not survive it.
+            let (url, thread) =
+                serve_responses(vec![(401, json!({"error": "invalid_grant"}).to_string())]);
+            client.base_url = url;
+            client.refresh_token = Some("refresh".into());
+            let error = client.refresh_session().unwrap_err();
+            thread.join().unwrap();
+            assert!(matches!(error, BwError::Cli(_)));
+            assert!(client.user_key.is_none());
+            assert!(config::load_saved_session().is_none());
+        });
+    }
+
+    #[test]
+    fn confirmed_revocation_does_not_fall_back_to_the_offline_copy() {
+        config::with_test_config(|_| {
+            let (mut client, _) = offline_fixture();
+            client.invalidate_session();
+            assert!(matches!(
+                client.fall_back_to_offline(BwError::Cli(
+                    "refresh failed with HTTP 401 Unauthorized".into()
+                )),
+                Err(BwError::Cli(_))
+            ));
+            assert!(!client.sync_status.offline);
+            assert!(client.items.is_empty());
         });
     }
 

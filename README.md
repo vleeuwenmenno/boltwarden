@@ -427,7 +427,12 @@ readable vault metadata nor your master password.
 The **Offline** status shows the copy's age on hover. Copies do not expire:
 server-side deletions, permission changes, and password changes cannot be known
 while disconnected. A confirmed session revocation prevents offline fallback;
-an unseen revocation cannot invalidate a disconnected copy. The age records the
+an unseen revocation cannot invalidate a disconnected copy. Fallback also applies
+when the server is reachable but refuses the request, such as a 403 from an IP
+allowlist or a reverse proxy, rate limiting, or a 5xx outage: being denied a
+response is not proof that the session was revoked. The offline status names the
+cause. If the session really was revoked, reconnecting surfaces it and asks you to
+sign in again. The age records the
 last full sync, even when later local edits have updated the copy.
 
 Disable **Keep offline copy** in Settings to delete it. **Use another account**
