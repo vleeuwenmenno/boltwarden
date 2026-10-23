@@ -9,6 +9,9 @@ pub struct BrowserIdentities {
     pub host_name: String,
     pub firefox_id: String,
     pub chrome_id: String,
+    /// Earlier development IDs whose exact Boltwarden-owned manifests may be migrated, never emitted.
+    #[serde(default)]
+    pub retired_chrome_ids: Vec<String>,
 }
 
 pub fn identities() -> &'static BrowserIdentities {

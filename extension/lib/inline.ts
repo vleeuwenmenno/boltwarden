@@ -286,6 +286,8 @@ export function createInlineController(doc: Document, options: InlineOptions) {
       if (value.warning) text(value.warning, true);
       const items = shownItems(), query = filterText(), total = value.frame?.items.length ?? 0;
       index = Math.min(index, Math.max(0, items.length - 1));
+      // Automatic menus preview the first account without selecting a fill action for Enter.
+      const previewRow = Math.max(0, index);
       if (query && total) {
         const hint = doc.createElement('div'); hint.className = 'filter-hint'; hint.setAttribute('aria-hidden', 'true');
         const typed = field!.value.trim(), shown = typed.length > 32 ? `${typed.slice(0, 31)}…` : typed;
@@ -302,7 +304,7 @@ export function createInlineController(doc: Document, options: InlineOptions) {
           button.classList.add('otp-row'); button.append(siteIcon(item.name));
           const account = doc.createElement('span'); account.className = 'account'; account.append(name, username); button.append(account);
           const preview = value.preview;
-          if (row === index && preview?.itemId === item.id && preview.expiresAt * 1000 > Date.now()) {
+          if (row === previewRow && preview?.itemId === item.id && preview.expiresAt * 1000 > Date.now()) {
             const seconds = Math.max(0, Math.ceil(preview.expiresAt - Date.now() / 1000));
             const details = doc.createElement('span'); details.className = 'otp-preview';
             const code = doc.createElement('span'); code.className = 'otp-code';
@@ -311,7 +313,7 @@ export function createInlineController(doc: Document, options: InlineOptions) {
             expiry.textContent = `${seconds}s`; expiry.title = `New code in ${seconds} seconds`;
             details.append(code, expiry); button.append(details);
             button.setAttribute('aria-label', `${item.name}, ${item.username ?? ''}, code ${preview.code}, expires in ${seconds} seconds, fill code`);
-          } else if (row === index && !item.reprompt) {
+          } else if (row === previewRow && !item.reprompt) {
             const hint = doc.createElement('span'); hint.className = 'otp-expiry'; hint.textContent = '••• •••'; button.append(hint);
           }
         } else button.append(siteIcon(item.name), name, username);
@@ -321,7 +323,7 @@ export function createInlineController(doc: Document, options: InlineOptions) {
       if (value.frame?.more) action('More matching logins', 'more');
     }
     position();
-    const item = shownItems()[index];
+    const item = shownItems()[Math.max(0, index)];
     if (!busy && value?.connection.state === 'ready' && value.frame?.kind === 'totp' && !value.frame.crossOrigin
       && item && !item.reprompt && !item.requires_confirmation
       && (!value.preview || value.preview.itemId !== item.id || value.preview.expiresAt * 1000 <= Date.now())) {
