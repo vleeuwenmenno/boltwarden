@@ -12,6 +12,8 @@ export interface PairingStorage { read(): Promise<string | undefined>; write(id:
 export type ConnectionState = 'disconnected' | 'connecting' | 'unpaired' | 'locked' | 'ready' | 'disabled';
 export interface NativeSnapshot { state: ConnectionState; error?: string; epoch: number }
 interface Pending { resolve(value: Response): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout>; cleanup(): void }
+const STATUS_TIMEOUT_MS = 10_000;
+const MAX_STATUS_REQUESTS = 32;
 
 /** One authenticated port; outstanding requests are never replayed after disconnect. */
 export class NativeClient {
@@ -23,7 +25,7 @@ export class NativeClient {
   private releaseRevision = 0;
   /** Status requests on one connection run one at a time, so a slower earlier answer can
    * never replace a later one (the daemon answers requests on separate threads). */
-  private statusQueue: Promise<unknown> = Promise.resolve();
+  private statusQueue = { tail: Promise.resolve<unknown>(undefined), size: 0 };
   private port?: NativePort;
   private connecting?: Promise<void>;
   private pairing?: Promise<void>;
@@ -53,7 +55,7 @@ export class NativeClient {
 
   private async open(): Promise<void> {
     this.releases = undefined;
-    this.statusQueue = Promise.resolve();
+    this.statusQueue = { tail: Promise.resolve<unknown>(undefined), size: 0 };
     this.update('connecting');
     try {
       const host = new Promise<number>((resolve, reject) => { this.hostReady = { resolve, reject }; });
@@ -115,13 +117,24 @@ export class NativeClient {
   async refreshStatus(checkUpdates = false): Promise<NativeSnapshot> {
     if (!this.authenticated) return this.snapshot;
     const port = this.port;
+    const queue = this.statusQueue;
+    if (queue.size >= MAX_STATUS_REQUESTS) {
+      this.releaseFailed();
+      throw new NativeError('Busy', 'Too many pending browser requests.');
+    }
+    queue.size++;
+    // Waiting for an earlier Status consumes this request's timeout too. Together with
+    // the queue limit, this keeps repeated popup opens from accumulating abandoned work.
+    const deadline = performance.now() + STATUS_TIMEOUT_MS;
     const current = () => this.authenticated && this.port === port;
     const run = async () => {
       // A request queued on a connection that has since closed is dropped, never sent to a new host.
       if (!current()) throw new NativeError('Disconnected', 'Native host disconnected.');
       let status: Extract<Response, { type: 'Status' }>;
       try {
-        status = expect(await this.raw({ type: 'Status', ...(checkUpdates ? { check_updates: true } : {}) }), 'Status');
+        const remaining = deadline - performance.now();
+        if (remaining <= 0) throw new NativeError('Timeout', 'Boltwarden did not respond in time.');
+        status = expect(await this.raw({ type: 'Status', ...(checkUpdates ? { check_updates: true } : {}) }, undefined, remaining), 'Status');
       } catch (error) {
         if (current()) this.releaseFailed();
         throw error;
@@ -131,8 +144,8 @@ export class NativeClient {
       this.update(!status.enabled ? 'disabled' : status.unlocked ? 'ready' : 'locked', undefined, status.epoch);
       return this.snapshot;
     };
-    const result = this.statusQueue.then(run, run);
-    this.statusQueue = result.catch(() => {});
+    const result = queue.tail.then(run, run).finally(() => { queue.size--; });
+    queue.tail = result.catch(() => {});
     return result;
   }
 

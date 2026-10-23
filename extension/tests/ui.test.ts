@@ -397,6 +397,43 @@ describe('release notices', () => {
     await advance(20_000); expect(releaseCalls).toHaveLength(closed);
   });
 
+  it.each([0, 60])('ends polling at 40 seconds despite an unresolved read, with a %s second cooldown', async cooldown => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    const checking = meta(snapshot({ state: 'checking', retry_after_seconds: cooldown || undefined }));
+    releases = checking; serve();
+    const serving = h.runtime.sendMessage.getMockImplementation()!;
+    const pending = deferred<unknown>();
+    h.runtime.sendMessage.mockImplementation((message: any) => {
+      if (message.type === 'releases' && releaseCalls.length === 1) {
+        releaseCalls.push(message); return pending.promise;
+      }
+      return serving(message);
+    });
+    await act(() => mount(true)); await flush();
+    await advance(39_999);
+    expect(releaseCalls).toHaveLength(2);
+    expect(button('Checking…').disabled).toBe(true);
+    expect(document.querySelector('.releases')!.textContent).not.toContain('taking longer than expected');
+    await advance(1);
+    expect(document.querySelector('.releases')!.textContent).toContain('taking longer than expected');
+    expect(button('Check now').disabled).toBe(cooldown > 40);
+    // An old checking reply cannot restart the loop or take away the retry action.
+    await act(() => pending.resolve(response({ connection, releases: checking }))); await flush();
+    expect(button('Check now').disabled).toBe(cooldown > 40);
+    if (cooldown) await advance(20_000);
+    expect(button('Check now').disabled).toBe(false);
+    const callsBeforeRetry = releaseCalls.length;
+    await advance(2000); expect(releaseCalls).toHaveLength(callsBeforeRetry);
+    await click(button('Check now')); await flush();
+    expect(releaseCalls.at(-1)).toEqual({ type: 'releases', check: true });
+    expect(button('Checking…').disabled).toBe(true);
+    act(() => render(null, app));
+    const closed = releaseCalls.length;
+    await advance(60_000);
+    expect(releaseCalls).toHaveLength(closed);
+    expect(document.querySelector('.releases')).toBeNull();
+  });
+
   it('never lets a late older answer bring back a finished check', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
     const checking = meta(snapshot({ state: 'checking' }));

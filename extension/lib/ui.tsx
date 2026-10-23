@@ -201,16 +201,21 @@ function useReleases(apply: (value: ReleaseMetadata) => void, desktopChecking: b
   // can offer another check. Errors and a missing desktop are tolerated; the limit still applies.
   useEffect(() => {
     if (!desktopChecking) { setTimedOut(false); return; }
-    const deadline = Date.now() + RELEASE_POLL_LIMIT_MS;
     let live = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // Do not wait for an outstanding read: a slow or lost reply must not hold the
+    // page in Checking beyond the polling limit.
+    const deadline = setTimeout(() => {
+      live = false;
+      clearTimeout(timer);
+      setTimedOut(true);
+    }, RELEASE_POLL_LIMIT_MS);
     const next = () => {
       if (!live) return;
-      if (Date.now() >= deadline) { setTimedOut(true); return; }
       timer = setTimeout(() => { void read().catch(() => {}).finally(next); }, RELEASE_POLL_MS);
     };
     next();
-    return () => { live = false; clearTimeout(timer); };
+    return () => { live = false; clearTimeout(timer); clearTimeout(deadline); };
   }, [desktopChecking, round]);
   /** A newer cache may exist since the background last asked; this never starts a check. */
   const load = () => { void read().catch(() => {}); };

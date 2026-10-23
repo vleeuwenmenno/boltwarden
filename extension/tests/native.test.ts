@@ -29,7 +29,7 @@ class MockPort implements NativePort {
   emit(message: unknown) { for (const listener of this.listeners) listener(message); }
   disconnect() { for (const callback of this.disconnects) callback(); }
 }
-beforeEach(() => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }));
+beforeEach(() => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] }));
 afterEach(() => vi.useRealTimers());
 function setup() {
   const ports: MockPort[] = [];
@@ -151,6 +151,48 @@ describe('serialized Status requests', () => {
     port.emit({ version: 1, id: request.id, type: 'Status', enabled: true, unlocked: true, epoch: 1, ...extra });
   };
   const settle = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+  it('bounds the queue and expires unsent requests instead of replaying a backlog', async () => {
+    const { client, ports } = setup(); await client.pair('Test');
+    const port = ports.at(-1)!; port.heldStatus = [];
+    const results = Promise.all(Array.from({ length: 40 }, (_, index) => client.refreshStatus(index === 1)
+      .then(() => 'answered', error => error.code)));
+    await settle();
+    expect(port.heldStatus).toHaveLength(1);
+    // Status waiting does not block unrelated requests, such as listing matching logins.
+    await expect(client.request(list)).resolves.toMatchObject({ type: 'Matches' });
+    await vi.advanceTimersByTimeAsync(10_000);
+    const errors = await results;
+    expect(errors.filter(code => code === 'Busy')).toHaveLength(8);
+    expect(errors.filter(code => code === 'Timeout')).toHaveLength(32);
+    expect(port.heldStatus).toHaveLength(1);
+    expect(port.messages.some(value => value.type === 'Status' && 'check_updates' in value)).toBe(false);
+    expect(client.snapshot.state).toBe('ready');
+    // Neither a late timed-out answer nor its queued manual check may change the state.
+    answer(port, { unlocked: false, epoch: 99, releases: fresh });
+    expect(client.snapshot).toMatchObject({ state: 'ready', epoch: 1 });
+    expect(client.releases?.failed).toBe(true);
+    port.heldStatus = undefined;
+    await client.refreshStatus(true);
+    expect(client.releases?.failed).toBeUndefined();
+    expect(port.messages.at(-1)).toMatchObject({ type: 'Status', check_updates: true });
+  });
+  it('includes queue time in the timeout of a manual check sent after a passive read', async () => {
+    const { client, ports } = setup(); await client.pair('Test');
+    const port = ports.at(-1)!; port.heldStatus = [];
+    const passive = client.refreshStatus();
+    await vi.advanceTimersByTimeAsync(1000);
+    let finished = false;
+    const manual = expect(client.refreshStatus(true).finally(() => { finished = true; }))
+      .rejects.toMatchObject({ code: 'Timeout' });
+    await vi.advanceTimersByTimeAsync(8000);
+    answer(port, { releases: fresh }); await passive; await settle();
+    expect(port.heldStatus).toHaveLength(1);
+    expect(port.heldStatus[0]).toMatchObject({ type: 'Status', check_updates: true });
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(finished).toBe(false);
+    await vi.advanceTimersByTimeAsync(1); await manual;
+    expect(finished).toBe(true);
+  });
   it('sends a manual check only after an earlier passive Status was answered', async () => {
     const { client, ports } = setup(); await client.pair('Test');
     const port = ports.at(-1)!; port.heldStatus = [];
