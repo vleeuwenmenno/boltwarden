@@ -308,12 +308,14 @@ fn parse_timestamp(text: &str) -> Option<u64> {
     };
     let (year, month, day) = (field(0..4)?, field(5..7)?, field(8..10)?);
     let (hour, minute, second) = (field(11..13)?, field(14..16)?, field(17..19)?);
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || hour > 23
-        || minute > 59
-        || second > 60
-    {
+    let days_in_month = match month {
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        _ => return None,
+    };
+    if !(1..=days_in_month).contains(&day) || hour > 23 || minute > 59 || second > 60 {
         return None;
     }
     let days = crate::health::days_from_civil(year, month, day);
@@ -1824,6 +1826,15 @@ mod tests {
     #[test]
     fn parses_github_timestamps_and_formats_days() {
         assert_eq!(parse_timestamp("2026-09-01T10:00:00Z"), Some(1_788_256_800));
+        assert!(parse_timestamp("2024-02-29T00:00:00Z").is_some());
+        for invalid in [
+            "2026-02-31T00:00:00Z",
+            "2023-02-29T00:00:00Z",
+            "2100-02-29T00:00:00Z",
+            "2026-04-31T00:00:00Z",
+        ] {
+            assert_eq!(parse_timestamp(invalid), None, "{invalid}");
+        }
         for invalid in [
             "2026-09-01",
             "2026-09-01T10:00:00",
