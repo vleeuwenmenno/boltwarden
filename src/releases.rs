@@ -439,6 +439,11 @@ pub struct ReleaseSnapshot {
     pub complete: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ReleaseError>,
+    /// Seconds until a manual check (desktop Check now or the browser's
+    /// `check_updates`) is accepted again, after the one-minute limit or a GitHub rate
+    /// limit. Absent when a check can be requested now or one is already running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_seconds: Option<u64>,
     pub desktop: DesktopReleases,
     /// Newest published extension release. The extension compares its own version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -455,6 +460,7 @@ impl ReleaseSnapshot {
             checked_at: None,
             complete: false,
             error: None,
+            retry_after_seconds: None,
             desktop: DesktopReleases {
                 installed: installed.text.clone(),
                 update: if installed.development {
@@ -726,7 +732,10 @@ impl CacheFile {
         }
     }
 
-    /// Revalidates every field; a cache from the future is treated as checked now.
+    /// Revalidates every field. A check time in the future cannot be trusted: keep the
+    /// releases but date the check past the stale limit, so a check is due right away and
+    /// the old data never proves "up to date". Clamping to now instead would restart the
+    /// one-day wait on every daemon start until the clock reached the bogus date.
     fn into_feed(self, now: u64) -> Option<Feed> {
         if self.schema != CACHE_SCHEMA || self.checked_at < MIN_TIMESTAMP {
             return None;
@@ -762,7 +771,11 @@ impl CacheFile {
             return None;
         }
         Some(Feed {
-            checked_at: self.checked_at.min(now),
+            checked_at: if self.checked_at > now {
+                now.saturating_sub(STALE_AFTER_SECS + 1)
+            } else {
+                self.checked_at
+            },
             complete: self.complete,
             stable,
             preview,
@@ -888,16 +901,27 @@ impl State {
                 .is_some_and(|at| mono.duration_since(at) >= CHECK_INTERVAL)
     }
 
+    /// How long until a manual check is accepted; `None` when it is accepted now or one is
+    /// already queued or running.
+    fn manual_wait(&self, mono: Instant) -> Option<Duration> {
+        if self.in_flight || self.manual_pending {
+            return None;
+        }
+        let until = |at: Instant| at.saturating_duration_since(mono);
+        let wait = self
+            .last_attempt
+            .map(|at| until(at + MANUAL_INTERVAL))
+            .unwrap_or_default()
+            .max(self.rate_limited_until.map(until).unwrap_or_default());
+        (!wait.is_zero()).then_some(wait)
+    }
+
     /// Queues a user-requested check. Returns false when one ran too recently.
     fn request_manual(&mut self, mono: Instant) -> bool {
         if self.in_flight || self.manual_pending {
             return true;
         }
-        if self.rate_limited(mono)
-            || self
-                .last_attempt
-                .is_some_and(|at| mono.duration_since(at) < MANUAL_INTERVAL)
-        {
+        if self.manual_wait(mono).is_some() {
             return false;
         }
         self.manual_pending = true;
@@ -944,7 +968,7 @@ impl State {
         }
     }
 
-    fn snapshot(&self, installed: &Installed, wall: u64) -> ReleaseSnapshot {
+    fn snapshot(&self, installed: &Installed, wall: u64, mono: Instant) -> ReleaseSnapshot {
         let feed = self.feed.as_ref();
         let state = if self.in_flight || self.manual_pending {
             CheckState::Checking
@@ -959,13 +983,24 @@ impl State {
                 Some(_) => CheckState::Fresh,
             }
         };
-        let (update, offer) = desktop_offer(installed, feed);
+        let (mut update, offer) = desktop_offer(installed, feed);
+        // A failed or outdated check can still prove a known newer release, but not that
+        // nothing newer exists.
+        if update == DesktopUpdate::UpToDate
+            && matches!(state, CheckState::Error | CheckState::Stale)
+        {
+            update = DesktopUpdate::Unknown;
+        }
         ReleaseSnapshot {
             state,
             auto_check: self.auto_check,
             checked_at: feed.map(|feed| feed.checked_at),
             complete: feed.is_some_and(|feed| feed.complete),
             error: self.error,
+            // Round up so a client never retries a moment too early.
+            retry_after_seconds: self
+                .manual_wait(mono)
+                .map(|wait| wait.as_secs() + u64::from(wait.subsec_nanos() > 0)),
             desktop: DesktopReleases {
                 installed: installed.text.clone(),
                 update,
@@ -1020,6 +1055,32 @@ impl ReleaseService {
         service
     }
 
+    /// A service without a worker, for tests elsewhere in the crate. `checked_today`
+    /// pretends a successful check just ran, so no automatic check is due.
+    #[cfg(test)]
+    pub(crate) fn for_tests(auto: bool, checked_today: bool) -> Self {
+        let dir =
+            crate::test_temp_dir().join(format!("boltwarden-releases-{}", uuid::Uuid::new_v4()));
+        let paths = Paths {
+            cache: Some(dir.join(CACHE_FILE)),
+            dismissal: Some(dir.join(DISMISSAL_FILE)),
+        };
+        let service = Self::with_paths(paths, Installed::parse("1.0.0"), auto);
+        if checked_today && let Some(shared) = &service.shared {
+            let mut state = shared.state.lock().unwrap();
+            state.feed = Some(Feed::empty(unix_now()));
+            state.last_success = Some(Instant::now());
+        }
+        service
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_queued_check(&self) -> bool {
+        self.shared
+            .as_ref()
+            .is_some_and(|shared| shared.state.lock().unwrap().manual_pending)
+    }
+
     fn with_paths(paths: Paths, installed: Installed, auto: bool) -> Self {
         let now = unix_now();
         let state = State::new(
@@ -1044,7 +1105,7 @@ impl ReleaseService {
             return ReleaseSnapshot::unsupported();
         };
         match shared.state.lock() {
-            Ok(state) => state.snapshot(&shared.installed, unix_now()),
+            Ok(state) => state.snapshot(&shared.installed, unix_now(), Instant::now()),
             Err(_) => ReleaseSnapshot::unsupported(),
         }
     }
@@ -1059,13 +1120,6 @@ impl ReleaseService {
             shared.wake.notify_all();
         }
         self.snapshot()
-    }
-
-    /// Asks the worker to run an automatic check if one is due.
-    pub fn check_if_due(&self) {
-        if let Some(shared) = &self.shared {
-            shared.wake.notify_all();
-        }
     }
 
     pub fn set_auto_check(&self, enabled: bool) {
@@ -1560,11 +1614,23 @@ mod tests {
             write(bad);
             assert!(load_feed(Some(&cache), NOW).is_none(), "{field}");
         }
-        // A cache written by a clock that ran ahead counts as checked now.
+        // A cache written by a clock that ran ahead keeps its releases but is stale and
+        // due, on every restart, not just a day after the first one.
         let mut future = good.clone();
         future["checked_at"] = serde_json::json!(NOW + 10 * 86_400);
         write(future);
-        assert_eq!(load_feed(Some(&cache), NOW).unwrap().checked_at, NOW);
+        for day in 0..3 {
+            let now = NOW + day * 86_400;
+            let feed = load_feed(Some(&cache), now).unwrap();
+            assert!(feed.stable.is_some());
+            assert!(now - feed.checked_at > STALE_AFTER_SECS);
+            let started = Instant::now();
+            let state = State::new(Some(feed), None, true, started);
+            assert!(state.auto_due(now, started + STARTUP_DELAY), "day {day}");
+            let snapshot = state.snapshot(&installed("1.0.0"), now, started);
+            assert_eq!(snapshot.state, CheckState::Stale);
+            assert_eq!(snapshot.desktop.update, DesktopUpdate::Unknown);
+        }
 
         std::fs::write(&cache, vec![b' '; MAX_STATE_FILE_BYTES as usize + 1]).unwrap();
         assert!(load_feed(Some(&cache), NOW).is_none());
@@ -1627,7 +1693,7 @@ mod tests {
         assert!(!state.auto_due(NOW, started + CHECK_INTERVAL));
         assert!(state.request_manual(started));
         assert_eq!(
-            state.snapshot(&installed("1.0.0"), NOW).state,
+            state.snapshot(&installed("1.0.0"), NOW, started).state,
             CheckState::Checking
         );
         assert!(
@@ -1635,8 +1701,65 @@ mod tests {
             "manual checks skip the startup delay"
         );
         state.finish(Ok(Feed::empty(NOW)), started);
+        let current = installed("1.0.0");
+        let retry = |state: &State, after: u64| {
+            state
+                .snapshot(&current, NOW, started + Duration::from_millis(after))
+                .retry_after_seconds
+        };
+        assert_eq!(retry(&state, 0), Some(60));
+        assert_eq!(retry(&state, 58_500), Some(2), "rounds up");
         assert!(!state.request_manual(started + Duration::from_secs(59)));
+        assert_eq!(retry(&state, 60_000), None);
         assert!(state.request_manual(started + MANUAL_INTERVAL));
+        assert_eq!(retry(&state, 60_000), None, "queued checks need no retry");
+
+        // A rate limit outlasts the one-minute limit and is reported as such.
+        let mono = started + MANUAL_INTERVAL;
+        assert!(state.begin(NOW, mono));
+        state.finish(
+            Err(FetchError::RateLimited(Some(Duration::from_secs(1_800)))),
+            mono,
+        );
+        assert_eq!(retry(&state, 60_000), Some(1_800));
+        assert!(!state.request_manual(mono + Duration::from_secs(1_799)));
+        assert!(state.request_manual(mono + Duration::from_secs(1_800)));
+    }
+
+    #[test]
+    fn failed_or_stale_checks_never_claim_up_to_date() {
+        let started = Instant::now();
+        let current = installed("1.0.0");
+        let mut state = State::new(None, None, true, started);
+        let mono = started + STARTUP_DELAY;
+        assert!(state.begin(NOW, mono));
+        state.finish(Ok(feed_of(&[published("v1.0.0")])), mono);
+        let snapshot = state.snapshot(&current, NOW, mono);
+        assert_eq!(snapshot.desktop.update, DesktopUpdate::UpToDate);
+
+        state.manual_pending = true;
+        let later = mono + MANUAL_INTERVAL;
+        assert!(state.begin(NOW, later));
+        state.finish(Err(FetchError::Network), later);
+        let failed = state.snapshot(&current, NOW, later);
+        assert_eq!(failed.state, CheckState::Error);
+        assert_eq!(failed.desktop.update, DesktopUpdate::Unknown);
+        assert!(failed.desktop.stable.is_some(), "known releases are kept");
+
+        let mut stale = State::new(Some(feed_of(&[published("v1.0.0")])), None, true, started);
+        assert_eq!(
+            stale
+                .snapshot(&current, NOW + STALE_AFTER_SECS + 1, started)
+                .desktop
+                .update,
+            DesktopUpdate::Unknown
+        );
+        // A newer release that is already known is still offered after a failure.
+        stale.error = Some(ReleaseError::Network);
+        let older = installed("0.9.0");
+        let snapshot = stale.snapshot(&older, NOW + STALE_AFTER_SECS + 1, started);
+        assert_eq!(snapshot.desktop.update, DesktopUpdate::Available);
+        assert_eq!(snapshot.notice().unwrap().version, "1.0.0");
     }
 
     #[test]
@@ -1644,22 +1767,29 @@ mod tests {
         let started = Instant::now();
         let mut state = State::new(None, None, true, started);
         let current = installed("1.0.0");
-        assert_eq!(state.snapshot(&current, NOW).state, CheckState::Empty);
-        state.feed = Some(feed_of(&[published("v1.0.0")]));
-        assert_eq!(state.snapshot(&current, NOW).state, CheckState::Fresh);
         assert_eq!(
-            state.snapshot(&current, NOW).desktop.update,
+            state.snapshot(&current, NOW, started).state,
+            CheckState::Empty
+        );
+        state.feed = Some(feed_of(&[published("v1.0.0")]));
+        assert_eq!(
+            state.snapshot(&current, NOW, started).state,
+            CheckState::Fresh
+        );
+        assert_eq!(
+            state.snapshot(&current, NOW, started).desktop.update,
             DesktopUpdate::UpToDate
         );
         assert_eq!(
-            state.snapshot(&current, NOW + STALE_AFTER_SECS + 1).state,
+            state
+                .snapshot(&current, NOW + STALE_AFTER_SECS + 1, started)
+                .state,
             CheckState::Stale
         );
         let unsupported = ReleaseService::unsupported();
         assert_eq!(unsupported.snapshot().state, CheckState::Unsupported);
         assert!(unsupported.dismiss("1.0.0").is_err());
         unsupported.check_now();
-        unsupported.check_if_due();
     }
 
     #[test]

@@ -31,6 +31,8 @@ pub struct ReleaseUi {
     reply: Option<mpsc::Receiver<(bool, Result<ReleaseSnapshot, String>)>>,
     queued: Option<Request>,
     polled_at: Option<Instant>,
+    /// When `snapshot` arrived, to count down its `retry_after_seconds`.
+    received_at: Option<Instant>,
     error: Option<String>,
 }
 
@@ -45,6 +47,7 @@ impl ReleaseUi {
                     match result {
                         Ok(snapshot) => {
                             self.snapshot = Some(snapshot);
+                            self.received_at = Some(Instant::now());
                             self.error = None;
                         }
                         Err(error) if requested => self.error = Some(error),
@@ -55,11 +58,15 @@ impl ReleaseUi {
                 Err(mpsc::TryRecvError::Disconnected) => self.reply = None,
             }
         }
-        let interval = if self.checking() {
+        let mut interval = if self.checking() {
             CHECKING_POLL_INTERVAL
         } else {
             POLL_INTERVAL
         };
+        // Refresh as soon as Check now becomes available again.
+        if let Some(wait) = self.retry_wait() {
+            interval = interval.min(wait + Duration::from_secs(1));
+        }
         let request = match self.queued.take() {
             Some(request) => request,
             None => match self.polled_at {
@@ -91,6 +98,14 @@ impl ReleaseUi {
             .is_some_and(|snapshot| snapshot.state == CheckState::Checking)
     }
 
+    /// Time left before the daemon accepts another manual check.
+    fn retry_wait(&self) -> Option<Duration> {
+        let seconds = self.snapshot.as_ref()?.retry_after_seconds?;
+        Duration::from_secs(seconds)
+            .checked_sub(self.received_at?.elapsed())
+            .filter(|wait| !wait.is_zero())
+    }
+
     fn queue(&mut self, request: Request) {
         self.queued = Some(request);
     }
@@ -119,7 +134,8 @@ impl ReleaseUi {
                     .inner_margin(egui::Margin::symmetric(12, 6)),
             )
             .show(root, |ui| {
-                ui.horizontal(|ui| {
+                // Wraps in the narrow quick access window instead of clipping.
+                ui.horizontal_wrapped(|ui| {
                     ui.label(
                         RichText::new(format!("Boltwarden {} is available", offer.version))
                             .color(t.text_strong),
@@ -129,25 +145,23 @@ impl ReleaseUi {
                             .color(t.text_muted)
                             .size(t.small()),
                     );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .button("Dismiss")
-                            .on_hover_text("Hide this notice until a newer release is published")
-                            .clicked()
-                        {
-                            self.queue(Request::Dismiss(offer.version.clone()));
-                        }
-                        if ui
-                            .button("Release notes")
-                            .on_hover_text("Open the release page on GitHub")
-                            .clicked()
-                        {
-                            self.error = open_release(&offer).err();
-                        }
-                        if let Some(error) = &self.error {
-                            ui.colored_label(t.danger, error);
-                        }
-                    });
+                    if ui
+                        .button("Release notes")
+                        .on_hover_text("Open the release page on GitHub")
+                        .clicked()
+                    {
+                        self.error = open_release(&offer).err();
+                    }
+                    if ui
+                        .button("Dismiss")
+                        .on_hover_text("Hide this notice until a newer release is published")
+                        .clicked()
+                    {
+                        self.queue(Request::Dismiss(offer.version.clone()));
+                    }
+                    if let Some(error) = &self.error {
+                        ui.colored_label(t.danger, error);
+                    }
                 });
             });
     }
@@ -176,11 +190,22 @@ impl ReleaseUi {
             ui.label(RichText::new(line).color(t.text_muted).size(t.small()));
         }
         let supported = snapshot.state != CheckState::Unsupported;
+        let wait = self.retry_wait();
         ui.horizontal(|ui| {
             let checking = snapshot.state == CheckState::Checking;
-            if widgets::button(ui, "Check now", false, supported && !checking)
-                .on_hover_text("Ask GitHub for the latest public releases")
-                .clicked()
+            if widgets::button(
+                ui,
+                "Check now",
+                false,
+                supported && !checking && wait.is_none(),
+            )
+            .on_hover_text("Ask GitHub for the latest public releases")
+            .on_disabled_hover_text(if wait.is_some() {
+                "Checks are limited to one a minute, or longer when GitHub asks"
+            } else {
+                "Not available right now"
+            })
+            .clicked()
             {
                 self.queue(Request::Check);
             }
@@ -192,6 +217,22 @@ impl ReleaseUi {
                 self.error = open_release(offer).err();
             }
         });
+        if let Some(wait) = wait {
+            let reason = if snapshot.error == Some(crate::releases::ReleaseError::RateLimited) {
+                "GitHub asked to wait. "
+            } else {
+                ""
+            };
+            ui.label(
+                RichText::new(format!(
+                    "{reason}You can check again in {}.",
+                    format_wait(wait)
+                ))
+                .color(t.text_muted)
+                .size(t.small()),
+            );
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+        }
         if let Some(error) = &self.error {
             widgets::error_line(ui, error);
         }
@@ -250,12 +291,31 @@ fn status_text(snapshot: &ReleaseSnapshot, auto_check: bool) -> String {
             format!("Boltwarden {} is available.", offer.version)
         }
         (DesktopUpdate::UpToDate, _) => "Boltwarden is up to date.".into(),
+        _ if snapshot.state == CheckState::Error => {
+            "Could not check for updates. Release information may be outdated.".into()
+        }
+        _ if snapshot.state == CheckState::Stale => {
+            "Release information is outdated. Use Check now to refresh it.".into()
+        }
         _ if snapshot.checked_at.is_none() && !auto_check => {
             "Automatic checks are off. Use Check now to look for updates.".into()
         }
         _ if snapshot.checked_at.is_none() => "Not checked yet.".into(),
         _ => "Could not confirm that this is the newest release.".into(),
     }
+}
+
+/// "45 seconds", "3 minutes", "2 hours", rounded up.
+fn format_wait(wait: Duration) -> String {
+    let seconds = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
+    let (count, unit) = if seconds < 60 {
+        (seconds, "second")
+    } else if seconds < 2 * 60 * 60 {
+        (seconds.div_ceil(60), "minute")
+    } else {
+        (seconds.div_ceil(60 * 60), "hour")
+    };
+    format!("{count} {unit}{}", if count == 1 { "" } else { "s" })
 }
 
 fn detail_lines(snapshot: &ReleaseSnapshot) -> Vec<String> {
@@ -326,6 +386,12 @@ mod tests {
         incomplete.desktop.update = DesktopUpdate::Unknown;
         assert!(status_text(&incomplete, true).starts_with("Could not confirm"));
         assert!(status_text(&ReleaseSnapshot::unsupported(), true).contains("background service"));
+        let mut failed = incomplete.clone();
+        failed.state = CheckState::Error;
+        assert!(status_text(&failed, true).starts_with("Could not check for updates"));
+        let mut stale = incomplete.clone();
+        stale.state = CheckState::Stale;
+        assert!(status_text(&stale, true).starts_with("Release information is outdated"));
     }
 
     #[test]
@@ -452,5 +518,111 @@ mod tests {
         assert!(
             matches!(releases.queued, Some(Request::Dismiss(ref version)) if version == "1.0.0")
         );
+    }
+
+    #[test]
+    fn formats_retry_waits_rounding_up() {
+        assert_eq!(format_wait(Duration::from_millis(500)), "1 second");
+        assert_eq!(format_wait(Duration::from_secs(59)), "59 seconds");
+        assert_eq!(format_wait(Duration::from_secs(61)), "2 minutes");
+        assert_eq!(format_wait(Duration::from_secs(1_800)), "30 minutes");
+        assert_eq!(format_wait(Duration::from_secs(6 * 3_600)), "6 hours");
+    }
+
+    fn render_texts(
+        ctx: &egui::Context,
+        width: f32,
+        draw: &mut dyn FnMut(&mut Ui),
+    ) -> Vec<(String, egui::Rect)> {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 460.),
+                )),
+                ..Default::default()
+            },
+            |ui| draw(ui),
+        );
+        output.textures_delta.clear();
+        output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) => Some((
+                    text.galley.job.text.clone(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn check_now_is_disabled_with_a_readable_wait() {
+        let ctx = egui::Context::default();
+        let mut cooling = snapshot();
+        cooling.retry_after_seconds = Some(1_800);
+        cooling.error = Some(crate::releases::ReleaseError::RateLimited);
+        cooling.state = CheckState::Error;
+        let mut releases = ReleaseUi {
+            snapshot: Some(cooling),
+            received_at: Some(Instant::now()),
+            polled_at: Some(Instant::now()),
+            ..Default::default()
+        };
+        let mut draw = |ui: &mut Ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                releases.draw_about(ui, true);
+            });
+        };
+        render_texts(&ctx, 680., &mut draw);
+        let texts = render_texts(&ctx, 680., &mut draw);
+        assert!(
+            texts
+                .iter()
+                .any(|(text, _)| text == "GitHub asked to wait. You can check again in 30 minutes."),
+            "{texts:?}"
+        );
+        drop(draw);
+        assert!(releases.retry_wait().is_some());
+        releases.received_at = Some(Instant::now() - Duration::from_secs(1_800));
+        assert!(
+            releases.retry_wait().is_none(),
+            "the wait counts down locally"
+        );
+    }
+
+    #[test]
+    fn notice_wraps_long_versions_in_the_quick_access_width() {
+        let ctx = egui::Context::default();
+        let mut long = snapshot();
+        let offer = long.desktop.offer.as_mut().unwrap();
+        offer.version = "100.200.300-rc.400".into();
+        long.desktop.installed = "100.200.300-rc.399+1234.gabcdef1.dirty".into();
+        let mut releases = ReleaseUi {
+            snapshot: Some(long),
+            polled_at: Some(Instant::now()),
+            ..Default::default()
+        };
+        let width = crate::ui::widgets::WINDOW_SIZE.x;
+        let mut draw = |ui: &mut Ui| {
+            releases.draw_notice(ui, "release-notice");
+            egui::CentralPanel::default().show(ui, |_| {});
+        };
+        render_texts(&ctx, width, &mut draw);
+        let texts = render_texts(&ctx, width, &mut draw);
+        for label in [
+            "Boltwarden 100.200.300-rc.400 is available",
+            "You have 100.200.300-rc.399+1234.gabcdef1.dirty",
+            "Release notes",
+            "Dismiss",
+        ] {
+            let (_, rect) = texts
+                .iter()
+                .find(|(text, _)| text == label)
+                .unwrap_or_else(|| panic!("missing {label}"));
+            assert!(rect.max.x <= width + 0.5, "{label} clipped at {rect:?}");
+        }
     }
 }

@@ -114,6 +114,10 @@ struct Harness {
 
 impl Harness {
     fn paired() -> Self {
+        Self::paired_with(crate::releases::ReleaseService::unsupported())
+    }
+
+    fn paired_with(releases: crate::releases::ReleaseService) -> Self {
         let (notify, notices) = mpsc::channel();
         let (ssh_notify, _) = mpsc::channel();
         let (unlock_notify, _) = mpsc::channel();
@@ -140,7 +144,6 @@ impl Harness {
             ssh_approvals: ssh_approvals.clone(),
             ssh_key_store: SshKeyStore::new(unlock_notify.clone()),
         }));
-        let releases = crate::releases::ReleaseService::unsupported();
         let backend = Arc::new(DaemonBrowserBackend {
             vault: Arc::downgrade(&vault),
             unlock: unlock_notify,
@@ -1608,6 +1611,53 @@ fn protected_card_fill_requires_fresh_password_and_lock_cancels_approval() {
     crate::lock_vault_state(&mut h.vault.lock().unwrap(), "card test");
     h.wait_for_approval_end();
     h.assert_no_credentials();
+}
+
+#[test]
+fn browser_status_check_updates_is_a_manual_check_even_when_not_due() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    // Automatic checks off, and on with today's check already done: neither is "due",
+    // yet the extension's Check now must still queue one.
+    for auto in [false, true] {
+        let releases = crate::releases::ReleaseService::for_tests(auto, true);
+        let mut h = Harness::paired_with(releases.clone());
+        h.send(
+            "refresh",
+            BrowserRequest::Status {
+                check_updates: false,
+            },
+        );
+        let refresh = h.read("refresh");
+        assert_eq!(refresh["releases"]["state"], "fresh");
+        assert!(!releases.has_queued_check(), "status refreshes never check");
+
+        h.send(
+            "check",
+            BrowserRequest::Status {
+                check_updates: true,
+            },
+        );
+        let check = h.read("check");
+        assert_eq!(check["releases"]["state"], "checking", "auto {auto}");
+        assert!(check["releases"].get("retry_after_seconds").is_none());
+        assert!(releases.has_queued_check());
+    }
+}
+
+#[test]
+fn browser_status_check_updates_requires_enabled_integration() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let releases = crate::releases::ReleaseService::for_tests(false, true);
+    let mut h = Harness::paired_with(releases.clone());
+    h.vault.lock().unwrap().browser_enabled = false;
+    h.send(
+        "check",
+        BrowserRequest::Status {
+            check_updates: true,
+        },
+    );
+    assert_eq!(h.read("check")["code"], "Disabled");
+    assert!(!releases.has_queued_check());
 }
 
 #[test]

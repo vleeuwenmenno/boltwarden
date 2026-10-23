@@ -95,8 +95,10 @@ pub enum BrowserRequest {
     },
     /// `{"type":"Status"}` from older extensions still decodes; older hosts ignore the flag.
     Status {
-        /// Let the desktop run its automatic release check if one is due. It never forces
-        /// a check and never waits for one.
+        /// The extension's explicit "Check now": queue a release check under the
+        /// desktop's global throttle (one at a time, at most once a minute, GitHub rate
+        /// limits). Never set it on routine status refreshes; the reply does not wait for
+        /// the check, whose result appears in a later Status.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         check_updates: bool,
     },

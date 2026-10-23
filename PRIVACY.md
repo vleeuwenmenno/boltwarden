@@ -75,8 +75,9 @@ public release list of the Boltwarden repository from the GitHub API
 GitHub receives normal connection metadata such as your IP address and a fixed
 user agent. Only release versions and publish dates are kept, in a private cache
 file next to the release notice you dismissed. Turn the setting off in About to
-stop automatic checks. The browser extension does not contact GitHub; it only
-receives this cached release information from the paired desktop app.
+stop automatic checks. The browser extension does not contact GitHub; it receives
+this cached release information from the paired desktop app, and its check request
+asks the desktop app to run the same check.
 
 ## Controls and removal
 

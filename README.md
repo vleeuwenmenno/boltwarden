@@ -341,8 +341,11 @@ Nothing is downloaded or installed automatically.
 The **Updates** section of About (the quick access `version` command, or **Settings →
 About** in the full window) shows the installed and latest versions, the
 latest browser extension release, when the last check ran and whether it failed. Use
-**Check now** to check immediately (at most once a minute, also when automatic checks
-are off), and **Check for updates automatically** to turn the daily check on or off.
+**Check now** to check immediately, also when automatic checks are off. It is limited
+to one check a minute, or longer when GitHub asks to wait; until then the button is
+disabled and About shows when you can check again. Use **Check for updates
+automatically** to turn the daily check on or off. A failed or outdated check never
+reports "up to date"; a newer release it already knows about is still announced.
 Checks run in the daemon against the public GitHub releases API of this repository
 and send no vault, account or browsing data; see [PRIVACY.md](PRIVACY.md). Failed
 checks retry after ten minutes, or later if GitHub asks. Results are cached in the
