@@ -1,6 +1,7 @@
 {
   "host_name": "nl.mvl.boltwarden",
   "firefox_id": "boltwarden@mvl.sh",
-  "chrome_id": "lalifhibgahkeifiadipppebhbigoppp",
-  "chrome_public_key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsSod9dgcAtKHwHvJidbfBxCYOYpaHxjyegqS+frU+ALHr9Lj1vOEUho1rhL3CIRFfp/QsTKHAl709uUTiAPNgEUxhCpVmQRCbR59moFpdIbulhmmhIj7oVDBeswwWPvqAmD6YFo5ybb+8+Eju3XY2JsGITwiP67fwpbIDKnhvFwgki6Fe0KRbGZXaE8lFSFwaPyA1jbJ2D+HNpFA57YTKwB/NKQelIMfPm+hvCdX/clGDzM7F8qHhwPEG9s3OJ+c+f2MzsZk/2dDjsw/dJ2GNJ4Olb01r9kVvPhD+I+RBcW/nBpHQ52xeqMR+xp90CqBAnGnSR4SbAatWxbtrv92WwIDAQAB"
+  "chrome_id": "pomlcbogekpcooppkmjhdjalddakgmlo",
+  "chrome_public_key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqnRTSl+eOCuJHWxkvMof++78hbqvGY3e7g4hYYgUbCp2EjATmNiSplKXKTsJMtzEjepyBwXsvw6gqp6B2C+61Op344mOeL7z0Chk6ZaNpH34TZ8onLPihi5iYBKNOpuSLGtH6u5kcCrZEm3tBG4UL5trNmOu3eYZ90BZ0Zf2dPXrSJcpfRU4F5GQJIUMKqCz7Uyat7JHwvJd6WDCj0bT7WVhu/z11Z1gPJuaEM8LHfJF9LOPwVpZgky0le/jf7LTJ0T+iF0Ja7/S/m6QpCavtIr7bXYmkMp4Zny1QJJa0PNFEXqpQnrA7RK6HnXkvjMfM3PhS5sfINloPEocxKhgnwIDAQAB",
+  "retired_chrome_ids": ["lalifhibgahkeifiadipppebhbigoppp"]
 }

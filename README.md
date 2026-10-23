@@ -953,9 +953,9 @@ make extension-zip
 `extension-zip` creates Chrome, Firefox, and Firefox review source ZIPs in
 `extension/.output`. `npm --prefix extension run dev` and
 `npm --prefix extension run dev:firefox` start WXT's browser development modes.
-The fixed development identities are `lalifhibgahkeifiadipppebhbigoppp` for Chrome
-and `boltwarden@mvl.sh` for Firefox; production store identities must be coordinated
-with the native host allowlist before release.
+The fixed identities are `pomlcbogekpcooppkmjhdjalddakgmlo` for Chrome (the Chrome Web
+Store ID; unpacked builds use the same key) and `boltwarden@mvl.sh` for Firefox. Builds
+made before this change used `lalifhibgahkeifiadipppebhbigoppp`: rebuild and re-pair them.
 
 Try the popup or the vault window with made-up data and no vault:
 
