@@ -501,12 +501,7 @@ fn sidebar_row(
     let t = theme();
     let (rect, response) = widgets::row(ui, selected, SIDEBAR_ROW_HEIGHT);
     response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::SelectableLabel,
-            ui.is_enabled(),
-            selected,
-            label,
-        )
+        egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label)
     });
     let painter = ui.painter_at(rect);
     let mut x = rect.left() + 10.0 + depth as f32 * FOLDER_INDENT;
@@ -813,7 +808,7 @@ pub fn draw_item_list(
                 });
                 response.widget_info(|| {
                     egui::WidgetInfo::selected(
-                        egui::WidgetType::SelectableLabel,
+                        egui::Role::Button,
                         ui.is_enabled(),
                         is_selected,
                         &item.name,
