@@ -1,9 +1,10 @@
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, path::PathBuf, process::Command};
 
 fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         windows_resources();
     }
+    println!("cargo:rustc-env=BOLTWARDEN_VERSION={}", build_version());
     println!("cargo:rerun-if-changed=THIRD_PARTY_NOTICES.txt");
     let notices = match fs::read_to_string("THIRD_PARTY_NOTICES.txt") {
         Ok(text) => text,
@@ -16,6 +17,58 @@ fn main() {
         notices,
     )
     .expect("write embedded third-party notices");
+}
+
+/// Version shown by the app. Tagged release builds (CI stamps the tag into
+/// Cargo.toml) keep the plain package version; any other build from a git
+/// checkout appends the commits since the latest release tag, the commit, and
+/// `.dirty` for uncommitted changes, e.g. `1.0.0-rc.4+3.gabc1234.dirty`.
+/// Builds without git metadata (Docker, Nix) keep the package version.
+fn build_version() -> String {
+    let package = env::var("CARGO_PKG_VERSION").unwrap();
+    for path in ["src", "Cargo.toml", "Cargo.lock", "build.rs"] {
+        println!("cargo:rerun-if-changed={path}");
+    }
+    for name in ["HEAD", "index", "refs", "packed-refs"] {
+        if let Some(path) = git(&["rev-parse", "--git-path", name]) {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    }
+    let Some(describe) = git(&[
+        "describe", "--tags", "--long", "--dirty", "--match", "v[0-9]*",
+    ]) else {
+        return git(&["rev-parse", "--short", "HEAD"]).map_or(package.clone(), |commit| {
+            format!("{package}+g{commit}.untagged")
+        });
+    };
+    let (describe, dirty) = match describe.strip_suffix("-dirty") {
+        Some(clean) => (clean, true),
+        None => (describe.as_str(), false),
+    };
+    let mut parts = describe.rsplitn(3, '-');
+    let (Some(commit), Some(ahead), Some(tag)) = (parts.next(), parts.next(), parts.next()) else {
+        return package;
+    };
+    let tag = tag.strip_prefix('v').unwrap_or(tag);
+    if ahead == "0" && tag == package {
+        // A release build at its tag; set-version.py's stamp makes the tree dirty.
+        return package;
+    }
+    let mut version = format!("{tag}+{ahead}.{commit}");
+    if dirty {
+        version.push_str(".dirty");
+    }
+    version
+}
+
+fn git(args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(env::var_os("CARGO_MANIFEST_DIR")?)
+        .output()
+        .ok()?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    (output.status.success() && !text.trim().is_empty()).then(|| text.trim().to_owned())
 }
 
 fn windows_resources() {
