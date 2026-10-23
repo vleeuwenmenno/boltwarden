@@ -48,14 +48,25 @@ struct Field<'a> {
     label: &'a str,
     value: std::borrow::Cow<'a, str>,
     kind: FieldKind,
+    /// Small line under the label, such as when a previous password was last used.
+    caption: Option<String>,
+    /// Heading drawn above the row, for the first row of a group.
+    section: Option<&'static str>,
 }
 
 /// The copyable fields of an item, in display order. Values borrow from the detail so
 /// secrets are not copied into new strings every frame.
 fn fields<'a>(detail: &'a BwItemDetail) -> Vec<Field<'a>> {
     let mut fields = Vec::new();
-    let mut push =
-        |label, value: std::borrow::Cow<'a, str>, kind| fields.push(Field { label, value, kind });
+    let mut push = |label, value: std::borrow::Cow<'a, str>, kind| {
+        fields.push(Field {
+            label,
+            value,
+            kind,
+            caption: None,
+            section: None,
+        })
+    };
     if let Some(username) = &detail.username {
         push("Username", username.as_str().into(), FieldKind::Plain);
     }
@@ -105,6 +116,20 @@ fn fields<'a>(detail: &'a BwItemDetail) -> Vec<Field<'a>> {
     }
     if let Some(notes) = &detail.notes {
         push("Notes", notes.as_str().into(), FieldKind::Multiline);
+    }
+    // Copy indexes follow `BwItemDetail::copy_value`, which lists history last.
+    for (idx, entry) in detail.password_history.iter().enumerate() {
+        fields.push(Field {
+            label: "Previous password",
+            value: entry.password.as_str().into(),
+            kind: FieldKind::Secret,
+            caption: entry
+                .last_used
+                .as_deref()
+                .and_then(widgets::format_date)
+                .map(|date| format!("Last used {date}")),
+            section: (idx == 0).then_some("Password history"),
+        });
     }
     fields
 }
@@ -408,6 +433,14 @@ pub fn draw_summary(
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     for (idx, field) in fields.iter().enumerate() {
+                        if let Some(section) = field.section {
+                            ui.add_space(10.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(14.0);
+                                widgets::field_label(ui, section);
+                            });
+                            ui.add_space(2.0);
+                        }
                         let selected = idx == state.selected_field;
                         let (field_action, rect) = draw_field(
                             ui,
@@ -603,8 +636,9 @@ fn draw_field(
         )
     });
     let painter = ui.painter_at(rect);
+    let label_top = if field.caption.is_some() { 7.0 } else { 14.0 };
     painter.text(
-        egui::pos2(rect.left() + 14.0, rect.top() + 14.0),
+        egui::pos2(rect.left() + 14.0, rect.top() + label_top),
         egui::Align2::LEFT_TOP,
         field.label,
         t.font(t.small()),
@@ -614,6 +648,24 @@ fn draw_field(
             t.text_muted
         },
     );
+    if let Some(caption) = &field.caption {
+        let mut job = egui::text::LayoutJob::single_section(
+            caption.clone(),
+            egui::TextFormat::simple(t.font(t.small()), t.text_faint),
+        );
+        // Stay inside the label column so the value keeps its place.
+        job.wrap = egui::text::TextWrapping {
+            max_width: LABEL_WIDTH - 8.0,
+            max_rows: 1,
+            break_anywhere: false,
+            overflow_character: Some('…'),
+        };
+        painter.galley(
+            egui::pos2(rect.left() + 14.0, rect.top() + label_top + t.small() + 4.0),
+            painter.layout_job(job),
+            t.text_faint,
+        );
+    }
 
     // Action glyphs on the right: reveal (secrets only) and copy, or open for links.
     let copy_rect = egui::Rect::from_center_size(
@@ -836,6 +888,51 @@ pub enum SummaryAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn password_history_rows_follow_other_fields_concealed() {
+        let mut detail = BwItemDetail {
+            id: "1".into(),
+            name: "Example".into(),
+            username: Some("alice".into()),
+            password: Some("current".into()),
+            uris: Vec::new(),
+            totp: None,
+            notes: Some("note".into()),
+            custom_fields: Vec::new(),
+            folder: None,
+            folder_id: None,
+            favorite: false,
+            passkeys: Vec::new(),
+            item_type: "login".into(),
+            ssh_key: None,
+            state: ItemState::Active,
+            dates: Default::default(),
+            password_history: Vec::new(),
+        };
+        assert!(fields(&detail).iter().all(|field| field.section.is_none()));
+
+        detail.password_history = vec![
+            crate::model::PasswordHistoryEntry {
+                password: "old-1".into(),
+                last_used: Some("2026-05-17T08:12:00.000Z".into()),
+            },
+            crate::model::PasswordHistoryEntry {
+                password: "old-2".into(),
+                last_used: None,
+            },
+        ];
+        let rows = fields(&detail);
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[3].section, Some("Password history"));
+        assert_eq!(rows[3].caption.as_deref(), Some("Last used 17 May 2026"));
+        assert!(rows[4].section.is_none() && rows[4].caption.is_none());
+        assert!(rows[3..].iter().all(|row| row.kind == FieldKind::Secret));
+        // Each row copies the value at its own index.
+        for (idx, row) in rows.iter().enumerate() {
+            assert_eq!(detail.copy_value(idx).unwrap(), row.value);
+        }
+    }
 
     #[test]
     fn groups_totp_digits() {

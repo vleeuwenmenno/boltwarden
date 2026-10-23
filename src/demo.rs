@@ -11,8 +11,8 @@ use crate::bw::TwoFactorProvider;
 use crate::model::{
     BwItem, BwItemDetail, CustomField, DraftField, DraftFieldKind, DraftPasskey, DraftUri, Folder,
     HealthReport, ItemAction, ItemDates, ItemDraft, ItemState, LoginDraft, Passkey,
-    SshAgentClientInfo, SshApprovalKind, SshApprovalRequest, SshApprovalStatus,
-    SshApprovalStatusKind, SshKey, SyncStatus, TotpCode, TypedDraft, TypedKind,
+    PasswordHistoryEntry, SshAgentClientInfo, SshApprovalKind, SshApprovalRequest,
+    SshApprovalStatus, SshApprovalStatusKind, SshKey, SyncStatus, TotpCode, TypedDraft, TypedKind,
 };
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -510,6 +510,7 @@ fn detail(id: &str, name: &str, username: Option<&str>, folder: Option<&str>) ->
         ssh_key: None,
         state: ItemState::Active,
         dates: ItemDates::default(),
+        password_history: Vec::new(),
     }
 }
 
@@ -536,6 +537,16 @@ fn details() -> Vec<BwItemDetail> {
         user_display_name: Some("Alex".into()),
         creation_date: Some("2026-05-17T08:12:00.000Z".into()),
     }];
+    github.password_history = vec![
+        PasswordHistoryEntry {
+            password: "github-Kp4@Wx8&Rn3".into(),
+            last_used: Some("2026-04-02T09:30:00.000Z".into()),
+        },
+        PasswordHistoryEntry {
+            password: "github-Hs6%Jd1*Qe5".into(),
+            last_used: Some("2025-11-20T16:45:00.000Z".into()),
+        },
+    ];
 
     let mut gitlab = detail(
         "gitlab",

@@ -469,6 +469,16 @@ pub struct BwItemDetail {
     pub state: ItemState,
     #[serde(default)]
     pub dates: ItemDates,
+    /// Passwords the login used before, newest first. Bitwarden keeps up to five.
+    #[serde(default)]
+    pub password_history: Vec<PasswordHistoryEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PasswordHistoryEntry {
+    pub password: String,
+    /// When the password was replaced (ISO 8601 UTC), if the server recorded it.
+    pub last_used: Option<String>,
 }
 
 /// A generated TOTP code plus the time step it belongs to, so the UI can show the real
@@ -813,6 +823,12 @@ impl BwItemDetail {
         if let Some(value) = &self.notes {
             values.push(Source::Value(value));
         }
+        // Last, so adding history never shifts the indexes of the fields above.
+        values.extend(
+            self.password_history
+                .iter()
+                .map(|entry| Source::Value(&entry.password)),
+        );
         match values.get(index) {
             Some(Source::Value(value)) => Ok((*value).to_owned()),
             Some(Source::Totp) => {
@@ -845,6 +861,9 @@ impl zeroize::Zeroize for BwItemDetail {
         }
         if let Some(key) = &mut self.ssh_key {
             key.private_key.zeroize();
+        }
+        for entry in &mut self.password_history {
+            entry.password.zeroize();
         }
     }
 }
