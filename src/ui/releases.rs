@@ -1,7 +1,7 @@
 //! Release notices shared by the vault window and quick access. The daemon does the
 //! checking; this only polls its cached snapshot on a worker thread, never per frame.
 
-use crate::backend::AppBackend;
+use crate::backend::{AppBackend, ReleaseRequestError};
 use crate::releases::{CheckState, DesktopUpdate, ReleaseInfo, ReleaseSnapshot};
 use crate::ui::theme::theme;
 use crate::ui::widgets;
@@ -28,7 +28,7 @@ pub enum ReleaseAction {
 pub struct ReleaseUi {
     snapshot: Option<ReleaseSnapshot>,
     /// The reply and whether the user asked for it; failed background polls stay quiet.
-    reply: Option<mpsc::Receiver<(bool, Result<ReleaseSnapshot, String>)>>,
+    reply: Option<mpsc::Receiver<(bool, Result<ReleaseSnapshot, ReleaseRequestError>)>>,
     queued: Option<Request>,
     polled_at: Option<Instant>,
     /// When `snapshot` arrived, to count down its `retry_after_seconds`.
@@ -54,9 +54,17 @@ impl ReleaseUi {
                             self.error = None;
                             self.unreachable = false;
                         }
-                        Err(error) if requested => self.error = Some(error),
-                        // Stay quiet in the notice, but stop trusting the old snapshot.
-                        Err(_) => self.unreachable = true,
+                        Err(error) => {
+                            // Without a valid daemon answer the old snapshot may no longer
+                            // be true, whoever asked. Only requests the user made show
+                            // their error; background polls stay quiet.
+                            if matches!(error, ReleaseRequestError::Unavailable(_)) {
+                                self.unreachable = true;
+                            }
+                            if requested {
+                                self.error = Some(error.to_string());
+                            }
+                        }
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => return,
@@ -457,14 +465,24 @@ mod tests {
         assert!(ui.snapshot.as_ref().unwrap().notice().is_some());
         // A failed background poll keeps the earlier snapshot quietly.
         let (tx, rx) = mpsc::channel();
-        tx.send((false, Err("daemon unavailable".into()))).unwrap();
+        tx.send((
+            false,
+            Err(ReleaseRequestError::Unavailable(
+                "daemon unavailable".into(),
+            )),
+        ))
+        .unwrap();
         ui.reply = Some(rx);
         ui.poll(&ctx, &backend);
         assert!(ui.snapshot.is_some());
         assert_eq!(ui.error, None);
         // A failed user action is reported.
         let (tx, rx) = mpsc::channel();
-        tx.send((true, Err("could not save".into()))).unwrap();
+        tx.send((
+            true,
+            Err(ReleaseRequestError::Rejected("could not save".into())),
+        ))
+        .unwrap();
         ui.reply = Some(rx);
         ui.poll(&ctx, &backend);
         assert!(ui.snapshot.is_some());
@@ -670,23 +688,24 @@ mod tests {
         current.desktop.update = DesktopUpdate::UpToDate;
         current.desktop.offer = None;
         let mut ui = ReleaseUi::default();
-        let mut reply = |ui: &mut ReleaseUi, result: Option<Result<ReleaseSnapshot, String>>| {
-            let (tx, rx) = mpsc::channel();
-            if let Some(result) = result {
-                tx.send((false, result)).unwrap();
-            }
-            drop(tx);
-            ui.reply = Some(rx);
-            ui.polled_at = None;
-            ui.poll(&ctx, &backend);
-            // Discard the follow-up poll the demo backend would answer.
-            ui.reply = None;
-        };
+        let mut reply =
+            |ui: &mut ReleaseUi, result: Option<Result<ReleaseSnapshot, ReleaseRequestError>>| {
+                let (tx, rx) = mpsc::channel();
+                if let Some(result) = result {
+                    tx.send((false, result)).unwrap();
+                }
+                drop(tx);
+                ui.reply = Some(rx);
+                ui.polled_at = None;
+                ui.poll(&ctx, &backend);
+                // Discard the follow-up poll the demo backend would answer.
+                ui.reply = None;
+            };
         reply(&mut ui, Some(Ok(current.clone())));
         assert_eq!(ui.status_line(true).unwrap(), "Boltwarden is up to date.");
         // Polls keep failing, for days: never up to date, never a GitHub error.
         for _ in 0..3 {
-            reply(&mut ui, Some(Err("could not connect to daemon".into())));
+            reply(&mut ui, Some(Err(unavailable())));
             assert_eq!(ui.status_line(true).unwrap(), "Update status unknown.");
             assert_eq!(ui.error, None, "background failures stay out of the notice");
         }
@@ -699,11 +718,78 @@ mod tests {
 
         // A known newer release is still announced while the daemon is unreachable.
         reply(&mut ui, Some(Ok(snapshot())));
-        reply(&mut ui, Some(Err("could not connect to daemon".into())));
+        reply(&mut ui, Some(Err(unavailable())));
         assert!(ui.snapshot.as_ref().unwrap().notice().is_some());
         assert_eq!(
             ui.status_line(true).unwrap(),
             "Boltwarden 1.0.0 is available."
         );
+    }
+
+    fn unavailable() -> ReleaseRequestError {
+        ReleaseRequestError::Unavailable("could not connect to daemon".into())
+    }
+
+    /// Delivers the reply to a request the user made, as `ReleaseUi::poll` would.
+    fn answer(ui: &mut ReleaseUi, result: Result<ReleaseSnapshot, ReleaseRequestError>) {
+        let (tx, rx) = mpsc::channel();
+        tx.send((true, result)).unwrap();
+        ui.reply = Some(rx);
+        ui.poll(&egui::Context::default(), &AppBackend::demo());
+        ui.reply = None;
+    }
+
+    #[test]
+    fn failed_manual_requests_withdraw_up_to_date_only_without_a_daemon_answer() {
+        let mut current = snapshot();
+        current.desktop.update = DesktopUpdate::UpToDate;
+        current.desktop.offer = None;
+        let fresh = |snapshot: ReleaseSnapshot| ReleaseUi {
+            snapshot: Some(snapshot),
+            received_at: Some(Instant::now()),
+            polled_at: Some(Instant::now()),
+            ..Default::default()
+        };
+
+        // Check now that never reached the daemon.
+        let mut ui = fresh(current.clone());
+        assert_eq!(ui.status_line(true).unwrap(), "Boltwarden is up to date.");
+        answer(&mut ui, Err(unavailable()));
+        assert_eq!(ui.status_line(true).unwrap(), "Update status unknown.");
+        assert_eq!(ui.error.as_deref(), Some("could not connect to daemon"));
+        assert_eq!(ui.snapshot.as_ref().unwrap().checked_at, current.checked_at);
+        // Repeating it keeps the status unknown.
+        answer(&mut ui, Err(unavailable()));
+        assert_eq!(ui.status_line(true).unwrap(), "Update status unknown.");
+        // An answer restores everything.
+        answer(&mut ui, Ok(current.clone()));
+        assert_eq!(ui.status_line(true).unwrap(), "Boltwarden is up to date.");
+        assert_eq!(ui.error, None);
+        assert!(!ui.unreachable);
+
+        // Dismiss that never reached the daemon keeps the known newer release.
+        let mut ui = fresh(snapshot());
+        answer(&mut ui, Err(unavailable()));
+        assert!(ui.unreachable);
+        assert!(ui.snapshot.as_ref().unwrap().notice().is_some());
+        assert_eq!(
+            ui.status_line(true).unwrap(),
+            "Boltwarden 1.0.0 is available."
+        );
+
+        // A daemon that refuses the dismissal is still reachable.
+        let mut ui = fresh(current.clone());
+        answer(
+            &mut ui,
+            Err(ReleaseRequestError::Rejected(
+                "That release is no longer offered".into(),
+            )),
+        );
+        assert!(!ui.unreachable);
+        assert_eq!(
+            ui.error.as_deref(),
+            Some("That release is no longer offered")
+        );
+        assert_eq!(ui.status_line(true).unwrap(), "Boltwarden is up to date.");
     }
 }

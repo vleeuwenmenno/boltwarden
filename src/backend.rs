@@ -22,6 +22,40 @@ pub struct LocalBackend {
     pending_two_factor: Option<TwoFactorChallenge>,
 }
 
+/// Why a release request failed. `Unavailable` means no valid answer came from the
+/// daemon, so the caller's release information may be out of date; `Rejected` is an
+/// answer from a working daemon, such as a version that is no longer offered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleaseRequestError {
+    Unavailable(String),
+    Rejected(String),
+}
+
+impl fmt::Display for ReleaseRequestError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable(message) | Self::Rejected(message) => f.write_str(message),
+        }
+    }
+}
+
+fn release_call(
+    client: &RpcClient,
+    request: &RpcRequest,
+) -> Result<RpcResponse, ReleaseRequestError> {
+    client
+        .call(request)
+        .map_err(ReleaseRequestError::Unavailable)
+}
+
+fn unexpected_release_response() -> ReleaseRequestError {
+    ReleaseRequestError::Unavailable("Unexpected release response".into())
+}
+
+fn no_release_daemon() -> ReleaseRequestError {
+    ReleaseRequestError::Unavailable("Release checks require the running daemon".into())
+}
+
 #[derive(Debug, Clone)]
 pub enum BackendError {
     RepromptRequired,
@@ -120,11 +154,11 @@ impl AppBackend {
     }
 
     /// Cached release information from the daemon. Never waits for GitHub.
-    pub fn release_snapshot(&self) -> Result<ReleaseSnapshot, String> {
+    pub fn release_snapshot(&self) -> Result<ReleaseSnapshot, ReleaseRequestError> {
         match self {
-            Self::Remote(client) => match client.call(&RpcRequest::ReleaseStatus)? {
+            Self::Remote(client) => match release_call(client, &RpcRequest::ReleaseStatus)? {
                 RpcResponse::Releases(snapshot) => Ok(snapshot),
-                _ => Err("Unexpected release response".into()),
+                _ => Err(unexpected_release_response()),
             },
             Self::Local(_) => Ok(ReleaseSnapshot::unsupported()),
             Self::Demo(demo) => Ok(demo.releases()),
@@ -132,26 +166,29 @@ impl AppBackend {
     }
 
     /// Queues a release check; the snapshot shows it as checking until it finishes.
-    pub fn check_releases(&self) -> Result<ReleaseSnapshot, String> {
+    pub fn check_releases(&self) -> Result<ReleaseSnapshot, ReleaseRequestError> {
         match self {
-            Self::Remote(client) => match client.call(&RpcRequest::CheckReleases)? {
+            Self::Remote(client) => match release_call(client, &RpcRequest::CheckReleases)? {
                 RpcResponse::Releases(snapshot) => Ok(snapshot),
-                _ => Err("Unexpected release response".into()),
+                _ => Err(unexpected_release_response()),
             },
-            Self::Local(_) => Err("Release checks require the running daemon".into()),
+            Self::Local(_) => Err(no_release_daemon()),
             Self::Demo(demo) => Ok(demo.releases()),
         }
     }
 
-    pub fn dismiss_release(&self, version: &str) -> Result<ReleaseSnapshot, String> {
+    pub fn dismiss_release(&self, version: &str) -> Result<ReleaseSnapshot, ReleaseRequestError> {
+        let request = RpcRequest::DismissRelease {
+            version: version.to_string(),
+        };
         match self {
-            Self::Remote(client) => match client.call(&RpcRequest::DismissRelease {
-                version: version.to_string(),
-            })? {
-                RpcResponse::ReleaseDismissed(result) => result,
-                _ => Err("Unexpected release response".into()),
+            Self::Remote(client) => match release_call(client, &request)? {
+                RpcResponse::ReleaseDismissed(result) => {
+                    result.map_err(ReleaseRequestError::Rejected)
+                }
+                _ => Err(unexpected_release_response()),
             },
-            Self::Local(_) => Err("Release checks require the running daemon".into()),
+            Self::Local(_) => Err(no_release_daemon()),
             Self::Demo(demo) => Ok(demo.dismiss_release()),
         }
     }
@@ -927,5 +964,58 @@ mod browser_management_tests {
                 .unwrap_err()
                 .contains("could not connect to daemon")
         );
+    }
+
+    #[test]
+    fn release_requests_separate_daemon_refusals_from_missing_answers() {
+        let path = std::env::temp_dir().join(format!("bw-release-test-{}", uuid::Uuid::new_v4()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            for response in [
+                RpcResponse::ReleaseDismissed(Err("That release is no longer offered".into())),
+                RpcResponse::HasSession(true),
+                RpcResponse::Releases(ReleaseSnapshot::demo(false)),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                #[cfg(unix)]
+                let mut request = String::new();
+                #[cfg(unix)]
+                stream.read_to_string(&mut request).unwrap();
+                #[cfg(windows)]
+                let request = {
+                    let mut length = [0; 4];
+                    stream.read_exact(&mut length).unwrap();
+                    let mut bytes = vec![0; u32::from_be_bytes(length) as usize];
+                    stream.read_exact(&mut bytes).unwrap();
+                    String::from_utf8(bytes).unwrap()
+                };
+                let _: crate::rpc::RpcEnvelope = serde_json::from_str(&request).unwrap();
+                let payload = serde_json::to_vec(&response).unwrap();
+                #[cfg(windows)]
+                stream
+                    .write_all(&(payload.len() as u32).to_be_bytes())
+                    .unwrap();
+                stream.write_all(&payload).unwrap();
+                #[cfg(windows)]
+                stream.read_exact(&mut [0; 1]).unwrap();
+            }
+        });
+        let backend = AppBackend::remote(RpcClient::new(path.clone(), "test-token".into()));
+        assert_eq!(
+            backend.dismiss_release("1.0.0").unwrap_err(),
+            ReleaseRequestError::Rejected("That release is no longer offered".into())
+        );
+        assert_eq!(
+            backend.check_releases().unwrap_err(),
+            ReleaseRequestError::Unavailable("Unexpected release response".into())
+        );
+        assert!(backend.release_snapshot().is_ok());
+        server.join().unwrap();
+        #[cfg(unix)]
+        std::fs::remove_file(path).unwrap();
+        assert!(matches!(
+            backend.check_releases(),
+            Err(ReleaseRequestError::Unavailable(message)) if message.contains("could not connect")
+        ));
     }
 }
