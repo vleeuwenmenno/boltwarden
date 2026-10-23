@@ -2,8 +2,8 @@ use crate::config;
 use crate::config::{SavedKdf, SavedSession};
 use crate::model::{
     BwItem, BwItemDetail, CustomField, DraftField, DraftFieldKind, DraftPasskey, DraftUri, Folder,
-    HealthReport, ItemAction, ItemDates, ItemDraft, ItemState, LoginDraft, Passkey, SshKey,
-    SyncStatus, TotpCode, TypedDraft, TypedKind,
+    HealthReport, ItemAction, ItemDates, ItemDraft, ItemState, LoginDraft, Passkey,
+    PasswordHistoryEntry, SshKey, SyncStatus, TotpCode, TypedDraft, TypedKind,
 };
 use crate::uri_match::{self, LoginUri, UriMatchType};
 use aes::Aes256;
@@ -2795,6 +2795,17 @@ struct CipherResponse {
     archived_date: Option<String>,
     #[serde(default, alias = "Data")]
     data: Option<CipherDataResponse>,
+    #[serde(default, alias = "PasswordHistory")]
+    password_history: Option<Vec<PasswordHistoryResponse>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PasswordHistoryResponse {
+    #[serde(default, alias = "Password")]
+    password: Option<String>,
+    #[serde(default, alias = "LastUsedDate")]
+    last_used_date: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3212,6 +3223,19 @@ fn decrypt_cipher_with_uri_rules(
         push_identity_fields(&mut custom_fields, identity, &item_key)?;
     }
 
+    // Newest first, as stored. Entries without a password carry nothing worth showing.
+    let mut password_history = Vec::new();
+    for entry in cipher.password_history.as_deref().unwrap_or(&[]) {
+        if let Some(password) = decrypt_opt_string(entry.password.as_deref(), &item_key)?
+            && !password.is_empty()
+        {
+            password_history.push(PasswordHistoryEntry {
+                password,
+                last_used: entry.last_used_date.clone(),
+            });
+        }
+    }
+
     let browser_uris = uris;
     Ok((
         BwItemDetail {
@@ -3237,6 +3261,7 @@ fn decrypt_cipher_with_uri_rules(
                 state_changed_at,
                 ..ItemDates::default()
             },
+            password_history,
         },
         browser_uris,
     ))
@@ -4818,6 +4843,7 @@ mod tests {
             key: None,
             deleted_date: None,
             archived_date: None,
+            password_history: None,
             data: None,
         }
     }
@@ -5039,6 +5065,7 @@ mod tests {
             key: None,
             deleted_date: None,
             archived_date: None,
+            password_history: None,
             data: Some(CipherDataResponse {
                 fido2_credentials: None,
                 name: Some(encrypt_string("Telegram", &user_key)),
@@ -5122,6 +5149,7 @@ mod tests {
             key: None,
             deleted_date: None,
             archived_date: None,
+            password_history: None,
             data: None,
         };
 
@@ -5170,6 +5198,7 @@ mod tests {
             key: None,
             deleted_date: None,
             archived_date: None,
+            password_history: None,
             data: Some(CipherDataResponse {
                 fido2_credentials: None,
                 name: Some(encrypt_string("Nested SSH key", &user_key)),
@@ -5313,6 +5342,7 @@ mod tests {
             ssh_key: None,
             state: ItemState::Active,
             dates: ItemDates::default(),
+            password_history: Vec::new(),
         };
 
         assert!(item_matches_search(&item, "production"));
@@ -5368,6 +5398,7 @@ mod tests {
             ssh_key: None,
             state: ItemState::Active,
             dates: ItemDates::default(),
+            password_history: Vec::new(),
         }
     }
 
@@ -6983,6 +7014,65 @@ mod tests {
             item.copy_value_checked(0, &item.copy_version()).unwrap(),
             "fixture password"
         );
+    }
+
+    #[test]
+    fn detail_decrypts_password_history_and_copies_it_after_other_fields() {
+        let key = [29u8; 64];
+        let mut stored = editable_login(&key);
+        stored.raw["passwordHistory"][1]["password"] = Value::Null;
+
+        let (detail, _) =
+            decode_cipher(stored.raw.clone(), &key, &HashMap::new(), &HashMap::new()).unwrap();
+
+        // Newest first; an entry without a password is left out.
+        let history = &detail.password_history;
+        assert_eq!(history.len(), 4);
+        assert_eq!(history[0].password, "old-0");
+        assert_eq!(history[0].last_used.as_deref(), Some("2025-01-01"));
+        assert_eq!(history[1].password, "old-2");
+        // History comes after every other field, so their copy indexes do not move.
+        let first = 2 + detail.passkeys.len() + detail.uris.len() + detail.custom_fields.len();
+        assert_eq!(detail.copy_value(1).unwrap(), "current-password");
+        assert_eq!(detail.copy_value(first).unwrap(), "old-0");
+        assert_eq!(detail.copy_value(first + 3).unwrap(), "old-4");
+        assert!(detail.copy_value(first + 4).is_err());
+
+        let mut detail = detail;
+        zeroize::Zeroize::zeroize(&mut detail);
+        assert!(
+            detail
+                .password_history
+                .iter()
+                .all(|entry| entry.password.is_empty())
+        );
+    }
+
+    #[test]
+    fn protected_item_hides_password_history_until_verified() {
+        let mut client = protected_fixture();
+        assert!(matches!(
+            client.get_item("cipher-edit"),
+            Err(BwError::RepromptRequired)
+        ));
+        let detail = client.authorize_item("cipher-edit", "correct").unwrap();
+        assert_eq!(detail.password_history.len(), 5);
+        let first = 2 + detail.passkeys.len() + detail.uris.len() + detail.custom_fields.len();
+        let version = detail.copy_version();
+        // The daemon copies from a fresh `get_item`, which needs the grant too.
+        assert_eq!(
+            client
+                .get_item("cipher-edit")
+                .unwrap()
+                .copy_value_checked(first, &version)
+                .unwrap(),
+            "old-0"
+        );
+        client.revoke_item_grants();
+        assert!(matches!(
+            client.get_item("cipher-edit"),
+            Err(BwError::RepromptRequired)
+        ));
     }
 
     #[test]

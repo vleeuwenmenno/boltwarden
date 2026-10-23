@@ -731,7 +731,9 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
                     if value.is_empty() {
                         return Err("This field is empty".into());
                     }
-                    state.clipboard.copy(&value)
+                    // Read per copy, so a changed clear time applies to the next one.
+                    let clear_after = config::load_settings().clipboard_clear_after();
+                    state.clipboard.copy(&value, clear_after)
                 });
             RpcResponse::Copied(result)
         }
