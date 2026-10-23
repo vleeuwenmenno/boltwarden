@@ -800,7 +800,7 @@ pub fn draw_search(
                         );
                         response.widget_info(|| {
                             egui::WidgetInfo::labeled(
-                                egui::WidgetType::Button,
+                                egui::Role::Button,
                                 !state.syncing,
                                 "Sync vault",
                             )
@@ -1328,7 +1328,7 @@ fn draw_results(
                 };
                 response.widget_info(|| {
                     egui::WidgetInfo::selected(
-                        egui::WidgetType::SelectableLabel,
+                        egui::Role::Button,
                         ui.is_enabled(),
                         selected,
                         &label,
@@ -2040,7 +2040,10 @@ mod tests {
                             &AppSettings::default(),
                             &crate::ssh_agent::disabled_status(),
                         );
-                        offset = egui::scroll_area::State::load(&ctx, id).unwrap().offset.y;
+                        offset = egui::scroll_area::State::load(&ctx, id)
+                            .unwrap()
+                            .unclamped_offset()
+                            .y;
                     });
                 })
                 .textures_delta

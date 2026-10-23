@@ -238,7 +238,7 @@ pub fn draw_paired_browsers(
                     );
                     response.widget_info(|| {
                         egui::WidgetInfo::selected(
-                            egui::WidgetType::SelectableLabel,
+                            egui::Role::Button,
                             ui.is_enabled(),
                             index == selected,
                             format!(

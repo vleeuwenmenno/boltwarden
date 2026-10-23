@@ -124,7 +124,7 @@ pub fn draw_two_factor(root: &mut egui::Ui, state: &mut TwoFactorState) -> Optio
                                 None,
                                 selected,
                             );
-                            response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, ui.is_enabled(), selected, provider.label()));
+                            response.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, ui.is_enabled(), selected, provider.label()));
                             if selected && state.scrolled_to != Some(provider) {
                                 response.scroll_to_me(None);
                                 state.scrolled_to = Some(provider);

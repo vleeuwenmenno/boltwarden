@@ -304,7 +304,7 @@ pub fn draw_browser_approval(
                             );
                             response.widget_info(|| {
                                 egui::WidgetInfo::selected(
-                                    egui::WidgetType::SelectableLabel,
+                                    egui::Role::Button,
                                     ui.is_enabled(),
                                     selected,
                                     format!("{} · {}", choice.label, choice.description),

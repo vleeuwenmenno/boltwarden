@@ -113,9 +113,7 @@ fn category_row(ui: &mut Ui, selected: bool, label: &str, icon: Icon) -> egui::R
     let t = theme();
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.0), egui::Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, label)
-    });
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, label));
     let painter = ui.painter_at(rect);
     if selected {
         painter.rect_filled(rect, t.rounding, t.selected_bg);
@@ -625,9 +623,8 @@ fn choice<T: Copy + PartialEq>(
     let (title, description) = SETTING_TEXT[row];
     let selected = state.settings_selected == row;
     let (rect, response) = widgets::row(ui, selected, widgets::ROW_HEIGHT + 4.0);
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, ui.is_enabled(), title)
-    });
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, ui.is_enabled(), title));
     let painter = ui.painter_at(rect);
     let left = rect.left() + 54.0;
     painter.text(
