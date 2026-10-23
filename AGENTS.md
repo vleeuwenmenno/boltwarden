@@ -3,9 +3,9 @@
 ## Issues and the project board
 
 Track work in GitHub issues on the **Boltwarden** project board
-(GitHub Projects, owner `vleeuwenmenno`). Every feature, bug fix, refactor, and
-release starts from an issue. Only trivial changes (typos, comment fixes, routine
-dependency bumps) may skip one.
+(GitHub Projects, owner `vleeuwenmenno`). Every feature, bug fix, and refactor
+starts from an issue. Releases and trivial changes (typos, comment fixes, routine
+dependency bumps) skip one.
 
 1. Before starting work, find the matching issue or create one. Describe the
    problem or goal, the acceptance criteria, and a task checklist (`- [ ]`).
@@ -29,7 +29,9 @@ dependency bumps) may skip one.
 
 Follow [docs/releasing.md](docs/releasing.md) and the GitHub Actions workflow in
 [.github/workflows/ci.yml](.github/workflows/ci.yml). Pushing a release tag starts
-the tests and builds; CI creates and populates the GitHub release draft.
+the tests and builds; CI creates and populates the GitHub release draft. Releases
+do not get an issue or a project board item; the tag, workflow run and draft
+release track them.
 
 1. Merge the changes for the release into `main` through the required CI checks.
    No version bump is needed: tag builds take the desktop version from the tag and
