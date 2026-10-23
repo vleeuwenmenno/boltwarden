@@ -172,6 +172,8 @@ pub struct WindowApp {
     section: Section,
     order: ListOrder,
     query: String,
+    sidebar_panel_id: Option<egui::Id>,
+    list_panel_id: Option<egui::Id>,
     query_changed_at: Instant,
     /// The query and item state the current `results` answer.
     searched: Option<(String, ItemState)>,
@@ -270,6 +272,8 @@ impl WindowApp {
                 config::load_window_layout()
             },
             query: String::new(),
+            sidebar_panel_id: None,
+            list_panel_id: None,
             query_changed_at: Instant::now(),
             searched: None,
             search_in_flight: false,
@@ -873,22 +877,22 @@ impl WindowApp {
         if crate::demo::enabled() || ctx.input(|input| input.pointer.any_down()) {
             return;
         }
-        // egui 0.36 identifies panel resize handles with this suffix. Save only
+        // egui identifies panel resize handles with this suffix. Save only
         // an explicit splitter drag, not the temporary clamp from a smaller
         // viewport. The headless drag test verifies this ID and release timing.
         let Some(stopped) = ctx.drag_stopped_id() else {
             return;
         };
         let mut layout = self.layout;
-        if stopped == egui::Id::new("vault-sidebar").with("__resize")
-            && let Some(panel) =
-                egui::containers::panel::PanelState::load(ctx, egui::Id::new("vault-sidebar"))
+        if let Some(id) = self.sidebar_panel_id
+            && stopped == id.with("__resize")
+            && let Some(panel) = egui::containers::panel::PanelState::load(ctx, id)
         {
             layout.sidebar_width = panel.size().x;
         }
-        if stopped == egui::Id::new("vault-list").with("__resize")
-            && let Some(panel) =
-                egui::containers::panel::PanelState::load(ctx, egui::Id::new("vault-list"))
+        if let Some(id) = self.list_panel_id
+            && stopped == id.with("__resize")
+            && let Some(panel) = egui::containers::panel::PanelState::load(ctx, id)
         {
             layout.list_width = panel.size().x;
         }
@@ -1469,6 +1473,8 @@ impl WindowApp {
     }
 
     fn draw_vault(&mut self, root: &mut egui::Ui) {
+        self.sidebar_panel_id = Some(root.make_persistent_id("vault-sidebar"));
+        self.list_panel_id = Some(root.make_persistent_id("vault-list"));
         self.refresh_settings(false);
         let ctx = &root.ctx().clone();
         let editing = self.edit_state.is_some()
@@ -2567,7 +2573,8 @@ mod tests {
             app.section = Section::Settings;
             frame(&mut app, &ctx, 1180.0, vec![]);
             let sidebar =
-                egui::containers::panel::PanelState::load(&ctx, "vault-sidebar".into()).unwrap();
+                egui::containers::panel::PanelState::load(&ctx, app.sidebar_panel_id.unwrap())
+                    .unwrap();
             let start = egui::pos2(sidebar.outer_rect.right(), 300.0);
             let end = egui::pos2(start.x + 45.0, start.y);
             frame(
@@ -2598,13 +2605,18 @@ mod tests {
                 WindowApp::with_settings(AppBackend::demo(), commands, AppSettings::default());
             let fresh_ctx = Context::default();
             frame(&mut reopened, &fresh_ctx, 1180.0, vec![]);
-            let restored =
-                egui::containers::panel::PanelState::load(&fresh_ctx, "vault-sidebar".into())
-                    .unwrap();
+            let restored = egui::containers::panel::PanelState::load(
+                &fresh_ctx,
+                reopened.sidebar_panel_id.unwrap(),
+            )
+            .unwrap();
             assert!((restored.size().x - saved.sidebar_width).abs() < 1.0);
 
-            let list =
-                egui::containers::panel::PanelState::load(&fresh_ctx, "vault-list".into()).unwrap();
+            let list = egui::containers::panel::PanelState::load(
+                &fresh_ctx,
+                reopened.list_panel_id.unwrap(),
+            )
+            .unwrap();
             let start = egui::pos2(list.outer_rect.right(), 300.0);
             let end = egui::pos2(start.x + 100.0, start.y);
             frame(
@@ -2630,8 +2642,11 @@ mod tests {
             assert!((saved.list_width - 430.0).abs() < 1.0, "{saved:?}");
             let inode = file_identity(&path);
             frame(&mut reopened, &fresh_ctx, MIN_WINDOW_SIZE.x, vec![]);
-            let list =
-                egui::containers::panel::PanelState::load(&fresh_ctx, "vault-list".into()).unwrap();
+            let list = egui::containers::panel::PanelState::load(
+                &fresh_ctx,
+                reopened.list_panel_id.unwrap(),
+            )
+            .unwrap();
             assert!(MIN_WINDOW_SIZE.x - list.outer_rect.right() >= 259.0);
             assert!(list.size().x < saved.list_width);
             reopened.close_window(&fresh_ctx);

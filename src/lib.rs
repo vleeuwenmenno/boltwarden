@@ -390,6 +390,7 @@ fn run_popup() -> eframe::Result<()> {
             #[cfg(target_os = "macos")]
             platform::macos::join_all_spaces(cc);
             ui::theme::theme().install(&cc.egui_ctx);
+            ui::clipboard_policy::install(&cc.egui_ctx);
             Ok(Box::new(App::new(backend, popup_rx)))
         }),
     );
@@ -415,6 +416,7 @@ fn run_window() -> eframe::Result<()> {
         window::options(),
         Box::new(|cc| {
             ui::theme::theme().install(&cc.egui_ctx);
+            ui::clipboard_policy::install(&cc.egui_ctx);
             Ok(Box::new(window::WindowApp::new(backend, popup_rx)))
         }),
     )

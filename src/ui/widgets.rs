@@ -297,9 +297,7 @@ pub fn search_input(ui: &mut Ui, id: egui::Id, value: &mut String, hint: &str) -
             .interact(button, id.with("clear"), egui::Sense::click())
             .on_hover_text("Clear search")
             .on_hover_cursor(egui::CursorIcon::PointingHand);
-        clear.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Clear search")
-        });
+        clear.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Clear search"));
         painter.circle_filled(
             button.center(),
             8.0,
@@ -610,7 +608,7 @@ pub fn choice_row(
     let (rect, response) = row(ui, selected, ROW_HEIGHT + 4.0);
     response.widget_info(|| {
         egui::WidgetInfo::labeled(
-            egui::WidgetType::Button,
+            egui::Role::Button,
             ui.is_enabled(),
             format!("{title}: {value}. {description}"),
         )
@@ -664,7 +662,7 @@ pub fn toggle_row(
     let (rect, response) = row(ui, selected, ROW_HEIGHT + 4.0);
     response.widget_info(|| {
         egui::WidgetInfo::selected(
-            egui::WidgetType::Checkbox,
+            egui::Role::CheckBox,
             ui.is_enabled(),
             on,
             format!("{title}. {description}"),

@@ -192,7 +192,7 @@ impl ShortcutSetup {
                 value.clone().unwrap_or_else(|| "Not set".into())
             };
             egui::WidgetInfo::labeled(
-                egui::WidgetType::Button,
+                egui::Role::Button,
                 ui.is_enabled(),
                 format!("Quick access shortcut: {value}"),
             )
