@@ -14,6 +14,7 @@ use crate::model::{
 use crate::ui::auth::{AuthAction, AuthState, draw_auth};
 use crate::ui::edit::{EditAction, EditState, draw_edit};
 use crate::ui::paired_browsers::{PairedBrowsersAction, PairedBrowsersState, draw_paired_browsers};
+use crate::ui::releases::{ReleaseAction, ReleaseUi};
 use crate::ui::settings_page;
 use crate::ui::shortcuts as sc;
 use crate::ui::summary::{SummaryAction, SummaryState, draw_summary};
@@ -217,6 +218,8 @@ pub struct WindowApp {
     closing: bool,
     focus_search: bool,
     folder_edit: Option<FolderEdit>,
+    /// Kept when the vault locks; release data is public.
+    releases: ReleaseUi,
 }
 
 impl WindowApp {
@@ -316,6 +319,7 @@ impl WindowApp {
             closing: false,
             focus_search: true,
             folder_edit: None,
+            releases: ReleaseUi::default(),
         };
         if let Ok(mode) = std::env::var("BOLTWARDEN_DEMO") {
             if mode == "settings" || mode == "licenses" || mode == "shortcut" {
@@ -934,6 +938,7 @@ impl WindowApp {
             }
         }
         self.poll_replies(ctx);
+        self.releases.poll(ctx, &self.backend);
         if self
             .reprompt_at
             .is_some_and(|at| at.elapsed() >= REPROMPT_TTL)
@@ -1349,6 +1354,10 @@ impl eframe::App for WindowApp {
                 ui.colored_label(theme().warning, warning);
             });
         }
+        let about_open = self.section == Section::Settings && self.settings_licenses;
+        if matches!(self.screen, Screen::Auth | Screen::Vault) && !about_open {
+            self.releases.draw_notice(root, "vault-release-notice");
+        }
         if self.confirm_close {
             self.draw_confirm_close(ctx);
             if self.closing {
@@ -1556,7 +1565,18 @@ impl WindowApp {
                 )
                 .show(root, |ui| {
                     if self.settings_licenses {
-                        settings_page::column(ui, crate::ui::acknowledgements::draw);
+                        let auto_check = self.settings.check_for_updates;
+                        let mut release_action = None;
+                        settings_page::column(ui, |ui| {
+                            crate::ui::acknowledgements::draw(ui, |ui| {
+                                release_action = self.releases.draw_about(ui, auto_check);
+                            })
+                        });
+                        if let Some(ReleaseAction::SetAutoCheck(enabled)) = release_action {
+                            self.refresh_settings(true);
+                            self.settings.check_for_updates = enabled;
+                            self.save_settings();
+                        }
                     } else if let Some(action) = settings_page::draw_page(
                         ui,
                         group,

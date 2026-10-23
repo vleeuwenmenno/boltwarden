@@ -93,7 +93,15 @@ pub enum BrowserRequest {
         sig: String,
         host_pid: u32,
     },
-    Status,
+    /// `{"type":"Status"}` from older extensions still decodes; older hosts ignore the flag.
+    Status {
+        /// The extension's explicit "Check now": queue a release check under the
+        /// desktop's global throttle (one at a time, at most once a minute, GitHub rate
+        /// limits). Never set it on routine status refreshes; the reply does not wait for
+        /// the check, whose result appears in a later Status.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        check_updates: bool,
+    },
     RequestUnlock,
     Cancel {
         request_id: String,
@@ -210,6 +218,12 @@ pub enum BrowserResponse {
         enabled: bool,
         unlocked: bool,
         epoch: u64,
+        /// Added after protocol version 1 shipped; older desktops omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        desktop_version: Option<String>,
+        /// Cached public release information; older desktops omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        releases: Option<crate::releases::ReleaseSnapshot>,
     },
     UnlockRequested,
     LoginSaved {
@@ -363,6 +377,107 @@ mod tests {
         assert!(!format!("{response:?}").contains("sensitive-assertion"));
         let decoded: BrowserResponse = serde_json::from_value(value).unwrap();
         assert!(matches!(decoded, BrowserResponse::PasskeyResult { .. }));
+    }
+
+    #[test]
+    fn status_request_stays_compatible_in_both_directions() {
+        // Extensions released before release announcements send a bare Status.
+        let old = r#"{"version":1,"id":"status","type":"Status"}"#;
+        let request: RequestEnvelope = serde_json::from_str(old).unwrap();
+        assert!(matches!(
+            request.request,
+            BrowserRequest::Status {
+                check_updates: false
+            }
+        ));
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::from_str::<serde_json::Value>(old).unwrap()
+        );
+
+        let input = include_str!("../../extension/protocol/fixtures/status-check-updates.json");
+        let request: RequestEnvelope = serde_json::from_str(input).unwrap();
+        assert!(matches!(
+            request.request,
+            BrowserRequest::Status {
+                check_updates: true
+            }
+        ));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(input).unwrap(),
+            serde_json::to_value(request).unwrap()
+        );
+
+        // Hosts released before the flag decode Status as a unit variant and ignore it.
+        #[derive(Deserialize)]
+        #[serde(tag = "type")]
+        enum OldRequest {
+            Status,
+            #[allow(dead_code)]
+            RequestUnlock,
+        }
+        assert!(matches!(
+            serde_json::from_str::<OldRequest>(input).unwrap(),
+            OldRequest::Status
+        ));
+    }
+
+    #[test]
+    fn status_response_release_fields_are_optional_and_ignorable() {
+        let old = serde_json::json!({
+            "version": 1, "id": "status", "type": "Status",
+            "enabled": true, "unlocked": true, "epoch": 4
+        });
+        let response: ResponseEnvelope = serde_json::from_value(old.clone()).unwrap();
+        assert!(matches!(
+            &response.response,
+            BrowserResponse::Status {
+                desktop_version: None,
+                releases: None,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_value(&response).unwrap(), old);
+
+        let input = include_str!("../../extension/protocol/fixtures/status-releases.json");
+        let response: ResponseEnvelope = serde_json::from_str(input).unwrap();
+        let BrowserResponse::Status {
+            desktop_version,
+            releases: Some(releases),
+            ..
+        } = &response.response
+        else {
+            panic!("expected release information");
+        };
+        assert_eq!(desktop_version.as_deref(), Some("1.0.0-rc.5"));
+        assert_eq!(releases.state, crate::releases::CheckState::Fresh);
+        assert_eq!(
+            releases.extension.as_ref().unwrap().tag,
+            "extension-v0.5.10"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(input).unwrap(),
+            serde_json::to_value(&response).unwrap()
+        );
+        assert!(input.len() < MAX_FRAME_BYTES);
+
+        // Older desktop code decoding a newer response keeps working.
+        #[derive(Deserialize)]
+        #[serde(tag = "type")]
+        enum OldResponse {
+            Status {
+                enabled: bool,
+                unlocked: bool,
+                epoch: u64,
+            },
+        }
+        let OldResponse::Status {
+            enabled,
+            unlocked,
+            epoch,
+        } = serde_json::from_str(input).unwrap();
+        assert!(enabled && !unlocked);
+        assert_eq!(epoch, 3);
     }
 
     #[test]
