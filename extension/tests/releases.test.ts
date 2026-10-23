@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { parseWire } from '../lib/protocol';
 import {
   compareVersions, DEFAULT_RELEASE_PREFERENCES, dismissRelease, extensionStatus, parseDesktopVersion, parseExtensionVersion, parseReleaseInfo,
-  parseReleasePreferences, parseReleases, readReleasePreferences, releaseNotices, retryAfter, sameReleases, setReleaseNotices, statusReleases,
+  parseReleasePreferences, parseReleases, readReleasePreferences, releaseNotices, releaseSummary, retryAfter, sameReleases, setReleaseNotices, statusReleases,
   type ReleaseMetadata, type ReleasePreferences,
 } from '../lib/releases';
 
@@ -15,7 +15,7 @@ function snapshot(overrides: Record<string, unknown> = {}, desktop: Record<strin
     desktop: { installed: '1.0.0-rc.5', update: 'available', offer: info('v1.0.0'), dismissed: false, stable: info('v1.0.0'), preview: info('v1.0.0'), ...desktop },
     extension: info('extension-v0.5.10'), ...overrides };
 }
-const metadata = (releases: unknown): ReleaseMetadata => ({ releases: parseReleases(releases)!, receivedAt: NOW * 1000 });
+const metadata = (releases: unknown): ReleaseMetadata => ({ releases: parseReleases(releases)!, receivedAt: NOW * 1000, revision: 1 });
 
 describe('release versions', () => {
   it('parses desktop and extension versions strictly', () => {
@@ -42,18 +42,18 @@ describe('release metadata validation', () => {
     const status = parseWire(fixture('status-releases.json'));
     expect(status).toMatchObject({ type: 'Status', enabled: true, unlocked: false, epoch: 3 });
     const parsed = statusReleases(status as never, 5);
-    expect(parsed).toEqual({ desktopVersion: '1.0.0-rc.5', releases: fixture('status-releases.json').releases, receivedAt: 5 });
+    expect(parsed).toEqual({ desktopVersion: '1.0.0-rc.5', releases: fixture('status-releases.json').releases, receivedAt: 5, revision: 0 });
   });
   it('reports an older desktop without release fields as unsupported, not invalid', () => {
     const status = parseWire({ version: 1, id: 'old', type: 'Status', enabled: true, unlocked: true, epoch: 1 });
-    expect(statusReleases(status as never, 5)).toEqual({ receivedAt: 5 });
+    expect(statusReleases(status as never, 5)).toEqual({ receivedAt: 5, revision: 0 });
   });
   it('discards malformed release metadata without rejecting the core Status', () => {
     for (const releases of ['bad', [], { state: 'fresh' }, snapshot({ state: 'done' }), snapshot({ auto_check: 'yes' }),
       snapshot({ desktop: null }), snapshot({}, { installed: 5 }), snapshot({}, { installed: 'x'.repeat(65) }), snapshot({}, { update: 'later' })]) {
       const status = parseWire({ version: 1, id: 's', type: 'Status', enabled: true, unlocked: true, epoch: 1, desktop_version: { evil: true }, releases });
       expect(status.type).toBe('Status');
-      expect(statusReleases(status as never, 5)).toEqual({ invalid: true, receivedAt: 5 });
+      expect(statusReleases(status as never, 5)).toEqual({ invalid: true, receivedAt: 5, revision: 0 });
     }
   });
   it('drops individual malformed release fields', () => {
@@ -93,6 +93,10 @@ describe('release metadata validation', () => {
     expect(offerFor('1.0.0+3.gabc1234.dirty', 'v2.0.0').offer).toBeUndefined();
     expect(parseReleases(snapshot({}, { offer: { ...info('v1.0.0'), tag: 'extension-v1.0.0' } }))!.desktop.update).toBe('unknown');
   });
+  it.each([['checking', true], ['empty', true], ['unsupported', true], ['error', true], ['stale', true], ['fresh', false]] as const)(
+    'claims desktop up to date only for a fresh complete check: %s, complete %s', (state, complete) => {
+      expect(parseReleases(snapshot({ state, complete }, { update: 'up_to_date', offer: undefined }))!.desktop.update).toBe('unknown');
+    });
   it('does not keep an up-to-date claim from a failed or old check', () => {
     expect(parseReleases(snapshot({ state: 'error', error: 'network' }, { update: 'up_to_date', offer: undefined }))!.desktop.update).toBe('unknown');
     expect(parseReleases(snapshot({ state: 'stale' }, { update: 'up_to_date', offer: undefined }))!.desktop.update).toBe('unknown');
@@ -145,7 +149,7 @@ describe('release notices', () => {
     // A dismissal is per version: a later version shows again.
     expect(releaseNotices(metadata(snapshot({ extension: info('extension-v0.6.1') })), '0.5.10', { notices: true, dismissed: { extension: '0.6.0' } })).toHaveLength(2);
     expect(releaseNotices(value, '0.5.10', { notices: false, dismissed: {} })).toEqual([]);
-    expect(releaseNotices({ receivedAt: 0 }, '0.5.10', show)).toEqual([]);
+    expect(releaseNotices({ receivedAt: 0, revision: 1 }, '0.5.10', show)).toEqual([]);
     expect(releaseNotices(undefined, '0.5.10', show)).toEqual([]);
   });
   it('shows a desktop notice independently of a dismissal on the desktop', () => {
@@ -172,5 +176,29 @@ describe('release preferences', () => {
     await dismissRelease(storage, 'extension', '0.6.1');
     expect((await readReleasePreferences(storage)).dismissed).toEqual({ desktop: '1.0.0', extension: '0.6.1' });
     expect(Object.keys(storage.data)).toEqual(['release-notices']);
+  });
+});
+
+describe('release summary', () => {
+  const NOW_MS = NOW * 1000;
+  const current = (overrides: Record<string, unknown> = {}, extra: Partial<ReleaseMetadata> = {}) =>
+    ({ releases: parseReleases(snapshot({ extension: info('extension-v0.5.10'), ...overrides }, { update: 'up_to_date', offer: undefined }))!, receivedAt: NOW_MS, revision: 1, ...extra });
+  it('claims both components current only after a fresh, complete, answered check', () => {
+    expect(releaseSummary(current(), '0.5.10')).toEqual({ desktop: 'up_to_date', extension: 'up_to_date', checking: false });
+    for (const value of [current({ state: 'checking' }), current({ state: 'empty' }), current({ state: 'unsupported' }), current({ state: 'error', error: 'network' }),
+      current({ state: 'stale' }), current({ complete: false }), current({}, { failed: true })]) {
+      const summary = releaseSummary(value, '0.5.10');
+      expect(summary.desktop).toBe('unknown'); expect(summary.extension).toBe('unknown');
+    }
+    expect(releaseSummary(current(), '0.5.10', true)).toMatchObject({ desktop: 'unknown', extension: 'unknown' });
+  });
+  it('keeps known newer releases when currentness is withdrawn', () => {
+    const value = { releases: parseReleases(snapshot({ state: 'error', error: 'network', extension: info('extension-v0.6.0') }))!, receivedAt: NOW_MS, revision: 1, failed: true as const };
+    expect(releaseSummary(value, '0.5.10', true)).toEqual({ desktop: 'available', extension: 'available', checking: false });
+    expect(releaseNotices(value, '0.5.10', { notices: true, dismissed: {} })).toHaveLength(2);
+  });
+  it('stops reporting a check in progress once the page gave up waiting', () => {
+    expect(releaseSummary(current({ state: 'checking' }), '0.5.10').checking).toBe(true);
+    expect(releaseSummary(current({ state: 'checking' }), '0.5.10', true).checking).toBe(false);
   });
 });

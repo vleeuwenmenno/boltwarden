@@ -8,7 +8,7 @@ import { applyTheme, DEFAULT_SETTINGS, watchSettings, writeSettings, type Passke
 import { CLIPBOARD_PERMISSION } from './clipboard';
 import { autofillState, restoreBrowserAutofill, suppressBrowserAutofill, type AutofillApi, type AutofillState } from './browser-autofill';
 import { BUILD, STALE_MESSAGE, UNKNOWN_ACTION } from './build';
-import { DEFAULT_RELEASE_PREFERENCES, dismissRelease, ERROR_TEXT, extensionStatus, releaseNotices, retryAfter, setReleaseNotices, watchReleasePreferences,
+import { DEFAULT_RELEASE_PREFERENCES, dismissRelease, ERROR_TEXT, releaseNotices, releaseSummary, retryAfter, setReleaseNotices, watchReleasePreferences,
   type ReleaseInfo, type ReleaseMetadata, type ReleasePreferences } from './releases';
 import type { ConnectionState } from './native';
 import './ui.css';
@@ -175,43 +175,46 @@ const RELEASE_POLL_LIMIT_MS = 40_000;
 
 /** Release information for the popup and options page. Reads the desktop's cache once when
  * the page opens, and polls only while that page is open and the desktop is checking. */
-function useReleases(apply: (value: UiReleases) => void, desktopChecking: boolean) {
+function useReleases(apply: (value: ReleaseMetadata) => void, desktopChecking: boolean) {
   const [preferences, setPreferences] = useState<ReleasePreferences>(DEFAULT_RELEASE_PREFERENCES);
   const [checking, setChecking] = useState(false);
+  const [timedOut, setTimedOut] = useState(false);
+  const [round, setRound] = useState(0);
   const [error, setError] = useState('');
-  const deadline = useRef(0);
   const mounted = useRef(true);
+  // An answer without release information comes from a closed connection; the background's
+  // own push already reported that, so it never replaces what the page shows.
   const read = (check = false) => call<UiReleases>('releases', check ? { check: true } : {})
-    .then(value => { if (mounted.current) apply(value); });
+    .then(value => { if (mounted.current && value.releases) apply(value.releases); });
   useEffect(() => {
     mounted.current = true;
     const stop = watchReleasePreferences(browser.storage, setPreferences);
     return () => { mounted.current = false; stop(); };
   }, []);
   async function check() {
-    setChecking(true); setError('');
-    deadline.current = Date.now() + RELEASE_POLL_LIMIT_MS;
+    setChecking(true); setError(''); setTimedOut(false);
     try { await read(true); }
     catch (error) { if (mounted.current && errorMessage(error) !== STALE_MESSAGE) setError(errorMessage(error)); }
-    finally { if (mounted.current) setChecking(false); }
+    finally { if (mounted.current) { setChecking(false); setRound(value => value + 1); } }
   }
-  // Follows a queued check until it completes, fails, or the time limit passes. Errors and
-  // a missing desktop are tolerated; the limit still applies.
+  // Follows a queued check until it completes, or gives up after the time limit so the page
+  // can offer another check. Errors and a missing desktop are tolerated; the limit still applies.
   useEffect(() => {
-    if (!desktopChecking) { deadline.current = 0; return; }
-    deadline.current ||= Date.now() + RELEASE_POLL_LIMIT_MS;
+    if (!desktopChecking) { setTimedOut(false); return; }
+    const deadline = Date.now() + RELEASE_POLL_LIMIT_MS;
     let live = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const next = () => {
-      if (!live || Date.now() >= deadline.current) return;
+      if (!live) return;
+      if (Date.now() >= deadline) { setTimedOut(true); return; }
       timer = setTimeout(() => { void read().catch(() => {}).finally(next); }, RELEASE_POLL_MS);
     };
     next();
     return () => { live = false; clearTimeout(timer); };
-  }, [desktopChecking]);
+  }, [desktopChecking, round]);
   /** A newer cache may exist since the background last asked; this never starts a check. */
   const load = () => { void read().catch(() => {}); };
-  return { preferences, checking, error, check, load };
+  return { preferences, checking, timedOut, error, check, load };
 }
 
 function ReleaseLink({ release }: { release: ReleaseInfo }) {
@@ -233,10 +236,15 @@ function ReleaseNotices({ metadata, preferences }: { metadata?: ReleaseMetadata;
 
 const formatDate = (seconds: number) => new Date(seconds * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 
+/** Answers can arrive out of order; never let an older one replace a newer one. */
+const newerReleases = (current: ReleaseMetadata | undefined, next: ReleaseMetadata) =>
+  current && next.revision < current.revision ? current : next;
+
 const formatWait = (seconds: number) => seconds < 120 ? `${seconds} s` : `${Math.ceil(seconds / 60)} min`;
 
-function ReleaseStatus({ connection, metadata, preferences, checking, error, onCheck, onWaitOver }: {
-  connection?: ConnectionState; metadata?: ReleaseMetadata; preferences: ReleasePreferences; checking: boolean; error: string; onCheck(): void; onWaitOver(): void;
+function ReleaseStatus({ connection, metadata, preferences, checking, timedOut, error, onCheck, onWaitOver }: {
+  connection?: ConnectionState; metadata?: ReleaseMetadata; preferences: ReleasePreferences; checking: boolean; timedOut: boolean; error: string;
+  onCheck(): void; onWaitOver(): void;
 }) {
   const running = browser.runtime.getManifest().version;
   const [now, setNow] = useState(Date.now);
@@ -260,39 +268,54 @@ function ReleaseStatus({ connection, metadata, preferences, checking, error, onC
   else if (connection === 'disabled') unavailable = 'Turn on browser integration in Boltwarden desktop to see updates.';
   else if (!metadata) unavailable = 'Loading release information…';
   else if (metadata.invalid) unavailable = 'Boltwarden desktop sent release information this extension could not read.';
+  else if (metadata.failed && !releases) unavailable = 'Boltwarden desktop did not answer the request for release information.';
   else if (!supported) unavailable = `This Boltwarden desktop${metadata.desktopVersion ? ` (${metadata.desktopVersion})` : ''} does not share release information, so updates cannot be checked here. Update the desktop app to see release notices.`;
 
   let desktop = '', extension = '';
   let desktopRelease: ReleaseInfo | undefined, extensionRelease: ReleaseInfo | undefined;
-  if (releases && supported) {
+  const summary = releases && supported ? releaseSummary({ ...metadata!, releases }, running, timedOut) : undefined;
+  if (releases && summary) {
     const notChecked = releases.state === 'empty' || (releases.state === 'checking' && releases.checked_at === undefined);
     const unconfirmed = notChecked ? 'Not checked yet.' : 'Could not confirm that this is the newest version.';
     const latest = releases.desktop.stable ?? releases.desktop.preview;
-    switch (releases.desktop.update) {
+    switch (summary.desktop) {
       case 'available': desktopRelease = releases.desktop.offer; desktop = `Version ${releases.desktop.offer!.version} is available.`; break;
       case 'up_to_date': desktop = 'Up to date.'; break;
       case 'development': desktopRelease = latest; desktop = `Development build; updates are not offered.${latest ? ` Latest release: ${latest.version}.` : ''}`; break;
       default: desktop = unconfirmed;
     }
-    const status = extensionStatus(releases, running);
+    const status = summary.extension;
     extensionRelease = status === 'available' ? releases.extension : undefined;
     extension = status === 'available' ? `Version ${releases.extension!.version} was published on GitHub. Browser store updates may still be pending.`
       : status === 'up_to_date' ? 'Up to date.' : unconfirmed;
   }
   const installed = releases?.desktop.installed ?? metadata?.desktopVersion;
   const lastChecked = releases?.checked_at !== undefined ? `Last checked ${formatDate(releases.checked_at)}${releases.state === 'stale' ? ', more than three days ago' : ''}.` : '';
-  const busy = checking || releases?.state === 'checking';
+  const busy = checking || Boolean(summary?.checking);
+  // Checking is possible whenever a current desktop is connected, including after a failure.
+  const canCheck = Boolean(summary) || Boolean(metadata?.failed && !releases && !metadata.invalid && connection !== 'disconnected');
+  const lastFailed = releases?.state === 'error' ? ` The last check failed: ${releases.error ? ERROR_TEXT[releases.error] : 'unknown error'}.` : '';
+  const statusText = [
+    summary?.checking ? 'Checking for updates…' : lastChecked,
+    lastFailed,
+    releases?.state === 'checking' && timedOut ? ' The check is taking longer than expected; the result is unknown for now.' : '',
+    metadata?.failed && releases ? ' Boltwarden desktop did not answer the last request for release information, so this may be out of date.' : '',
+    wait ? ` You can check again in ${formatWait(wait)}.` : '',
+  ].join('').trim();
   return <section class="card releases" aria-busy={busy}><h2>Updates</h2>
-    {unavailable ? <p class="detail" role="status">{unavailable}</p> : <>
+    {unavailable && <p class="detail" role="status">{unavailable}</p>}
+    {!unavailable && <>
       <dl class="versions">
         <dt>Desktop app{installed ? ` ${installed}` : ''}</dt><dd>{desktop} {desktopRelease && <ReleaseLink release={desktopRelease} />}</dd>
         <dt>This extension {running}</dt><dd>{extension} {extensionRelease && <ReleaseLink release={extensionRelease} />}</dd>
       </dl>
-      <p class="detail" role="status">{releases?.state === 'checking' ? 'Checking for updates…' : lastChecked}
-        {releases?.state === 'error' && releases.error ? ` The last check failed: ${ERROR_TEXT[releases.error]}.` : releases?.state === 'error' ? ' The last check failed.' : ''}
-        {wait ? ` You can check again in ${formatWait(wait)}.` : ''}</p>
+      <p class="detail" role="status">{statusText}</p>
+    </>}
+    {canCheck && <>
       <div class="release-actions"><button class="secondary" disabled={busy || wait > 0} onClick={onCheck}>{busy ? 'Checking…' : 'Check now'}</button></div>
-      <p class="detail">Boltwarden desktop checks GitHub for releases{releases?.auto_check ? ' once a day' : ' only when you ask; automatic checks are off'}. Change this in the desktop app under About. This extension makes no update requests itself.</p>
+      <p class="detail">{releases?.auto_check
+        ? 'Boltwarden desktop checks GitHub a day after its last successful check, and retries a failed check after 10 minutes or later if GitHub asks.'
+        : 'Automatic checks are off in Boltwarden desktop.'} Check now asks the desktop app to check, at most once a minute. Change automatic checks in the desktop app under About. This extension never contacts GitHub itself.</p>
     </>}
     {error && <p role="alert" class="notice error">{error}</p>}
     <Toggle title="Show release notices in the popup" help="Only changes what this browser shows. Dismissed notices return for the next version."
@@ -308,7 +331,7 @@ function App({ options }: { options: boolean }) {
   const [stale, setStale] = useState(false);
   const [state, setState] = useState<UiState>();
   const [releases, setReleases] = useState<ReleaseMetadata>();
-  const release = useReleases(value => setReleases(value.releases), releases?.releases?.state === 'checking');
+  const release = useReleases(value => setReleases(current => newerReleases(current, value)), releases?.releases?.state === 'checking');
   const [page, setPage] = useState<UiPage>();
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
@@ -363,7 +386,7 @@ function App({ options }: { options: boolean }) {
         if (currentState.current) updateState({ ...currentState.current, fingerprint: next.fingerprint });
         return;
       }
-      updateState(next); setReleases(next.releases);
+      updateState(next); setReleases(current => next.releases ? newerReleases(current, next.releases) : undefined);
       if (!options && next.connection.state === 'ready') {
         const matches = await call<UiPage>('list');
         if (live() && version === generation.current && currentState.current?.connection.state === 'ready') setPage(matches);
@@ -375,7 +398,8 @@ function App({ options }: { options: boolean }) {
   function connectionChanged(event: UiStateChange) {
     if (!live() || event.type !== 'state-changed') return;
     // Only the release information changed; the connection and page stay as they are.
-    setReleases(event.releases);
+    // A push without release information means the connection ended; otherwise keep the newest.
+    setReleases(current => event.releases ? newerReleases(current, event.releases) : undefined);
     if (event.reason === 'releases') return;
     const previous = currentState.current?.connection;
     void call<PendingSaveSummary[]>('pending-saves').then(items => { if (live()) setPending(items ?? []); }).catch(error => { if (live() && errorMessage(error) !== STALE_MESSAGE) setError(`Pending passwords unavailable: ${errorMessage(error)}`); });
@@ -589,7 +613,7 @@ function App({ options }: { options: boolean }) {
         </section>}
         {!options && <ReleaseNotices metadata={releases} preferences={release.preferences} />}
         {options && <ReleaseStatus connection={connection?.state} metadata={releases} preferences={release.preferences}
-          checking={release.checking} error={release.error} onCheck={() => void release.check()} onWaitOver={release.load} />}
+          checking={release.checking} timedOut={release.timedOut} error={release.error} onCheck={() => void release.check()} onWaitOver={release.load} />}
         {options && <Settings settings={settings} />}
         {options && <details class="card about"><summary>Help, privacy, and version</summary>
           <p>The popup shows matching logins, or your saved cards when a payment field is selected. Card numbers stay masked until you choose a card on an HTTPS page.</p>

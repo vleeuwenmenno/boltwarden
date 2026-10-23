@@ -27,8 +27,11 @@ export interface Releases {
   retry_after_seconds?: number; desktop: DesktopReleases; extension?: ReleaseInfo;
 }
 /** What one authenticated Status response said about releases. `releases` is missing when the
- * desktop predates release checks; `invalid` when it sent release data that did not validate. */
-export interface ReleaseMetadata { desktopVersion?: string; releases?: Releases; invalid?: true; receivedAt: number }
+ * desktop predates release checks; `invalid` when it sent release data that did not validate;
+ * `failed` when the latest Status request failed, so the earlier data can no longer prove that
+ * nothing newer exists. `revision` increases with every change on this background, so pages
+ * can ignore answers older than what they already show. */
+export interface ReleaseMetadata { desktopVersion?: string; releases?: Releases; invalid?: true; failed?: true; receivedAt: number; revision: number }
 
 export interface DesktopVersion { major: number; minor: number; patch: number; rc?: number }
 export type ExtensionVersion = Omit<DesktopVersion, 'rc'>;
@@ -81,7 +84,7 @@ export function installedDesktop(text: string) {
   return { version: parseDesktopVersion(base), development: metadata !== undefined };
 }
 
-function parseDesktop(value: unknown, state: CheckState): DesktopReleases | undefined {
+function parseDesktop(value: unknown, state: CheckState, complete: boolean): DesktopReleases | undefined {
   if (!record(value) || !printable(value.installed, MAX_INSTALLED_LENGTH) || typeof value.dismissed !== 'boolean'
     || !UPDATES.includes(value.update as DesktopUpdate)) return undefined;
   const installed = installedDesktop(value.installed);
@@ -89,8 +92,8 @@ function parseDesktop(value: unknown, state: CheckState): DesktopReleases | unde
   let update = value.update as DesktopUpdate;
   let offer = parseReleaseInfo(value.offer, 'desktop');
   if (installed.development) update = 'development';
-  // A failed or old check cannot prove there is nothing newer.
-  if (update === 'up_to_date' && (state === 'error' || state === 'stale')) update = 'unknown';
+  // Only a recent, successful and complete check proves there is nothing newer.
+  if (update === 'up_to_date' && !(state === 'fresh' && complete)) update = 'unknown';
   // Offer only a release that is newer than this installation, on its channel: stable
   // installations never see release candidates.
   const offered = offer && parseDesktopVersion(offer.version)!;
@@ -108,7 +111,7 @@ function parseDesktop(value: unknown, state: CheckState): DesktopReleases | unde
 export function parseReleases(value: unknown): Releases | undefined {
   if (!record(value) || !CHECK_STATES.includes(value.state as CheckState) || typeof value.auto_check !== 'boolean'
     || typeof value.complete !== 'boolean') return undefined;
-  const desktop = parseDesktop(value.desktop, value.state as CheckState);
+  const desktop = parseDesktop(value.desktop, value.state as CheckState, value.complete);
   if (!desktop) return undefined;
   const retry = value.retry_after_seconds;
   return {
@@ -121,13 +124,13 @@ export function parseReleases(value: unknown): Releases | undefined {
 }
 
 /** Release metadata from a Status response that already passed core validation. */
-export function statusReleases(status: { desktop_version?: unknown; releases?: unknown }, now: number): ReleaseMetadata {
+export function statusReleases(status: { desktop_version?: unknown; releases?: unknown }, now: number, revision = 0): ReleaseMetadata {
   const releases = status.releases === undefined || status.releases === null ? undefined : parseReleases(status.releases);
   return {
     ...optional(printable(status.desktop_version, MAX_INSTALLED_LENGTH) ? status.desktop_version : undefined, 'desktopVersion'),
     ...optional(releases, 'releases'),
     ...(releases === undefined && status.releases !== undefined && status.releases !== null ? { invalid: true as const } : {}),
-    receivedAt: now,
+    receivedAt: now, revision,
   };
 }
 
@@ -135,7 +138,7 @@ export function statusReleases(status: { desktop_version?: unknown; releases?: u
  * arrival, so metadata with one is always treated as new. */
 export function sameReleases(left: ReleaseMetadata | undefined, right: ReleaseMetadata | undefined) {
   if (left?.releases?.retry_after_seconds !== undefined || right?.releases?.retry_after_seconds !== undefined) return false;
-  const strip = (value?: ReleaseMetadata) => value && JSON.stringify({ ...value, receivedAt: 0 });
+  const strip = (value?: ReleaseMetadata) => value && JSON.stringify({ ...value, receivedAt: 0, revision: 0 });
   return strip(left) === strip(right);
 }
 
@@ -157,6 +160,20 @@ export function extensionStatus(releases: Releases, running: string): ExtensionS
   if (!current) return 'unknown';
   if (published && compareVersions(published, current) > 0) return 'available';
   return published && releases.complete && releases.state === 'fresh' ? 'up_to_date' : 'unknown';
+}
+
+/** What the options page may claim. "Up to date" needs a fresh, complete check, a successful
+ * latest Status, and no check that ran out of time; known newer releases are always kept. */
+export interface ReleaseSummary { desktop: DesktopUpdate; extension: ExtensionStatus; checking: boolean }
+export function releaseSummary(metadata: ReleaseMetadata & { releases: Releases }, running: string, timedOut = false): ReleaseSummary {
+  const { releases } = metadata;
+  const certain = releases.state === 'fresh' && releases.complete && !metadata.failed && !timedOut;
+  const extension = extensionStatus(releases, running);
+  return {
+    desktop: releases.desktop.update === 'up_to_date' && !certain ? 'unknown' : releases.desktop.update,
+    extension: extension === 'up_to_date' && !certain ? 'unknown' : extension,
+    checking: releases.state === 'checking' && !timedOut,
+  };
 }
 
 export interface ReleaseNotice { component: Component; release: ReleaseInfo; title: string; detail: string }

@@ -20,6 +20,10 @@ export class NativeClient {
    * lock and unlock events; cleared when the connection or its authentication ends. Not part
    * of the snapshot, which content scripts also receive. */
   releases?: ReleaseMetadata;
+  private releaseRevision = 0;
+  /** Status requests on one connection run one at a time, so a slower earlier answer can
+   * never replace a later one (the daemon answers requests on separate threads). */
+  private statusQueue: Promise<unknown> = Promise.resolve();
   private port?: NativePort;
   private connecting?: Promise<void>;
   private pairing?: Promise<void>;
@@ -49,6 +53,7 @@ export class NativeClient {
 
   private async open(): Promise<void> {
     this.releases = undefined;
+    this.statusQueue = Promise.resolve();
     this.update('connecting');
     try {
       const host = new Promise<number>((resolve, reject) => { this.hostReady = { resolve, reject }; });
@@ -110,11 +115,38 @@ export class NativeClient {
   async refreshStatus(checkUpdates = false): Promise<NativeSnapshot> {
     if (!this.authenticated) return this.snapshot;
     const port = this.port;
-    const status = expect(await this.raw({ type: 'Status', ...(checkUpdates ? { check_updates: true } : {}) }), 'Status');
-    const releases = statusReleases(status, Date.now());
-    if (this.authenticated && this.port === port && !sameReleases(this.releases, releases)) this.releases = releases;
-    this.update(!status.enabled ? 'disabled' : status.unlocked ? 'ready' : 'locked', undefined, status.epoch);
-    return this.snapshot;
+    const current = () => this.authenticated && this.port === port;
+    const run = async () => {
+      // A request queued on a connection that has since closed is dropped, never sent to a new host.
+      if (!current()) throw new NativeError('Disconnected', 'Native host disconnected.');
+      let status: Extract<Response, { type: 'Status' }>;
+      try {
+        status = expect(await this.raw({ type: 'Status', ...(checkUpdates ? { check_updates: true } : {}) }), 'Status');
+      } catch (error) {
+        if (current()) this.releaseFailed();
+        throw error;
+      }
+      if (!current()) throw new NativeError('Disconnected', 'Native host disconnected.');
+      this.setReleases(statusReleases(status, Date.now()));
+      this.update(!status.enabled ? 'disabled' : status.unlocked ? 'ready' : 'locked', undefined, status.epoch);
+      return this.snapshot;
+    };
+    const result = this.statusQueue.then(run, run);
+    this.statusQueue = result.catch(() => {});
+    return result;
+  }
+
+  private setReleases(releases: ReleaseMetadata) {
+    if (sameReleases(this.releases, releases)) return false;
+    this.releases = { ...releases, revision: ++this.releaseRevision };
+    return true;
+  }
+
+  /** The desktop did not answer a Status request: keep known releases and when they were
+   * checked, but stop claiming that nothing newer exists. */
+  private releaseFailed() {
+    const previous = this.releases;
+    if (this.setReleases({ ...previous, failed: true, receivedAt: previous?.receivedAt ?? Date.now(), revision: 0 })) this.onChange(this.snapshot);
   }
 
   async request(request: Request, signal?: AbortSignal): Promise<Response> {

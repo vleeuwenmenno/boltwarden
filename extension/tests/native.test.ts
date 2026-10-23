@@ -11,6 +11,8 @@ class MockPort implements NativePort {
   onMessage = { addListener: (callback: (message: unknown) => void) => { this.listeners.push(callback); } };
   onDisconnect = { addListener: (callback: () => void) => { this.disconnects.push(callback); } };
   hold = false;
+  /** Status requests wait here until a test answers them. */
+  heldStatus: Array<Request & { id: string }> | undefined;
   status: Record<string, unknown> = {};
   postMessage(message: Request & { id: string }) {
     this.messages.push(message);
@@ -18,6 +20,7 @@ class MockPort implements NativePort {
     let reply: Response | undefined;
     if (message.type === 'Hello') reply = { type: 'Challenge', paired: false, pairing_id, nonce: 'A'.repeat(43) };
     if (message.type === 'RequestPairing') reply = { type: 'Paired', pairing_id };
+    if (message.type === 'Status' && this.heldStatus) { this.heldStatus.push(message); return; }
     if (message.type === 'Status') reply = { type: 'Status', enabled: true, unlocked: true, epoch: 1, ...this.status } as Response;
     if (message.type === 'ListMatches' && !this.hold) reply = { type: 'Matches', items: [], epoch: 1, next_offset: null };
     if (message.type === 'Cancel') reply = { type: 'Cancelled', request_id: message.request_id };
@@ -103,7 +106,7 @@ const releases = JSON.parse(readFileSync(new URL('../protocol/fixtures/status-re
 describe('release metadata on the native connection', () => {
   it('keeps validated release metadata across lock and unlock, and clears it on disconnect', async () => {
     const { client, ports } = setup(); await client.pair('Test');
-    expect(client.releases).toEqual({ receivedAt: expect.any(Number) });
+    expect(client.releases).toEqual({ receivedAt: expect.any(Number), revision: 1 });
     ports.at(-1)!.status = { desktop_version: '1.0.0-rc.5', releases };
     await client.refreshStatus();
     const metadata = client.releases;
@@ -131,12 +134,80 @@ describe('release metadata on the native connection', () => {
     ports.at(-1)!.status = { desktop_version: 7, releases: { state: 'fresh', desktop: 'bad' } };
     await client.refreshStatus();
     expect(client.snapshot.state).toBe('ready');
-    expect(client.releases).toEqual({ invalid: true, receivedAt: expect.any(Number) });
+    expect(client.releases).toEqual({ invalid: true, receivedAt: expect.any(Number), revision: expect.any(Number) });
   });
   it('sends check_updates only for an explicit check', async () => {
     const { client, ports } = setup(); await client.pair('Test');
     await client.refreshStatus(); await client.refreshStatus(true);
     const statuses = ports.at(-1)!.messages.filter(value => value.type === 'Status');
     expect(statuses.map(value => 'check_updates' in value ? value.check_updates : undefined)).toEqual([undefined, undefined, true]);
+  });
+});
+
+describe('serialized Status requests', () => {
+  const fresh = { ...releases, state: 'fresh' };
+  const answer = (port: MockPort, extra: Record<string, unknown>) => {
+    const request = port.heldStatus!.shift()!;
+    port.emit({ version: 1, id: request.id, type: 'Status', enabled: true, unlocked: true, epoch: 1, ...extra });
+  };
+  const settle = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+  it('sends a manual check only after an earlier passive Status was answered', async () => {
+    const { client, ports } = setup(); await client.pair('Test');
+    const port = ports.at(-1)!; port.heldStatus = [];
+    const passive = client.refreshStatus();
+    const manual = client.refreshStatus(true);
+    await settle();
+    expect(port.heldStatus.map(value => 'check_updates' in value)).toEqual([false]);
+    // The older passive answer still says fresh; the manual check has not been sent yet.
+    answer(port, { releases: fresh }); await passive; await settle();
+    expect(client.releases?.releases?.state).toBe('fresh');
+    expect(port.heldStatus.map(value => (value as { check_updates?: boolean }).check_updates)).toEqual([true]);
+    answer(port, { releases: { ...releases, state: 'checking' } }); await manual;
+    expect(client.releases?.releases?.state).toBe('checking');
+    // A later poll sees the completed check.
+    const poll = client.refreshStatus(); await settle();
+    answer(port, { releases: fresh }); await poll;
+    expect(client.releases?.releases?.state).toBe('fresh');
+  });
+  it('drops queued requests when the connection closes and never sends them to a new host', async () => {
+    const { client, ports } = setup(); await client.pair('Test');
+    const port = ports.at(-1)!; port.heldStatus = [];
+    const passive = expect(client.refreshStatus()).rejects.toMatchObject({ code: 'Disconnected' });
+    const manual = expect(client.refreshStatus(true)).rejects.toMatchObject({ code: 'Disconnected' });
+    await settle();
+    port.disconnect(); await passive; await manual;
+    // A late answer from the old port changes nothing.
+    port.emit({ version: 1, id: 'late', type: 'Status', enabled: true, unlocked: false, epoch: 9, releases: fresh });
+    expect(client.releases).toBeUndefined(); expect(client.snapshot.state).toBe('disconnected');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(ports.length).toBeGreaterThan(2);
+    for (const later of ports.slice(ports.indexOf(port) + 1)) {
+      expect(later.messages.some(value => value.type === 'Status' && 'check_updates' in value)).toBe(false);
+    }
+  });
+  it('withdraws currentness when a Status request fails, keeps known releases, and recovers', async () => {
+    const { client, ports } = setup(); await client.pair('Test');
+    const port = ports.at(-1)!;
+    port.status = { releases: fresh }; await client.refreshStatus();
+    const before = client.releases!;
+    const changed = vi.fn(); client.onChange = changed;
+    port.heldStatus = [];
+    const failing = expect(client.refreshStatus(true)).rejects.toMatchObject({ code: 'Busy' });
+    await settle();
+    const request = port.heldStatus.shift()!;
+    port.emit({ version: 1, id: request.id, type: 'Error', code: 'Busy', message: 'Busy.' });
+    await failing;
+    expect(client.snapshot.state).toBe('ready');
+    expect(client.releases).toMatchObject({ failed: true, receivedAt: before.receivedAt, releases: before.releases });
+    expect(client.releases!.revision).toBeGreaterThan(before.revision);
+    expect(changed).toHaveBeenCalledWith(client.snapshot);
+    // A timeout counts as a failure too, and the next answer clears it.
+    const timeout = expect(client.refreshStatus()).rejects.toMatchObject({ code: 'Timeout' });
+    await settle(); await vi.advanceTimersByTimeAsync(10_000); await timeout;
+    expect(client.releases?.failed).toBe(true);
+    port.heldStatus = undefined;
+    await client.refreshStatus();
+    expect(client.releases?.failed).toBeUndefined();
+    expect(client.snapshot.state).toBe('ready');
   });
 });

@@ -267,7 +267,8 @@ describe('release notices', () => {
     });
   }
   // The background hands pages metadata that the native client already validated.
-  const meta = (value: unknown) => ({ desktopVersion: '1.0.0-rc.5', releases: parseReleases(value), receivedAt: Date.now() });
+  let revision = 0;
+  const meta = (value: unknown) => ({ desktopVersion: '1.0.0-rc.5', releases: parseReleases(value), receivedAt: Date.now(), revision: ++revision });
   const notices = () => Array.from(document.querySelectorAll('.release-notice'));
   beforeEach(() => { releases = meta(snapshot()); serve(); });
   afterEach(() => { vi.useRealTimers(); });
@@ -315,7 +316,7 @@ describe('release notices', () => {
   });
 
   it('ignores malformed release data in a push and keeps the connection', async () => {
-    releases = { invalid: true, receivedAt: 1 };
+    releases = { invalid: true, receivedAt: 1, revision: 1 };
     await open(true);
     await vi.waitFor(() => expect(app.textContent).toContain('could not read'));
     expect(app.textContent).toContain('Paired with Boltwarden desktop');
@@ -326,7 +327,11 @@ describe('release notices', () => {
     ['newer releases', meta(snapshot()), ['Version 1.0.0 is available.', 'Version 9.9.0 was published on GitHub. Browser store updates may still be pending.']],
     ['incomplete list', meta(snapshot({ complete: false, extension: info('extension-v9.8.7') }, { update: 'unknown', offer: undefined })), ['Could not confirm that this is the newest version.']],
     ['failed check', meta(snapshot({ state: 'error', error: 'network', extension: info('extension-v9.8.7') }, { update: 'up_to_date', offer: undefined })), ['The last check failed: GitHub could not be reached.', 'Could not confirm']],
-    ['older desktop', { desktopVersion: '1.0.0-rc.4', receivedAt: 1 }, ['(1.0.0-rc.4) does not share release information']],
+    ['older desktop', { desktopVersion: '1.0.0-rc.4', receivedAt: 1, revision: 1 }, ['(1.0.0-rc.4) does not share release information']],
+    ['check in progress', meta(snapshot({ state: 'checking', extension: info('extension-v9.8.7') }, { update: 'up_to_date', offer: undefined })), ['Checking for updates…', 'Could not confirm']],
+    ['never checked', meta(snapshot({ state: 'empty', checked_at: undefined, extension: info('extension-v9.8.7') }, { update: 'up_to_date', offer: undefined })), ['Not checked yet.']],
+    ['old check', meta(snapshot({ state: 'stale', extension: info('extension-v9.8.7') }, { update: 'up_to_date', offer: undefined })), ['more than three days ago', 'Could not confirm']],
+    ['incomplete fresh list', meta(snapshot({ complete: false, extension: info('extension-v9.8.7') }, { update: 'up_to_date', offer: undefined })), ['Could not confirm']],
     ['desktop without a checker', meta(snapshot({ state: 'unsupported' })), ['does not share release information']],
     ['development desktop', meta(snapshot({}, { installed: '1.0.0+3.gabc', update: 'development', offer: undefined })), ['Development build; updates are not offered. Latest release: 1.0.0.']],
   ])('shows versions and honest status in options: %s', async (_name, value, texts) => {
@@ -367,29 +372,99 @@ describe('release notices', () => {
     expect(releaseCalls.filter(call => call.check)).toHaveLength(1);
   });
 
-  it('stops polling after 40 seconds and on close even if the desktop keeps checking', async () => {
+  it('gives up after 40 seconds, allows another check, and stops on close', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
     releases = meta(snapshot({ state: 'checking' }));
     serve(() => meta(snapshot({ state: 'checking' })));
     await act(() => mount(true)); await flush();
+    const card = () => document.querySelector('.releases')!.textContent!;
+    expect(button('Checking…').disabled).toBe(true);
     await advance(60_000);
     const calls = releaseCalls.length;
     expect(calls).toBeLessThanOrEqual(22); expect(calls).toBeGreaterThan(15);
+    expect(card()).toContain('taking longer than expected');
+    expect(card()).not.toContain('Up to date');
+    expect(button('Check now').disabled).toBe(false);
     await advance(60_000); expect(releaseCalls).toHaveLength(calls);
-    act(() => render(null, app));
-    releaseCalls.length = 0;
-    await act(() => mount(true)); await flush();
+    // An explicit retry asks again and follows the new check.
+    await click(button('Check now')); await flush();
+    expect(releaseCalls.at(-1)).toEqual({ type: 'releases', check: true });
+    expect(button('Checking…').disabled).toBe(true);
     await advance(4_000);
-    expect(releaseCalls.length).toBeGreaterThan(1);
+    expect(releaseCalls.length).toBeGreaterThan(calls + 2);
     act(() => render(null, app));
     const closed = releaseCalls.length;
     await advance(20_000); expect(releaseCalls).toHaveLength(closed);
   });
 
+  it('never lets a late older answer bring back a finished check', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    const checking = meta(snapshot({ state: 'checking' }));
+    releases = checking;
+    let late: ((value: unknown) => void) | undefined;
+    serve(() => checking);
+    const serving = h.runtime.sendMessage.getMockImplementation()!;
+    // The first read (opening the page) is answered only after the check has finished.
+    h.runtime.sendMessage.mockImplementation((message: any) => message.type === 'releases' && !late
+      ? new Promise(resolve => { releaseCalls.push(message); late = resolve; }) : serving(message));
+    await act(() => mount(true)); await flush();
+    const done = meta(snapshot({ extension: info('extension-v9.8.7') }, { update: 'up_to_date', offer: undefined }));
+    await act(() => h.port.onMessage.emit({ type: 'state-changed', reason: 'releases', connection, releases: done }));
+    expect(document.querySelector('.releases')!.textContent).toContain('Up to date.');
+    await act(async () => { late!(response({ connection, releases: checking })); }); await flush();
+    expect(document.querySelector('.releases')!.textContent).not.toContain('Checking for updates…');
+    expect(button('Check now').disabled).toBe(false);
+  });
+
+  it('keeps known releases but withdraws up-to-date when the desktop stops answering', async () => {
+    const answered = meta(snapshot({ extension: info('extension-v9.8.7') }, { update: 'up_to_date', offer: undefined }));
+    releases = answered;
+    await open(true);
+    await vi.waitFor(() => expect(document.querySelector('.releases')?.textContent).toContain('Up to date.'));
+    const failed = { ...answered, failed: true, revision: answered.revision + 10 };
+    await act(() => h.port.onMessage.emit({ type: 'state-changed', reason: 'releases', connection, releases: failed }));
+    const card = document.querySelector('.releases')!.textContent!;
+    expect(card).not.toContain('Up to date.');
+    expect(card).toContain('did not answer the last request for release information');
+    expect(card).not.toContain('GitHub could not be reached');
+    expect(card).toContain('Last checked');
+    expect(button('Check now').disabled).toBe(false);
+    // Known newer releases stay visible.
+    const newer = { ...meta(snapshot()), failed: true as const, revision: failed.revision + 1 };
+    await act(() => h.port.onMessage.emit({ type: 'state-changed', reason: 'releases', connection, releases: newer }));
+    expect(document.querySelector('.releases')!.textContent).toContain('Version 1.0.0 is available.');
+    // Recovery clears the warning.
+    await act(() => h.port.onMessage.emit({ type: 'state-changed', reason: 'releases', connection, releases: { ...answered, revision: newer.revision + 1 } }));
+    expect(document.querySelector('.releases')!.textContent).toContain('Up to date.');
+  });
+
+  it('shows a failed manual check as a desktop error, not a GitHub failure', async () => {
+    releases = meta(snapshot({ extension: info('extension-v9.8.7') }, { update: 'up_to_date', offer: undefined }));
+    serve();
+    const serving = h.runtime.sendMessage.getMockImplementation()!;
+    h.runtime.sendMessage.mockImplementation(async (message: any) => message.type === 'releases' && message.check
+      ? { ok: false, error: 'Boltwarden did not respond in time.' } : serving(message));
+    await open(true);
+    await vi.waitFor(() => expect(button('Check now')).toBeDefined());
+    await click(button('Check now'));
+    await vi.waitFor(() => expect(document.querySelector('.releases [role=alert]')?.textContent).toBe('Boltwarden did not respond in time.'));
+    await act(() => h.port.onMessage.emit({ type: 'state-changed', reason: 'releases', connection, releases: { ...(releases as object), failed: true, revision: 999 } }));
+    expect(document.querySelector('.releases')!.textContent).not.toContain('Up to date.');
+  });
+
+  it('offers a check when the desktop never answered with release information', async () => {
+    releases = { failed: true, receivedAt: 1, revision: 1 };
+    serve(() => ({ failed: true, receivedAt: 1, revision: 1 }));
+    await open(true);
+    await vi.waitFor(() => expect(document.querySelector('.releases')?.textContent).toContain('did not answer the request for release information'));
+    expect(document.querySelector('.releases')!.textContent).not.toContain('does not share');
+    expect(button('Check now').disabled).toBe(false);
+  });
+
   it('does not poll an older desktop that ignores the check request', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
-    releases = { receivedAt: 1 };
-    serve(() => ({ receivedAt: 1 }));
+    releases = { receivedAt: 1, revision: 1 };
+    serve(() => ({ receivedAt: 1, revision: 1 }));
     await act(() => mount(true)); await flush();
     await click(button('Check now') ?? document.body);
     await advance(20_000);
