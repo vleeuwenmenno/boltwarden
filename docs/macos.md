@@ -70,7 +70,8 @@ Boltwarden.app, start it once and it updates the launcher. From Terminal:
 
 - Copied values stay on this Mac (no Universal Clipboard), carry the
   `org.nspasteboard.ConcealedType` marker that clipboard managers skip, and are
-  cleared after 45 seconds unless something else was copied since.
+  cleared after the **Clear clipboard after** time (45 seconds by default) or when the
+  vault locks, unless something else was copied since.
 - The vault locks when the screen locks, after the configured idle time, and when the
   Mac sleeps. Disable these in **Settings → General**.
 - The SSH agent identifies requesting processes with macOS process information and

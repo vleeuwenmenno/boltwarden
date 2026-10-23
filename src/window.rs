@@ -712,6 +712,9 @@ impl WindowApp {
             SearchAction::SetIdleLockTimeoutMinutes(value) => {
                 self.settings.idle_lock_timeout_minutes = value.clamp(1, 1440)
             }
+            SearchAction::SetClipboardClearSeconds(value) => {
+                self.settings.clipboard_clear_seconds = value
+            }
             SearchAction::SetSshAgentEnabled(value) => self.settings.ssh_agent_enabled = value,
             SearchAction::SetSshAgentSocketPath(value) => {
                 self.settings.ssh_agent_socket_path = value
