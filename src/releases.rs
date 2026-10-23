@@ -280,6 +280,21 @@ impl Feed {
     }
 }
 
+impl Feed {
+    /// Keeps the newest release per channel from `previous` and this feed.
+    fn merge_known(&mut self, previous: &Feed) {
+        if let Some(release) = previous.stable {
+            keep_newest(&mut self.stable, release);
+        }
+        if let Some(release) = previous.preview {
+            keep_newest(&mut self.preview, release);
+        }
+        if let Some(release) = previous.extension {
+            keep_newest(&mut self.extension, release);
+        }
+    }
+}
+
 fn keep_newest<V: Ord + Copy>(slot: &mut Option<Published<V>>, release: Published<V>) {
     if slot.is_none_or(|current| release.version > current.version) {
         *slot = Some(release);
@@ -308,12 +323,14 @@ fn parse_timestamp(text: &str) -> Option<u64> {
     };
     let (year, month, day) = (field(0..4)?, field(5..7)?, field(8..10)?);
     let (hour, minute, second) = (field(11..13)?, field(14..16)?, field(17..19)?);
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || hour > 23
-        || minute > 59
-        || second > 60
-    {
+    let days_in_month = match month {
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        _ => return None,
+    };
+    if !(1..=days_in_month).contains(&day) || hour > 23 || minute > 59 || second > 60 {
         return None;
     }
     let days = crate::health::days_from_civil(year, month, day);
@@ -942,7 +959,14 @@ impl State {
     fn finish(&mut self, result: Result<Feed, FetchError>, mono: Instant) -> Option<Feed> {
         self.in_flight = false;
         match result {
-            Ok(feed) => {
+            Ok(mut feed) => {
+                // Three pages may not reach an older release that is still the newest of
+                // its channel. Only a complete list may forget known releases.
+                if !feed.complete
+                    && let Some(previous) = &self.feed
+                {
+                    feed.merge_known(previous);
+                }
                 self.error = None;
                 self.retry_at = None;
                 self.rate_limited_until = None;
@@ -984,11 +1008,9 @@ impl State {
             }
         };
         let (mut update, offer) = desktop_offer(installed, feed);
-        // A failed or outdated check can still prove a known newer release, but not that
-        // nothing newer exists.
-        if update == DesktopUpdate::UpToDate
-            && matches!(state, CheckState::Error | CheckState::Stale)
-        {
+        // Only a recent, successful, complete check with no failure or check in progress
+        // since can show that nothing newer exists; a known newer release stays offered.
+        if update == DesktopUpdate::UpToDate && state != CheckState::Fresh {
             update = DesktopUpdate::Unknown;
         }
         ReleaseSnapshot {
@@ -1727,6 +1749,76 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_checks_keep_newer_known_releases_and_complete_ones_replace_them() {
+        let paths = temp_paths();
+        let service = service(&paths, "0.9.0", true);
+        let later = state_of(&service).started + STARTUP_DELAY;
+        let now = unix_now();
+        let first = Pages::json(vec![vec![
+            published("v1.0.0"),
+            published("v1.1.0-rc.1"),
+            published("extension-v0.6.0"),
+        ]]);
+        assert!(service.step(&first, now, later));
+
+        // Three full pages of older releases: the newer ones fell off the end.
+        let old: Vec<_> = (0..100).map(|n| published(&format!("v0.1.{n}"))).collect();
+        let incomplete = Pages::json(vec![old.clone(), old.clone(), old.clone()]);
+        state_of(&service).manual_pending = true;
+        assert!(service.step(&incomplete, now, later + MANUAL_INTERVAL));
+        let snapshot = service.snapshot();
+        assert!(!snapshot.complete);
+        assert_eq!(snapshot.desktop.stable.unwrap().version, "1.0.0");
+        assert_eq!(snapshot.desktop.preview.unwrap().version, "1.1.0-rc.1");
+        assert_eq!(snapshot.extension.unwrap().version, "0.6.0");
+        assert_eq!(snapshot.desktop.offer.unwrap().version, "1.0.0");
+        let reloaded = service_for(&paths).snapshot();
+        assert_eq!(reloaded.desktop.stable.unwrap().version, "1.0.0");
+        assert_eq!(reloaded.extension.unwrap().version, "0.6.0");
+        assert!(!reloaded.complete);
+
+        // A complete list is authoritative, even about releases that disappeared.
+        let complete = Pages::json(vec![vec![published("v0.9.5")]]);
+        state_of(&service).manual_pending = true;
+        assert!(service.step(&complete, now, later + 2 * MANUAL_INTERVAL));
+        let snapshot = service.snapshot();
+        assert!(snapshot.complete);
+        assert_eq!(snapshot.desktop.stable.unwrap().version, "0.9.5");
+        assert_eq!(snapshot.extension, None);
+        assert_eq!(service_for(&paths).snapshot().extension, None);
+    }
+
+    #[test]
+    fn retrying_a_failed_check_stays_uncertain_until_it_succeeds() {
+        let started = Instant::now();
+        let mono = started + STARTUP_DELAY;
+        let current = installed("1.0.0");
+        let older = installed("0.9.0");
+        let mut state = State::new(None, None, true, started);
+        assert!(state.begin(NOW, mono));
+        state.finish(Ok(feed_of(&[published("v1.0.0")])), mono);
+        assert!(state.begin(NOW, mono + CHECK_INTERVAL));
+        let mono = mono + CHECK_INTERVAL;
+        state.finish(Err(FetchError::Network), mono);
+        let update = |state: &State, installed: &Installed| {
+            state.snapshot(installed, NOW, mono).desktop.update
+        };
+        assert_eq!(update(&state, &current), DesktopUpdate::Unknown);
+        assert!(state.request_manual(mono + MANUAL_INTERVAL));
+        assert_eq!(
+            state.snapshot(&current, NOW, mono).state,
+            CheckState::Checking
+        );
+        assert_eq!(update(&state, &current), DesktopUpdate::Unknown, "queued");
+        assert_eq!(update(&state, &older), DesktopUpdate::Available);
+        assert!(state.begin(NOW, mono + MANUAL_INTERVAL));
+        assert_eq!(update(&state, &current), DesktopUpdate::Unknown, "running");
+        assert_eq!(update(&state, &older), DesktopUpdate::Available);
+        state.finish(Ok(feed_of(&[published("v1.0.0")])), mono + MANUAL_INTERVAL);
+        assert_eq!(update(&state, &current), DesktopUpdate::UpToDate);
+    }
+
+    #[test]
     fn failed_or_stale_checks_never_claim_up_to_date() {
         let started = Instant::now();
         let current = installed("1.0.0");
@@ -1824,6 +1916,15 @@ mod tests {
     #[test]
     fn parses_github_timestamps_and_formats_days() {
         assert_eq!(parse_timestamp("2026-09-01T10:00:00Z"), Some(1_788_256_800));
+        assert!(parse_timestamp("2024-02-29T00:00:00Z").is_some());
+        for invalid in [
+            "2026-02-31T00:00:00Z",
+            "2023-02-29T00:00:00Z",
+            "2100-02-29T00:00:00Z",
+            "2026-04-31T00:00:00Z",
+        ] {
+            assert_eq!(parse_timestamp(invalid), None, "{invalid}");
+        }
         for invalid in [
             "2026-09-01",
             "2026-09-01T10:00:00",

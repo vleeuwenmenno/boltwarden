@@ -34,6 +34,9 @@ pub struct ReleaseUi {
     /// When `snapshot` arrived, to count down its `retry_after_seconds`.
     received_at: Option<Instant>,
     error: Option<String>,
+    /// The last background poll failed: the daemon did not answer, so `snapshot` is
+    /// only the last known state and may no longer be true.
+    unreachable: bool,
 }
 
 impl ReleaseUi {
@@ -49,13 +52,18 @@ impl ReleaseUi {
                             self.snapshot = Some(snapshot);
                             self.received_at = Some(Instant::now());
                             self.error = None;
+                            self.unreachable = false;
                         }
                         Err(error) if requested => self.error = Some(error),
-                        Err(_) => {}
+                        // Stay quiet in the notice, but stop trusting the old snapshot.
+                        Err(_) => self.unreachable = true,
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => return,
-                Err(mpsc::TryRecvError::Disconnected) => self.reply = None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.reply = None;
+                    self.unreachable = true;
+                }
             }
         }
         let mut interval = if self.checking() {
@@ -93,13 +101,18 @@ impl ReleaseUi {
     }
 
     fn checking(&self) -> bool {
-        self.snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.state == CheckState::Checking)
+        !self.unreachable
+            && self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.state == CheckState::Checking)
     }
 
     /// Time left before the daemon accepts another manual check.
     fn retry_wait(&self) -> Option<Duration> {
+        if self.unreachable {
+            return None;
+        }
         let seconds = self.snapshot.as_ref()?.retry_after_seconds?;
         Duration::from_secs(seconds)
             .checked_sub(self.received_at?.elapsed())
@@ -176,8 +189,16 @@ impl ReleaseUi {
             ui.label(RichText::new("Loading release information…").color(t.text_muted));
             return None;
         };
-        ui.label(status_text(&snapshot, auto_check));
-        if let Some(error) = snapshot
+        ui.label(self.status_line(auto_check).unwrap_or_default());
+        if self.unreachable {
+            ui.label(
+                RichText::new(
+                    "The Boltwarden background service is not responding; \
+                     showing the last known release information.",
+                )
+                .color(t.warning),
+            );
+        } else if let Some(error) = snapshot
             .error
             .filter(|_| snapshot.state == CheckState::Error)
         {
@@ -270,6 +291,21 @@ fn open_release(release: &ReleaseInfo) -> Result<(), String> {
         .and_then(|_| url::Url::parse(&release.url).ok())
         .ok_or_else(|| "Invalid release link".to_string())?;
     crate::platform::open_url(&url).map_err(|error| format!("Could not open the browser: {error}"))
+}
+
+impl ReleaseUi {
+    /// The main About status. Without an answer from the daemon only a known newer
+    /// release is still claimed, never "up to date" or a GitHub failure.
+    fn status_line(&self, auto_check: bool) -> Option<String> {
+        let snapshot = self.snapshot.as_ref()?;
+        if self.unreachable
+            && !(snapshot.desktop.update == DesktopUpdate::Available
+                && snapshot.desktop.offer.is_some())
+        {
+            return Some("Update status unknown.".into());
+        }
+        Some(status_text(snapshot, auto_check))
+    }
 }
 
 fn status_text(snapshot: &ReleaseSnapshot, auto_check: bool) -> String {
@@ -624,5 +660,50 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing {label}"));
             assert!(rect.max.x <= width + 0.5, "{label} clipped at {rect:?}");
         }
+    }
+
+    #[test]
+    fn unanswered_polls_withdraw_up_to_date_until_the_daemon_answers() {
+        let ctx = egui::Context::default();
+        let backend = AppBackend::demo();
+        let mut current = snapshot();
+        current.desktop.update = DesktopUpdate::UpToDate;
+        current.desktop.offer = None;
+        let mut ui = ReleaseUi::default();
+        let mut reply = |ui: &mut ReleaseUi, result: Option<Result<ReleaseSnapshot, String>>| {
+            let (tx, rx) = mpsc::channel();
+            if let Some(result) = result {
+                tx.send((false, result)).unwrap();
+            }
+            drop(tx);
+            ui.reply = Some(rx);
+            ui.polled_at = None;
+            ui.poll(&ctx, &backend);
+            // Discard the follow-up poll the demo backend would answer.
+            ui.reply = None;
+        };
+        reply(&mut ui, Some(Ok(current.clone())));
+        assert_eq!(ui.status_line(true).unwrap(), "Boltwarden is up to date.");
+        // Polls keep failing, for days: never up to date, never a GitHub error.
+        for _ in 0..3 {
+            reply(&mut ui, Some(Err("could not connect to daemon".into())));
+            assert_eq!(ui.status_line(true).unwrap(), "Update status unknown.");
+            assert_eq!(ui.error, None, "background failures stay out of the notice");
+        }
+        // A worker that disappeared counts the same.
+        reply(&mut ui, None);
+        assert!(ui.unreachable);
+        assert_eq!(ui.snapshot.as_ref().unwrap().checked_at, current.checked_at);
+        reply(&mut ui, Some(Ok(current)));
+        assert_eq!(ui.status_line(true).unwrap(), "Boltwarden is up to date.");
+
+        // A known newer release is still announced while the daemon is unreachable.
+        reply(&mut ui, Some(Ok(snapshot())));
+        reply(&mut ui, Some(Err("could not connect to daemon".into())));
+        assert!(ui.snapshot.as_ref().unwrap().notice().is_some());
+        assert_eq!(
+            ui.status_line(true).unwrap(),
+            "Boltwarden 1.0.0 is available."
+        );
     }
 }
