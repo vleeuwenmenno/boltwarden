@@ -820,8 +820,9 @@ viewing, copying, or editing. Verification expires after 60 seconds; the popup
 conceals the item slightly earlier and preserves an unsaved draft behind the
 verification screen. Locking the vault discards drafts.
 
-Clipboard ownership expires after 45 seconds and is released when the vault
-locks or the daemon quits. The daemon stops only its own foreground clipboard
+Clipboard ownership expires after 45 seconds by default and is always released
+when the vault locks or the daemon quits. Change the delay, or choose Never, in
+**Settings → Security → Clear clipboard after**; a change applies to the next copy. The daemon stops only its own foreground clipboard
 provider, preserving newer copies from other applications. Wayland requires
 `wl-copy`; X11 requires `xclip` or `xsel`. Clipboard managers can retain previously
 copied values, especially on X11: expiry cannot erase those independent histories.

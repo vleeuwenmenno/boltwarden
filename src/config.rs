@@ -102,6 +102,10 @@ pub struct AppSettings {
     pub lock_after_idle_timeout: bool,
     #[serde(default = "default_idle_lock_timeout_minutes")]
     pub idle_lock_timeout_minutes: u64,
+    /// Seconds before a copied secret leaves the clipboard; 0 never expires it, though
+    /// locking still clears it.
+    #[serde(default = "default_clipboard_clear_seconds")]
+    pub clipboard_clear_seconds: u64,
     /// Fetch website icons from the vault server's icon service (cached on disk).
     #[serde(default = "default_true")]
     pub show_website_icons: bool,
@@ -136,6 +140,7 @@ impl Default for AppSettings {
             lock_on_system_lock: true,
             lock_after_idle_timeout: true,
             idle_lock_timeout_minutes: default_idle_lock_timeout_minutes(),
+            clipboard_clear_seconds: default_clipboard_clear_seconds(),
             show_website_icons: true,
             obscure_screen_capture: true,
             start_list: StartList::None,
@@ -255,6 +260,39 @@ pub fn default_ssh_agent_socket_path() -> String {
 
 pub fn default_idle_lock_timeout_minutes() -> u64 {
     60
+}
+
+pub fn default_clipboard_clear_seconds() -> u64 {
+    45
+}
+
+/// The clipboard clear times offered in settings, in display order; 0 is Never.
+pub const CLIPBOARD_CLEAR_CHOICES: [u64; 8] = [10, 20, 30, 45, 60, 120, 300, 0];
+
+impl AppSettings {
+    /// How long a copy stays on the clipboard, or `None` to keep it until locking.
+    pub fn clipboard_clear_after(&self) -> Option<std::time::Duration> {
+        (self.clipboard_clear_seconds > 0)
+            .then(|| std::time::Duration::from_secs(self.clipboard_clear_seconds))
+    }
+}
+
+/// A clipboard clear time for display: "45 s", "2 min" or "Never".
+pub fn clipboard_clear_label(seconds: u64) -> String {
+    match seconds {
+        0 => "Never".into(),
+        s if s % 60 == 0 => format!("{} min", s / 60),
+        s => format!("{s} s"),
+    }
+}
+
+/// The next offered clipboard clear time, for cycling with Space or a click.
+pub fn next_clipboard_clear_seconds(seconds: u64) -> u64 {
+    let next = CLIPBOARD_CLEAR_CHOICES
+        .iter()
+        .position(|choice| *choice == seconds)
+        .map_or(0, |index| (index + 1) % CLIPBOARD_CLEAR_CHOICES.len());
+    CLIPBOARD_CLEAR_CHOICES[next]
 }
 
 pub fn expand_ssh_agent_socket_path(path: &str) -> Result<PathBuf, String> {
@@ -868,6 +906,7 @@ mod tests {
         assert!(actual.lock_on_system_lock);
         assert!(actual.lock_after_idle_timeout);
         assert_eq!(actual.idle_lock_timeout_minutes, 60);
+        assert_eq!(actual.clipboard_clear_seconds, 45);
     }
 
     #[test]
@@ -892,6 +931,7 @@ mod tests {
             lock_on_system_lock: false,
             lock_after_idle_timeout: false,
             idle_lock_timeout_minutes: 15,
+            clipboard_clear_seconds: 0,
             show_website_icons: true,
             obscure_screen_capture: false,
             start_list: StartList::None,
@@ -908,6 +948,8 @@ mod tests {
         assert!(!actual.lock_on_system_lock);
         assert!(!actual.lock_after_idle_timeout);
         assert_eq!(actual.idle_lock_timeout_minutes, 15);
+        assert_eq!(actual.clipboard_clear_seconds, 0);
+        assert_eq!(actual.clipboard_clear_after(), None);
 
         save_settings(&AppSettings {
             keep_offline_copy: true,
@@ -919,6 +961,7 @@ mod tests {
             lock_on_system_lock: true,
             lock_after_idle_timeout: true,
             idle_lock_timeout_minutes: 60,
+            clipboard_clear_seconds: 120,
             show_website_icons: true,
             obscure_screen_capture: true,
             start_list: StartList::None,
@@ -938,6 +981,11 @@ mod tests {
         assert!(actual.lock_on_system_lock);
         assert!(actual.lock_after_idle_timeout);
         assert_eq!(actual.idle_lock_timeout_minutes, 60);
+        assert_eq!(actual.clipboard_clear_seconds, 120);
+        assert_eq!(
+            actual.clipboard_clear_after(),
+            Some(std::time::Duration::from_secs(120))
+        );
 
         restore_var("XDG_CONFIG_HOME", previous_config_home);
         let _ = fs::remove_dir_all(temp);
@@ -1038,6 +1086,35 @@ mod tests {
         assert!(actual.lock_on_system_lock);
         assert!(actual.lock_after_idle_timeout);
         assert_eq!(actual.idle_lock_timeout_minutes, 60);
+        assert_eq!(actual.clipboard_clear_seconds, 45);
+    }
+
+    #[test]
+    fn clipboard_clear_choices_cycle_and_label_never() {
+        let defaults = AppSettings::default();
+        assert_eq!(defaults.clipboard_clear_seconds, 45);
+        assert_eq!(
+            defaults.clipboard_clear_after(),
+            Some(std::time::Duration::from_secs(45))
+        );
+        let never = AppSettings {
+            clipboard_clear_seconds: 0,
+            ..Default::default()
+        };
+        assert_eq!(never.clipboard_clear_after(), None);
+        let labels = CLIPBOARD_CLEAR_CHOICES.map(clipboard_clear_label);
+        assert_eq!(
+            labels,
+            [
+                "10 s", "20 s", "30 s", "45 s", "1 min", "2 min", "5 min", "Never"
+            ]
+        );
+        assert_eq!(next_clipboard_clear_seconds(45), 60);
+        assert_eq!(next_clipboard_clear_seconds(300), 0);
+        assert_eq!(next_clipboard_clear_seconds(0), 10);
+        // A hand-edited value outside the choices restarts the cycle.
+        assert_eq!(clipboard_clear_label(90), "90 s");
+        assert_eq!(next_clipboard_clear_seconds(90), 10);
     }
 
     #[test]

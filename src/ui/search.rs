@@ -9,7 +9,8 @@ use egui::{Context, RichText, Ui};
 
 const SEARCH_INPUT_ID: &str = "vault-search-input";
 const SSH_PATH_INPUT_ID: &str = "settings-ssh-socket-path";
-const SETTINGS_ROWS: usize = 19;
+const SETTINGS_ROWS: usize = 20;
+pub(crate) const CLIPBOARD_CLEAR_ROW: usize = 19;
 pub(crate) const EXPOSED_PASSWORDS_ROW: usize = 18;
 /// Shown on macOS and Linux; the Windows installer offers start at sign-in instead.
 pub(crate) const START_AT_LOGIN_ROW: usize = 17;
@@ -99,6 +100,10 @@ pub(crate) const SETTING_TEXT: [(&str, &str); SETTINGS_ROWS] = [
         "Check passwords against breaches",
         "Look up 5-character hash prefixes with Pwned Passwords",
     ),
+    (
+        "Clear clipboard after",
+        "Remove copied secrets from the clipboard; locking always clears it",
+    ),
 ];
 
 /// Rows this platform offers; the others are hidden and skipped by the keyboard.
@@ -141,6 +146,7 @@ impl SettingsGroup {
             Self::Security => &[
                 6,
                 IDLE_TIMEOUT_ROW,
+                CLIPBOARD_CLEAR_ROW,
                 9,
                 SCREEN_CAPTURE_ROW,
                 EXPOSED_PASSWORDS_ROW,
@@ -1397,6 +1403,9 @@ pub(crate) fn toggle_setting(row: usize, settings: &AppSettings) -> Option<Searc
         EXPOSED_PASSWORDS_ROW => {
             SearchAction::SetCheckExposedPasswords(!settings.check_exposed_passwords)
         }
+        CLIPBOARD_CLEAR_ROW => SearchAction::SetClipboardClearSeconds(
+            config::next_clipboard_clear_seconds(settings.clipboard_clear_seconds),
+        ),
         _ => return None,
     })
 }
@@ -1706,6 +1715,25 @@ pub fn draw_settings(
                     action = toggle_setting(EXPOSED_PASSWORDS_ROW, settings);
                 }
             }
+            if visible(CLIPBOARD_CLEAR_ROW) {
+                let response = widgets::choice_row(
+                    ui,
+                    state.settings_selected == CLIPBOARD_CLEAR_ROW,
+                    SETTING_TEXT[CLIPBOARD_CLEAR_ROW].0,
+                    SETTING_TEXT[CLIPBOARD_CLEAR_ROW].1,
+                    &config::clipboard_clear_label(settings.clipboard_clear_seconds),
+                );
+                if state.settings_selected == CLIPBOARD_CLEAR_ROW
+                    && state.settings_scrolled_to != Some(CLIPBOARD_CLEAR_ROW)
+                {
+                    response.scroll_to_me(None);
+                    state.settings_scrolled_to = Some(CLIPBOARD_CLEAR_ROW);
+                }
+                if response.clicked() {
+                    state.settings_selected = CLIPBOARD_CLEAR_ROW;
+                    action = toggle_setting(CLIPBOARD_CLEAR_ROW, settings);
+                }
+            }
             if visible(8)
                 && let Some(path) = draw_ssh_socket_path(ui, state, settings, ssh_agent_status)
             {
@@ -1813,6 +1841,7 @@ pub enum SearchAction {
     SetLockOnSystemLock(bool),
     SetLockAfterIdleTimeout(bool),
     SetIdleLockTimeoutMinutes(u64),
+    SetClipboardClearSeconds(u64),
     SetSshAgentEnabled(bool),
     SetSshAgentSocketPath(String),
     SetStartList(StartList),
@@ -2137,7 +2166,8 @@ mod tests {
     fn passkey_verification_setting_cycles_after_existing_browser_rows() {
         let mut settings = AppSettings::default();
         assert_eq!(PASSKEY_VERIFICATION_ROW, PAIRED_BROWSERS_ROW + 1);
-        assert_eq!(EXPOSED_PASSWORDS_ROW, SETTINGS_ROWS - 1);
+        assert_eq!(CLIPBOARD_CLEAR_ROW, SETTINGS_ROWS - 1);
+        assert_eq!(EXPOSED_PASSWORDS_ROW, CLIPBOARD_CLEAR_ROW - 1);
         assert_eq!(START_AT_LOGIN_ROW, EXPOSED_PASSWORDS_ROW - 1);
         assert_eq!(SHORTCUT_ROW, START_AT_LOGIN_ROW - 1);
         if row_supported(START_AT_LOGIN_ROW) {
@@ -2232,6 +2262,7 @@ mod tests {
         assert!(setting_matches(SHORTCUT_ROW, "KEYBOARD quick"));
         assert!(setting_matches(IDLE_TIMEOUT_ROW, "lock idle"));
         assert!(!setting_matches(SHORTCUT_ROW, "lock idle"));
+        assert!(setting_matches(CLIPBOARD_CLEAR_ROW, "clipboard"));
         let matches: Vec<usize> = (0..SETTINGS_ROWS)
             .filter(|row| setting_matches(*row, "browser"))
             .collect();
