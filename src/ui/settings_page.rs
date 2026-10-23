@@ -1,12 +1,13 @@
 //! The vault window's settings: a category sidebar with icon tiles, and one page per
 //! category with its settings grouped under headings in a centered column. Rows, keyboard
 //! selection and actions are shared with quick access's compact list in `ui::search`.
-use crate::config::{AppSettings, PasskeyVerification, StartList};
+use crate::config::{self, AppSettings, PasskeyVerification, StartList};
 use crate::model::SshAgentStatus;
 use crate::ui::search::{
-    self, BROWSER_SETUP_ROW, DEFAULT_URI_MATCH_ROW, EXPOSED_PASSWORDS_ROW, IDLE_TIMEOUT_ROW,
-    PAIRED_BROWSERS_ROW, PASSKEY_VERIFICATION_ROW, SCREEN_CAPTURE_ROW, SETTING_TEXT, SHORTCUT_ROW,
-    START_AT_LOGIN_ROW, START_LIST_ROW, SearchAction, SearchState, SettingsGroup,
+    self, BROWSER_SETUP_ROW, CLIPBOARD_CLEAR_ROW, DEFAULT_URI_MATCH_ROW, EXPOSED_PASSWORDS_ROW,
+    IDLE_TIMEOUT_ROW, PAIRED_BROWSERS_ROW, PASSKEY_VERIFICATION_ROW, SCREEN_CAPTURE_ROW,
+    SETTING_TEXT, SHORTCUT_ROW, START_AT_LOGIN_ROW, START_LIST_ROW, SearchAction, SearchState,
+    SettingsGroup,
 };
 use crate::ui::{theme::theme, widgets};
 use crate::uri_match::UriMatchType;
@@ -385,6 +386,21 @@ pub fn draw_page(
                     None,
                 ));
                 take(search::draw_idle_timeout(ui, settings));
+                section(ui, "Clipboard");
+                let labels = config::CLIPBOARD_CLEAR_CHOICES.map(config::clipboard_clear_label);
+                let options: Vec<(u64, &str)> = config::CLIPBOARD_CLEAR_CHOICES
+                    .iter()
+                    .zip(&labels)
+                    .map(|(seconds, label)| (*seconds, label.as_str()))
+                    .collect();
+                take(choice(
+                    ui,
+                    state,
+                    CLIPBOARD_CLEAR_ROW,
+                    settings.clipboard_clear_seconds,
+                    &options,
+                    SearchAction::SetClipboardClearSeconds,
+                ));
                 section(ui, "Offline access");
                 take(switch(
                     ui,

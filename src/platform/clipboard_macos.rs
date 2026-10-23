@@ -7,8 +7,6 @@ use objc2_foundation::{NSData, NSString};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub const CLEAR_AFTER: Duration = Duration::from_secs(45);
-
 const CONCEALED_TYPE: &str = "org.nspasteboard.ConcealedType";
 
 /// Holds the pasteboard change count of our last copy while it may still be ours.
@@ -16,16 +14,19 @@ const CONCEALED_TYPE: &str = "org.nspasteboard.ConcealedType";
 pub struct Clipboard(Arc<Mutex<Option<isize>>>);
 
 impl Clipboard {
-    pub fn copy(&self, text: &str) -> Result<(), String> {
+    /// Copies `text`, clearing it after `clear_after`; `None` keeps it until `clear`.
+    pub fn copy(&self, text: &str, clear_after: Option<Duration>) -> Result<(), String> {
         let mut owned = self.0.lock().map_err(|_| "Clipboard unavailable")?;
         let count = autoreleasepool(|_| write(&NSPasteboard::generalPasteboard(), text))?;
         *owned = Some(count);
         drop(owned);
-        let clipboard = self.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(CLEAR_AFTER);
-            clipboard.expire(count);
-        });
+        if let Some(clear_after) = clear_after {
+            let clipboard = self.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(clear_after);
+                clipboard.expire(count);
+            });
+        }
         Ok(())
     }
 

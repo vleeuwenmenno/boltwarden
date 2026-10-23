@@ -12,11 +12,14 @@ use windows_sys::Win32::{
     UI::WindowsAndMessaging::*,
 };
 use zeroize::Zeroizing;
-pub const CLEAR_AFTER: Duration = Duration::from_secs(45);
 #[derive(Clone)]
 pub struct Clipboard(Arc<mpsc::Sender<Command>>);
 enum Command {
-    Copy(Zeroizing<String>, mpsc::Sender<Result<(), String>>),
+    Copy(
+        Zeroizing<String>,
+        Option<Duration>,
+        mpsc::Sender<Result<(), String>>,
+    ),
     Clear(mpsc::Sender<()>),
 }
 impl Default for Clipboard {
@@ -27,10 +30,15 @@ impl Default for Clipboard {
     }
 }
 impl Clipboard {
-    pub fn copy(&self, text: &str) -> Result<(), String> {
+    /// Copies `text`, clearing it after `clear_after`; `None` keeps it until `clear`.
+    pub fn copy(&self, text: &str, clear_after: Option<Duration>) -> Result<(), String> {
         let (tx, rx) = mpsc::channel();
         self.0
-            .send(Command::Copy(Zeroizing::new(text.to_owned()), tx))
+            .send(Command::Copy(
+                Zeroizing::new(text.to_owned()),
+                clear_after,
+                tx,
+            ))
             .map_err(|_| "Clipboard unavailable")?;
         rx.recv_timeout(Duration::from_secs(3))
             .map_err(|_| "Clipboard did not respond".to_string())?
@@ -137,13 +145,17 @@ fn worker(rx: mpsc::Receiver<Command>) {
     if window.is_null() {
         return;
     }
-    let mut owned: Option<(u32, Instant)> = None;
+    // The sequence number we own and, unless the copy never expires, when to clear it.
+    let mut owned: Option<(u32, Option<Instant>)> = None;
     loop {
         match rx.try_recv() {
-            Ok(Command::Copy(text, reply)) => {
+            Ok(Command::Copy(text, clear_after, reply)) => {
                 let result = copy(window, &text)
                     .map(|sequence| {
-                        owned = Some((sequence, Instant::now() + CLEAR_AFTER));
+                        owned = Some((
+                            sequence,
+                            clear_after.and_then(|after| Instant::now().checked_add(after)),
+                        ));
                     })
                     .map_err(|e| e.to_string());
                 let _ = reply.send(result);
@@ -153,7 +165,7 @@ fn worker(rx: mpsc::Receiver<Command>) {
                     if clear(window, sequence).is_ok() {
                         owned = None;
                     } else {
-                        owned = Some((sequence, Instant::now()));
+                        owned = Some((sequence, Some(Instant::now())));
                     }
                 }
                 let _ = reply.send(());
@@ -161,7 +173,7 @@ fn worker(rx: mpsc::Receiver<Command>) {
             Err(mpsc::TryRecvError::Disconnected) => break,
             Err(mpsc::TryRecvError::Empty) => (),
         }
-        if let Some((sequence, deadline)) = owned {
+        if let Some((sequence, Some(deadline))) = owned {
             if Instant::now() >= deadline && clear(window, sequence).is_ok() {
                 owned = None;
             }

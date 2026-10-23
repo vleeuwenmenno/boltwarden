@@ -505,7 +505,7 @@ impl App {
                     Ok(()) => {
                         self.quick_copy_after_verify = false;
                         self.search_state
-                            .show_notice("Password copied; clipboard expires in 45 seconds");
+                            .show_notice(&copy_notice(self.settings.clipboard_clear_seconds));
                         if self.settings.close_after_copy {
                             self.hide_quick_access(ctx);
                         }
@@ -1761,6 +1761,10 @@ impl App {
                 self.settings.idle_lock_timeout_minutes = minutes.clamp(1, 1440);
                 self.save_and_apply_settings();
             }
+            SearchAction::SetClipboardClearSeconds(seconds) => {
+                self.settings.clipboard_clear_seconds = seconds;
+                self.save_and_apply_settings();
+            }
             SearchAction::SetSshAgentEnabled(enabled) => {
                 self.settings.ssh_agent_enabled = enabled;
                 self.save_and_apply_settings();
@@ -1844,6 +1848,17 @@ impl App {
     }
 }
 
+/// The quick-copy notice, with the clipboard countdown unless copies never expire.
+fn copy_notice(clear_seconds: u64) -> String {
+    match clear_seconds {
+        0 => "Password copied".into(),
+        seconds => format!(
+            "Password copied; clipboard clears in {}",
+            config::clipboard_clear_label(seconds)
+        ),
+    }
+}
+
 fn debug_log(message: &str) {
     if std::env::var_os("BOLTWARDEN_DEBUG").is_some() {
         eprintln!("[boltwarden] {message}");
@@ -1853,6 +1868,17 @@ fn debug_log(message: &str) {
 #[cfg(test)]
 mod security_tests {
     use super::*;
+
+    #[test]
+    fn copy_notice_follows_clipboard_clear_setting() {
+        assert_eq!(copy_notice(45), "Password copied; clipboard clears in 45 s");
+        assert_eq!(
+            copy_notice(120),
+            "Password copied; clipboard clears in 2 min"
+        );
+        assert_eq!(copy_notice(0), "Password copied");
+    }
+
     #[test]
     fn locking_clears_secrets_and_disconnects_stale_workers() {
         let (commands, receiver) = mpsc::channel();
