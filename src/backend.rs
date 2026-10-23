@@ -5,6 +5,7 @@ use crate::model::{
     BwItem, BwItemDetail, Folder, HealthReport, ItemAction, ItemDraft, ItemState, SshAgentStatus,
     SshApprovalDecision, SshApprovalRequest, SshApprovalStatus, SyncStatus, TotpCode,
 };
+use crate::releases::ReleaseSnapshot;
 use crate::rpc::{RpcClient, RpcError, RpcRequest, RpcResponse};
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -115,6 +116,43 @@ impl AppBackend {
                 _ => Err("Unexpected browser revocation response".into()),
             },
             _ => Err("Browser integration requires the daemon".into()),
+        }
+    }
+
+    /// Cached release information from the daemon. Never waits for GitHub.
+    pub fn release_snapshot(&self) -> Result<ReleaseSnapshot, String> {
+        match self {
+            Self::Remote(client) => match client.call(&RpcRequest::ReleaseStatus)? {
+                RpcResponse::Releases(snapshot) => Ok(snapshot),
+                _ => Err("Unexpected release response".into()),
+            },
+            Self::Local(_) => Ok(ReleaseSnapshot::unsupported()),
+            Self::Demo(demo) => Ok(demo.releases()),
+        }
+    }
+
+    /// Queues a release check; the snapshot shows it as checking until it finishes.
+    pub fn check_releases(&self) -> Result<ReleaseSnapshot, String> {
+        match self {
+            Self::Remote(client) => match client.call(&RpcRequest::CheckReleases)? {
+                RpcResponse::Releases(snapshot) => Ok(snapshot),
+                _ => Err("Unexpected release response".into()),
+            },
+            Self::Local(_) => Err("Release checks require the running daemon".into()),
+            Self::Demo(demo) => Ok(demo.releases()),
+        }
+    }
+
+    pub fn dismiss_release(&self, version: &str) -> Result<ReleaseSnapshot, String> {
+        match self {
+            Self::Remote(client) => match client.call(&RpcRequest::DismissRelease {
+                version: version.to_string(),
+            })? {
+                RpcResponse::ReleaseDismissed(result) => result,
+                _ => Err("Unexpected release response".into()),
+            },
+            Self::Local(_) => Err("Release checks require the running daemon".into()),
+            Self::Demo(demo) => Ok(demo.dismiss_release()),
         }
     }
 

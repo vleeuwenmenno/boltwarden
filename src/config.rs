@@ -123,6 +123,9 @@ pub struct AppSettings {
     /// Password generator preferences in the item editor.
     #[serde(default)]
     pub generator: crate::generator::GeneratorOptions,
+    /// Ask GitHub once a day for public Boltwarden release information.
+    #[serde(default = "default_true")]
+    pub check_for_updates: bool,
 }
 
 impl Default for AppSettings {
@@ -147,6 +150,7 @@ impl Default for AppSettings {
             start_at_login: false,
             check_exposed_passwords: false,
             generator: crate::generator::GeneratorOptions::default(),
+            check_for_updates: true,
         }
     }
 }
@@ -526,17 +530,24 @@ pub fn clear_item_usage() -> io::Result<()> {
 }
 
 /// Writes a config file readable only by the current user.
-#[cfg(windows)]
-pub(crate) fn write_private(file_name: &str, data: &[u8]) -> io::Result<()> {
-    let path =
-        config_path(file_name).ok_or_else(|| io::Error::other("config directory unavailable"))?;
-    crate::platform::windows::write_private(&path, data)
-}
-
-#[cfg(not(windows))]
 pub(crate) fn write_private(file_name: &str, data: &[u8]) -> io::Result<()> {
     let path = config_path(file_name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "config directory unavailable"))?;
+    write_private_path(&path, data)
+}
+
+/// Writes a file readable only by the current user, replacing it atomically.
+#[cfg(windows)]
+pub(crate) fn write_private_path(path: &std::path::Path, data: &[u8]) -> io::Result<()> {
+    crate::platform::windows::write_private(path, data)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn write_private_path(path: &std::path::Path, data: &[u8]) -> io::Result<()> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::other("invalid file name"))?;
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("config directory unavailable"))?;

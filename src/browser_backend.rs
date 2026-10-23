@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, Weak, mpsc};
 pub struct DaemonBrowserBackend {
     pub vault: Weak<Mutex<VaultState>>,
     pub unlock: mpsc::Sender<()>,
+    pub releases: crate::releases::ReleaseService,
 }
 
 fn error(code: &str) -> BrowserResponse {
@@ -214,6 +215,16 @@ impl BrowserHandler for DaemonBrowserBackend {
             request,
             BrowserRequest::ListTotpMatches { .. } | BrowserRequest::FillTotp { .. }
         );
+        // Release data is public and cached; read it before taking the vault lock.
+        let releases = match request {
+            BrowserRequest::Status { check_updates } => {
+                if check_updates {
+                    self.releases.check_if_due();
+                }
+                Some(self.releases.snapshot())
+            }
+            _ => None,
+        };
         let Some(vault) = self.vault.upgrade() else {
             return error("DaemonUnavailable");
         };
@@ -224,10 +235,12 @@ impl BrowserHandler for DaemonBrowserBackend {
             return error("Disabled");
         }
         match request {
-            BrowserRequest::Status => BrowserResponse::Status {
+            BrowserRequest::Status { .. } => BrowserResponse::Status {
                 enabled: true,
                 unlocked: state.bw.has_session(),
                 epoch: state.browser_epoch,
+                desktop_version: Some(crate::version::APP.into()),
+                releases,
             },
             BrowserRequest::RequestUnlock => {
                 if !state.bw.has_session() {

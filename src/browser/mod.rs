@@ -955,6 +955,8 @@ mod tests {
                 enabled: true,
                 unlocked: true,
                 epoch: 1,
+                desktop_version: None,
+                releases: None,
             }
         }
         fn approve_pairing(&self, _: &RequestContext, _: &PairingRequest) -> Result<(), String> {
@@ -1091,7 +1093,12 @@ mod tests {
     #[test]
     fn unauthenticated_requests_never_reach_vault_handler() {
         let mut h = Harness::new();
-        let response = h.request("status", BrowserRequest::Status);
+        let response = h.request(
+            "status",
+            BrowserRequest::Status {
+                check_updates: false,
+            },
+        );
         assert_eq!(response["code"], "Unpaired");
         assert_eq!(h.handler.requests.load(Ordering::SeqCst), 0);
     }
@@ -1153,7 +1160,13 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&records).unwrap()).unwrap();
         *h.hub.inner.pairings.lock().unwrap() = PairingStore::load_at(path.clone()).unwrap();
         assert_eq!(
-            Harness::request_on(&mut client, "status", BrowserRequest::Status)["type"],
+            Harness::request_on(
+                &mut client,
+                "status",
+                BrowserRequest::Status {
+                    check_updates: false
+                }
+            )["type"],
             "Status"
         );
         let record = h.hub.list_pairings().unwrap().remove(0);
@@ -1167,7 +1180,12 @@ mod tests {
         let (id, _) = h.pair();
         assert_eq!(h.handler.approvals.load(Ordering::SeqCst), 1);
         assert_eq!(
-            h.request("status", BrowserRequest::Status)["type"],
+            h.request(
+                "status",
+                BrowserRequest::Status {
+                    check_updates: false
+                }
+            )["type"],
             "Status"
         );
         assert_eq!(h.hub.list_pairings().unwrap().len(), 1);
