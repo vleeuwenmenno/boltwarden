@@ -903,6 +903,7 @@ mod tests {
             ssh_key: None,
             state: ItemState::Active,
             dates: ItemDates::default(),
+            password_history: Vec::new(),
         }
     }
 
