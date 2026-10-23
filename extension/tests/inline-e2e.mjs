@@ -269,7 +269,20 @@ try {
   await until(async () => (await inlineText()).includes('Test login'), 'Automatic inline menu');
   await delay(500);
   await key(websiteSession, 'ArrowDown'); await key(websiteSession, 'Enter'); await checkFilled();
-  console.log(`${process.env.CHROMIUM_BIN ?? 'chromium'} inline e2e passed: trusted keyboard fill, email fields, dynamic forms, open shadow roots, synthetic-event refusal, field/frame focus-change cancellation, HTTP toolbar handoff, automatic menu on click.`);
+  for (const [path, selector] of [['/otp', '#otp'], ['/otp-split', '#otp0']]) {
+    await navigate(path); await clickField(selector);
+    await until(async () => (await inlineText()).includes('012 345'), 'Automatic OTP preview without ArrowDown');
+    const rows = (await inlineNodes()).filter(node => attr(node, 'role') === 'option');
+    assert(rows.length > 0 && rows.every(row => attr(row, 'aria-selected') === 'false'), 'Preview must not select a fill action');
+    await key(websiteSession, 'Enter');
+    assert.equal(await evaluate(websiteSession, `[...document.querySelectorAll('input')].map(input => input.value).join('')`), '', 'Unselected Enter must not fill a previewed code');
+    await navigate(path); await clickField(selector);
+    await until(async () => (await inlineText()).includes('012 345'), 'Automatic OTP preview after reopening');
+    await delay(500);
+    await key(websiteSession, 'ArrowDown'); await key(websiteSession, 'Enter');
+    await until(async () => await evaluate(websiteSession, `[...document.querySelectorAll('input')].map(input => input.value).join('')`) === '012345', 'Explicit automatic-menu OTP fill');
+  }
+  console.log(`${process.env.CHROMIUM_BIN ?? 'chromium'} inline e2e passed: trusted keyboard fill, email fields, dynamic forms, open shadow roots, synthetic-event refusal, field/frame focus-change cancellation, HTTP toolbar handoff, automatic menu on click, automatic OTP preview without implicit fill.`);
 
 } catch (error) {
   console.error(log.join('').slice(-3000)); throw error;
