@@ -34,10 +34,12 @@ fn build_version() -> String {
             println!("cargo:rerun-if-changed={path}");
         }
     }
-    let Some(describe) = git(&["describe", "--tags", "--long", "--dirty", "--match", "v[0-9]*"])
-    else {
-        return git(&["rev-parse", "--short", "HEAD"])
-            .map_or(package.clone(), |commit| format!("{package}+g{commit}.untagged"));
+    let Some(describe) = git(&[
+        "describe", "--tags", "--long", "--dirty", "--match", "v[0-9]*",
+    ]) else {
+        return git(&["rev-parse", "--short", "HEAD"]).map_or(package.clone(), |commit| {
+            format!("{package}+g{commit}.untagged")
+        });
     };
     let (describe, dirty) = match describe.strip_suffix("-dirty") {
         Some(clean) => (clean, true),
