@@ -1322,7 +1322,10 @@ mod tests {
     fn temp_paths() -> Paths {
         let dir =
             crate::test_temp_dir().join(format!("boltwarden-releases-{}", uuid::Uuid::new_v4()));
+        #[cfg(not(windows))]
         std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(windows)]
+        crate::platform::windows::private_dir(&dir).unwrap();
         Paths {
             cache: Some(dir.join(CACHE_FILE)),
             dismissal: Some(dir.join(DISMISSAL_FILE)),
