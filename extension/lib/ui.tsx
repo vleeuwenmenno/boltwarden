@@ -2,12 +2,15 @@ import type { PendingSaveSummary } from './pending-saves';
 import { render } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { browser } from 'wxt/browser';
-import type { UiFrame, UiPage, UiResult, UiState, UiStateChange } from './ui-types';
+import type { UiFrame, UiPage, UiReleases, UiResult, UiState, UiStateChange } from './ui-types';
 import { PROTOCOL_VERSION, type Match } from './protocol';
 import { applyTheme, DEFAULT_SETTINGS, watchSettings, writeSettings, type PasskeyUnavailable, type Settings, type Theme } from './settings';
 import { CLIPBOARD_PERMISSION } from './clipboard';
 import { autofillState, restoreBrowserAutofill, suppressBrowserAutofill, type AutofillApi, type AutofillState } from './browser-autofill';
 import { BUILD, STALE_MESSAGE, UNKNOWN_ACTION } from './build';
+import { DEFAULT_RELEASE_PREFERENCES, dismissRelease, ERROR_TEXT, extensionStatus, releaseNotices, retryAfter, setReleaseNotices, watchReleasePreferences,
+  type ReleaseInfo, type ReleaseMetadata, type ReleasePreferences } from './releases';
+import type { ConnectionState } from './native';
 import './ui.css';
 
 /** Set by the mounted page; called when the background turns out to be an older build. */
@@ -166,6 +169,137 @@ function BrowserAutofill() {
   </section>;
 }
 
+/** How long the pages ask for release state while the desktop is checking, and how often. */
+const RELEASE_POLL_MS = 2000;
+const RELEASE_POLL_LIMIT_MS = 40_000;
+
+/** Release information for the popup and options page. Reads the desktop's cache once when
+ * the page opens, and polls only while that page is open and the desktop is checking. */
+function useReleases(apply: (value: UiReleases) => void, desktopChecking: boolean) {
+  const [preferences, setPreferences] = useState<ReleasePreferences>(DEFAULT_RELEASE_PREFERENCES);
+  const [checking, setChecking] = useState(false);
+  const [error, setError] = useState('');
+  const deadline = useRef(0);
+  const mounted = useRef(true);
+  const read = (check = false) => call<UiReleases>('releases', check ? { check: true } : {})
+    .then(value => { if (mounted.current) apply(value); });
+  useEffect(() => {
+    mounted.current = true;
+    const stop = watchReleasePreferences(browser.storage, setPreferences);
+    return () => { mounted.current = false; stop(); };
+  }, []);
+  async function check() {
+    setChecking(true); setError('');
+    deadline.current = Date.now() + RELEASE_POLL_LIMIT_MS;
+    try { await read(true); }
+    catch (error) { if (mounted.current && errorMessage(error) !== STALE_MESSAGE) setError(errorMessage(error)); }
+    finally { if (mounted.current) setChecking(false); }
+  }
+  // Follows a queued check until it completes, fails, or the time limit passes. Errors and
+  // a missing desktop are tolerated; the limit still applies.
+  useEffect(() => {
+    if (!desktopChecking) { deadline.current = 0; return; }
+    deadline.current ||= Date.now() + RELEASE_POLL_LIMIT_MS;
+    let live = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const next = () => {
+      if (!live || Date.now() >= deadline.current) return;
+      timer = setTimeout(() => { void read().catch(() => {}).finally(next); }, RELEASE_POLL_MS);
+    };
+    next();
+    return () => { live = false; clearTimeout(timer); };
+  }, [desktopChecking]);
+  /** A newer cache may exist since the background last asked; this never starts a check. */
+  const load = () => { void read().catch(() => {}); };
+  return { preferences, checking, error, check, load };
+}
+
+function ReleaseLink({ release }: { release: ReleaseInfo }) {
+  // The URL was rebuilt from a validated tag; see releases.ts.
+  return <a href={release.url} target="_blank" rel="noreferrer">Release notes</a>;
+}
+
+function ReleaseNotices({ metadata, preferences }: { metadata?: ReleaseMetadata; preferences: ReleasePreferences }) {
+  const notices = releaseNotices(metadata, browser.runtime.getManifest().version, preferences);
+  if (!notices.length) return null;
+  return <section class="release-notices" aria-label="Release notices">{notices.map(notice =>
+    <section class="notice release-notice" key={notice.component}>
+      <strong>{notice.title}</strong>
+      <p>{notice.detail}</p>
+      <div class="release-actions"><ReleaseLink release={notice.release} />
+        <button class="secondary" onClick={() => void dismissRelease(browser.storage, notice.component, notice.release.version).catch(() => {})}>Dismiss</button></div>
+    </section>)}</section>;
+}
+
+const formatDate = (seconds: number) => new Date(seconds * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+
+const formatWait = (seconds: number) => seconds < 120 ? `${seconds} s` : `${Math.ceil(seconds / 60)} min`;
+
+function ReleaseStatus({ connection, metadata, preferences, checking, error, onCheck, onWaitOver }: {
+  connection?: ConnectionState; metadata?: ReleaseMetadata; preferences: ReleasePreferences; checking: boolean; error: string; onCheck(): void; onWaitOver(): void;
+}) {
+  const running = browser.runtime.getManifest().version;
+  const [now, setNow] = useState(Date.now);
+  const wait = retryAfter(metadata, now);
+  // Counts down the wait the desktop reported, then reads the state again so "Check now"
+  // reflects what the desktop allows. Runs only while this page is open.
+  useEffect(() => {
+    if (!retryAfter(metadata, Date.now())) return;
+    const timer = setInterval(() => {
+      setNow(Date.now());
+      if (!retryAfter(metadata, Date.now())) { clearInterval(timer); onWaitOver(); }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [metadata]);
+  const releases = metadata?.releases;
+  const supported = releases && releases.state !== 'unsupported';
+  let unavailable = '';
+  if (!connection || connection === 'connecting') unavailable = 'Connecting to Boltwarden…';
+  else if (connection === 'disconnected') unavailable = 'Start Boltwarden desktop to check for updates.';
+  else if (connection === 'unpaired') unavailable = 'Pair this browser with Boltwarden desktop to see updates.';
+  else if (connection === 'disabled') unavailable = 'Turn on browser integration in Boltwarden desktop to see updates.';
+  else if (!metadata) unavailable = 'Loading release information…';
+  else if (metadata.invalid) unavailable = 'Boltwarden desktop sent release information this extension could not read.';
+  else if (!supported) unavailable = `This Boltwarden desktop${metadata.desktopVersion ? ` (${metadata.desktopVersion})` : ''} does not share release information, so updates cannot be checked here. Update the desktop app to see release notices.`;
+
+  let desktop = '', extension = '';
+  let desktopRelease: ReleaseInfo | undefined, extensionRelease: ReleaseInfo | undefined;
+  if (releases && supported) {
+    const notChecked = releases.state === 'empty' || (releases.state === 'checking' && releases.checked_at === undefined);
+    const unconfirmed = notChecked ? 'Not checked yet.' : 'Could not confirm that this is the newest version.';
+    const latest = releases.desktop.stable ?? releases.desktop.preview;
+    switch (releases.desktop.update) {
+      case 'available': desktopRelease = releases.desktop.offer; desktop = `Version ${releases.desktop.offer!.version} is available.`; break;
+      case 'up_to_date': desktop = 'Up to date.'; break;
+      case 'development': desktopRelease = latest; desktop = `Development build; updates are not offered.${latest ? ` Latest release: ${latest.version}.` : ''}`; break;
+      default: desktop = unconfirmed;
+    }
+    const status = extensionStatus(releases, running);
+    extensionRelease = status === 'available' ? releases.extension : undefined;
+    extension = status === 'available' ? `Version ${releases.extension!.version} was published on GitHub. Browser store updates may still be pending.`
+      : status === 'up_to_date' ? 'Up to date.' : unconfirmed;
+  }
+  const installed = releases?.desktop.installed ?? metadata?.desktopVersion;
+  const lastChecked = releases?.checked_at !== undefined ? `Last checked ${formatDate(releases.checked_at)}${releases.state === 'stale' ? ', more than three days ago' : ''}.` : '';
+  const busy = checking || releases?.state === 'checking';
+  return <section class="card releases" aria-busy={busy}><h2>Updates</h2>
+    {unavailable ? <p class="detail" role="status">{unavailable}</p> : <>
+      <dl class="versions">
+        <dt>Desktop app{installed ? ` ${installed}` : ''}</dt><dd>{desktop} {desktopRelease && <ReleaseLink release={desktopRelease} />}</dd>
+        <dt>This extension {running}</dt><dd>{extension} {extensionRelease && <ReleaseLink release={extensionRelease} />}</dd>
+      </dl>
+      <p class="detail" role="status">{releases?.state === 'checking' ? 'Checking for updates…' : lastChecked}
+        {releases?.state === 'error' && releases.error ? ` The last check failed: ${ERROR_TEXT[releases.error]}.` : releases?.state === 'error' ? ' The last check failed.' : ''}
+        {wait ? ` You can check again in ${formatWait(wait)}.` : ''}</p>
+      <div class="release-actions"><button class="secondary" disabled={busy || wait > 0} onClick={onCheck}>{busy ? 'Checking…' : 'Check now'}</button></div>
+      <p class="detail">Boltwarden desktop checks GitHub for releases{releases?.auto_check ? ' once a day' : ' only when you ask; automatic checks are off'}. Change this in the desktop app under About. This extension makes no update requests itself.</p>
+    </>}
+    {error && <p role="alert" class="notice error">{error}</p>}
+    <Toggle title="Show release notices in the popup" help="Only changes what this browser shows. Dismissed notices return for the next version."
+      checked={preferences.notices} onChange={notices => void setReleaseNotices(browser.storage, notices).catch(() => {})} />
+  </section>;
+}
+
 function App({ options }: { options: boolean }) {
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const favicon = useTabFavicon();
@@ -173,6 +307,8 @@ function App({ options }: { options: boolean }) {
   const [pending, setPending] = useState<PendingSaveSummary[]>([]);
   const [stale, setStale] = useState(false);
   const [state, setState] = useState<UiState>();
+  const [releases, setReleases] = useState<ReleaseMetadata>();
+  const release = useReleases(value => setReleases(value.releases), releases?.releases?.state === 'checking');
   const [page, setPage] = useState<UiPage>();
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
@@ -227,7 +363,7 @@ function App({ options }: { options: boolean }) {
         if (currentState.current) updateState({ ...currentState.current, fingerprint: next.fingerprint });
         return;
       }
-      updateState(next);
+      updateState(next); setReleases(next.releases);
       if (!options && next.connection.state === 'ready') {
         const matches = await call<UiPage>('list');
         if (live() && version === generation.current && currentState.current?.connection.state === 'ready') setPage(matches);
@@ -238,6 +374,9 @@ function App({ options }: { options: boolean }) {
   }
   function connectionChanged(event: UiStateChange) {
     if (!live() || event.type !== 'state-changed') return;
+    // Only the release information changed; the connection and page stay as they are.
+    setReleases(event.releases);
+    if (event.reason === 'releases') return;
     const previous = currentState.current?.connection;
     void call<PendingSaveSummary[]>('pending-saves').then(items => { if (live()) setPending(items ?? []); }).catch(error => { if (live() && errorMessage(error) !== STALE_MESSAGE) setError(`Pending passwords unavailable: ${errorMessage(error)}`); });
     updateState({ fingerprint: currentState.current?.fingerprint ?? '', connection: event.connection });
@@ -266,10 +405,11 @@ function App({ options }: { options: boolean }) {
     port.onMessage.addListener(connectionChanged);
     port.onDisconnect.addListener(() => {
       if (!live()) return;
-      invalidate(); refreshPending.current = false;
+      invalidate(); refreshPending.current = false; setReleases(undefined);
       updateState({ fingerprint: currentState.current?.fingerprint ?? '', connection: { state: 'disconnected', epoch: 0, error: 'Connection interrupted. Reopen this popup to reconnect.' } });
     });
     void refresh();
+    release.load();
     return () => { mounted.current = false; generation.current++; port.disconnect(); };
   }, []);
 
@@ -447,6 +587,9 @@ function App({ options }: { options: boolean }) {
             {frame.more && <button class="more secondary" disabled={busy} onClick={() => void more(frame)}>{frame.kind === 'card' ? 'Load more cards' : 'Load more matching logins'}</button>}
           </section>)}
         </section>}
+        {!options && <ReleaseNotices metadata={releases} preferences={release.preferences} />}
+        {options && <ReleaseStatus connection={connection?.state} metadata={releases} preferences={release.preferences}
+          checking={release.checking} error={release.error} onCheck={() => void release.check()} onWaitOver={release.load} />}
         {options && <Settings settings={settings} />}
         {options && <details class="card about"><summary>Help, privacy, and version</summary>
           <p>The popup shows matching logins, or your saved cards when a payment field is selected. Card numbers stay masked until you choose a card on an HTTPS page.</p>

@@ -1,4 +1,5 @@
 import 'fake-indexeddb/auto';
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NativeClient, type NativePort } from '../lib/native';
 import type { Request, Response } from '../lib/protocol';
@@ -10,13 +11,14 @@ class MockPort implements NativePort {
   onMessage = { addListener: (callback: (message: unknown) => void) => { this.listeners.push(callback); } };
   onDisconnect = { addListener: (callback: () => void) => { this.disconnects.push(callback); } };
   hold = false;
+  status: Record<string, unknown> = {};
   postMessage(message: Request & { id: string }) {
     this.messages.push(message);
     const pairing_id = '11111111-1111-4111-8111-111111111111';
     let reply: Response | undefined;
     if (message.type === 'Hello') reply = { type: 'Challenge', paired: false, pairing_id, nonce: 'A'.repeat(43) };
     if (message.type === 'RequestPairing') reply = { type: 'Paired', pairing_id };
-    if (message.type === 'Status') reply = { type: 'Status', enabled: true, unlocked: true, epoch: 1 };
+    if (message.type === 'Status') reply = { type: 'Status', enabled: true, unlocked: true, epoch: 1, ...this.status } as Response;
     if (message.type === 'ListMatches' && !this.hold) reply = { type: 'Matches', items: [], epoch: 1, next_offset: null };
     if (message.type === 'Cancel') reply = { type: 'Cancelled', request_id: message.request_id };
     if (reply) queueMicrotask(() => this.emit({ version: 1, id: message.id, ...reply }));
@@ -94,5 +96,47 @@ describe('native port lifecycle', () => {
     ports.at(-1)!.emit({ version: 1, type: 'Unlocked', epoch: 2 });
     expect(client.snapshot).toMatchObject({ state: 'unpaired', epoch: 2 });
     await expect(client.request(list)).rejects.toMatchObject({ code: 'Unpaired' });
+  });
+});
+
+const releases = JSON.parse(readFileSync(new URL('../protocol/fixtures/status-releases.json', import.meta.url), 'utf8')).releases;
+describe('release metadata on the native connection', () => {
+  it('keeps validated release metadata across lock and unlock, and clears it on disconnect', async () => {
+    const { client, ports } = setup(); await client.pair('Test');
+    expect(client.releases).toEqual({ receivedAt: expect.any(Number) });
+    ports.at(-1)!.status = { desktop_version: '1.0.0-rc.5', releases };
+    await client.refreshStatus();
+    const metadata = client.releases;
+    expect(metadata?.releases?.desktop.offer?.version).toBe('1.0.0');
+    ports.at(-1)!.emit({ version: 1, type: 'Locked', epoch: 2 });
+    ports.at(-1)!.emit({ version: 1, type: 'Unlocked', epoch: 3 });
+    expect(client.releases).toBe(metadata);
+    // An unchanged answer keeps the same object, so listeners see no change.
+    await client.refreshStatus(); expect(client.releases).toBe(metadata);
+    ports.at(-1)!.disconnect();
+    expect(client.releases).toBeUndefined();
+  });
+  it('clears release metadata when pairing is revoked and does not read it while unpaired', async () => {
+    const { client, ports } = setup(); await client.pair('Test');
+    ports.at(-1)!.status = { releases }; await client.refreshStatus();
+    expect(client.releases?.releases).toBeDefined();
+    ports.at(-1)!.emit({ version: 1, type: 'PairingRevoked' });
+    expect(client.releases).toBeUndefined();
+    await client.refreshStatus(true);
+    expect(client.releases).toBeUndefined();
+    expect(ports.at(-1)!.messages.filter(value => value.type === 'Status')).toHaveLength(2);
+  });
+  it('keeps the connection usable when release metadata is malformed', async () => {
+    const { client, ports } = setup(); await client.pair('Test');
+    ports.at(-1)!.status = { desktop_version: 7, releases: { state: 'fresh', desktop: 'bad' } };
+    await client.refreshStatus();
+    expect(client.snapshot.state).toBe('ready');
+    expect(client.releases).toEqual({ invalid: true, receivedAt: expect.any(Number) });
+  });
+  it('sends check_updates only for an explicit check', async () => {
+    const { client, ports } = setup(); await client.pair('Test');
+    await client.refreshStatus(); await client.refreshStatus(true);
+    const statuses = ports.at(-1)!.messages.filter(value => value.type === 'Status');
+    expect(statuses.map(value => 'check_updates' in value ? value.check_updates : undefined)).toEqual([undefined, undefined, true]);
   });
 });

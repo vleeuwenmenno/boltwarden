@@ -1,5 +1,6 @@
 import { identity, publicIdentity, signChallenge } from './pairing';
 import { expect, NativeError, parseWire, type Push, type Request, type Response } from './protocol';
+import { sameReleases, statusReleases, type ReleaseMetadata } from './releases';
 
 export interface NativePort {
   postMessage(message: unknown): void;
@@ -15,6 +16,10 @@ interface Pending { resolve(value: Response): void; reject(error: Error): void; 
 /** One authenticated port; outstanding requests are never replayed after disconnect. */
 export class NativeClient {
   snapshot: NativeSnapshot = { state: 'disconnected', epoch: 0 };
+  /** Release information from the last Status on this authenticated connection. Kept across
+   * lock and unlock events; cleared when the connection or its authentication ends. Not part
+   * of the snapshot, which content scripts also receive. */
+  releases?: ReleaseMetadata;
   private port?: NativePort;
   private connecting?: Promise<void>;
   private pairing?: Promise<void>;
@@ -43,6 +48,7 @@ export class NativeClient {
   }
 
   private async open(): Promise<void> {
+    this.releases = undefined;
     this.update('connecting');
     try {
       const host = new Promise<number>((resolve, reject) => { this.hostReady = { resolve, reject }; });
@@ -100,9 +106,13 @@ export class NativeClient {
     await this.refreshStatus();
   }
 
-  async refreshStatus(): Promise<NativeSnapshot> {
+  /** `checkUpdates` must only be set for an explicit user request to check for releases. */
+  async refreshStatus(checkUpdates = false): Promise<NativeSnapshot> {
     if (!this.authenticated) return this.snapshot;
-    const status = expect(await this.raw({ type: 'Status' }), 'Status');
+    const port = this.port;
+    const status = expect(await this.raw({ type: 'Status', ...(checkUpdates ? { check_updates: true } : {}) }), 'Status');
+    const releases = statusReleases(status, Date.now());
+    if (this.authenticated && this.port === port && !sameReleases(this.releases, releases)) this.releases = releases;
     this.update(!status.enabled ? 'disabled' : status.unlocked ? 'ready' : 'locked', undefined, status.epoch);
     return this.snapshot;
   }
@@ -162,7 +172,7 @@ export class NativeClient {
         case 'Unlocked': this.update(this.authenticated ? 'ready' : this.snapshot.state, undefined, message.epoch, message); break;
         case 'MatchesChanged': this.update(this.snapshot.state, undefined, message.epoch, message); break;
         case 'Disabled': this.update('disabled', undefined, this.snapshot.epoch, message); break;
-        case 'PairingRevoked': this.authenticated = false; this.update('unpaired', 'Pairing was revoked. Pair again to reconnect.', this.snapshot.epoch, message); break;
+        case 'PairingRevoked': this.authenticated = false; this.releases = undefined; this.update('unpaired', 'Pairing was revoked. Pair again to reconnect.', this.snapshot.epoch, message); break;
         case 'Error': throw new NativeError(message.code, message.message);
         default: throw new NativeError('ProtocolError', 'Unexpected native event.');
       }
@@ -172,7 +182,7 @@ export class NativeClient {
   private disconnected(message: string) {
     const wasUnpaired = this.snapshot.state === 'unpaired';
     const port = this.port;
-    this.port = undefined; this.hostPid = undefined; this.authenticated = false;
+    this.port = undefined; this.hostPid = undefined; this.authenticated = false; this.releases = undefined;
     this.hostReady?.reject(new NativeError('Disconnected', message)); this.hostReady = undefined;
     try { port?.disconnect(); } catch { /* already closed */ }
     for (const pending of this.pending.values()) {

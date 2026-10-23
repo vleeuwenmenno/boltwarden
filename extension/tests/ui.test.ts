@@ -8,11 +8,17 @@ import type { NativeSnapshot } from '../lib/native';
 const h = vi.hoisted(() => {
   const event = () => ({ listeners: [] as Array<(value: any) => void>, addListener(callback: (value: any) => void) { this.listeners.push(callback); }, emit(value?: any) { this.listeners.forEach(callback => callback(value)); } });
   const port = { onMessage: event(), onDisconnect: event(), disconnect: vi.fn() };
-  return { port, extension: { isAllowedIncognitoAccess: vi.fn(async () => true) }, runtime: { getManifest: vi.fn(() => ({ version: '9.8.7' })), connect: vi.fn(() => port), sendMessage: vi.fn(), openOptionsPage: vi.fn(), reload: vi.fn() } };
+  const stored: Record<string, unknown> = {};
+  const changed: Array<(changes: Record<string, { newValue?: unknown }>, area: string) => void> = [];
+  const storage = { local: { get: vi.fn(async (key: string) => key in stored ? { [key]: stored[key] } : {}),
+    set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(stored, items); for (const listener of changed) listener(Object.fromEntries(Object.entries(items).map(([key, newValue]) => [key, { newValue }])), 'local'); }) },
+    onChanged: { addListener: (listener: typeof changed[number]) => changed.push(listener), removeListener: (listener: typeof changed[number]) => changed.splice(changed.indexOf(listener), 1) } };
+  return { port, stored, storage, extension: { isAllowedIncognitoAccess: vi.fn(async () => true) }, runtime: { getManifest: vi.fn(() => ({ version: '9.8.7' })), connect: vi.fn(() => port), sendMessage: vi.fn(), openOptionsPage: vi.fn(), reload: vi.fn() } };
 });
-vi.mock('wxt/browser', () => ({ browser: { runtime: h.runtime, extension: h.extension } }));
+vi.mock('wxt/browser', () => ({ browser: { runtime: h.runtime, extension: h.extension, storage: h.storage } }));
 import { mount } from '../lib/ui';
 import { BUILD, STALE_MESSAGE, UNKNOWN_ACTION } from '../lib/build';
+import { parseReleases } from '../lib/releases';
 
 const login = { id: 'one', name: 'Work login', username: 'alice', revision: '1', reprompt: false, requires_confirmation: false };
 const frame = { targetId: 'document-one', origin: 'https://example.com', crossOrigin: false, items: [login, { ...login, id: 'two', name: 'Personal login', username: 'bob' }], more: false };
@@ -44,6 +50,7 @@ async function open(options = false) {
 }
 beforeEach(() => {
   vi.clearAllMocks(); h.port.onMessage.listeners.length = 0; h.port.onDisconnect.listeners.length = 0;
+  for (const key of Object.keys(h.stored)) delete h.stored[key];
   document.body.innerHTML = '<div id="app"></div>'; app = document.getElementById('app')!;
   page = structuredClone({ frames: [frame] }); connection = { state: 'ready', epoch: 1 };
   h.runtime.sendMessage.mockImplementation(async ({ type }) => response(type === 'state' ? { connection, fingerprint: 'ABCD:1234', build: BUILD } : type === 'list' ? page : null));
@@ -237,5 +244,171 @@ describe('private windows notice', () => {
     await open(true);
     await vi.waitFor(() => expect(app.textContent).toContain('Boltwarden is not enabled in private windows'));
     expect(app.textContent).toContain('Allow in Incognito');
+  });
+});
+
+describe('release notices', () => {
+  const NOW = 1_790_000_000;
+  const info = (tag: string) => ({ version: tag.replace(/^(extension-)?v/, ''), tag, url: `https://github.com/vleeuwenmenno/boltwarden/releases/tag/${tag}`, published_at: NOW });
+  const snapshot = (overrides: Record<string, unknown> = {}, desktop: Record<string, unknown> = {}) => ({ state: 'fresh', auto_check: true, checked_at: NOW, complete: true,
+    desktop: { installed: '1.0.0-rc.5', update: 'available', offer: info('v1.0.0'), dismissed: false, stable: info('v1.0.0'), ...desktop },
+    extension: info('extension-v9.9.0'), ...overrides });
+  let releases: unknown;
+  let releaseCalls: Array<Record<string, unknown>>;
+  function serve(next: () => unknown = () => releases) {
+    releaseCalls = [];
+    h.runtime.sendMessage.mockImplementation(async (message: any) => {
+      if (message.type === 'releases') {
+        releaseCalls.push(message);
+        const value = next();
+        return response({ connection, ...(value ? { releases: value } : {}) });
+      }
+      return response(message.type === 'state' ? { connection, fingerprint: 'ABCD:1234', build: BUILD, ...(releases ? { releases } : {}) } : message.type === 'list' ? page : null);
+    });
+  }
+  // The background hands pages metadata that the native client already validated.
+  const meta = (value: unknown) => ({ desktopVersion: '1.0.0-rc.5', releases: parseReleases(value), receivedAt: Date.now() });
+  const notices = () => Array.from(document.querySelectorAll('.release-notice'));
+  beforeEach(() => { releases = meta(snapshot()); serve(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('shows compact popup notices with store-lag wording, without stealing focus from the search', async () => {
+    connection = { state: 'locked', epoch: 1 };
+    await act(() => mount());
+    await vi.waitFor(() => expect(notices()).toHaveLength(2));
+    expect(notices()[0]!.textContent).toContain('Boltwarden desktop 1.0.0 is available');
+    expect(notices()[1]!.textContent).toContain('Boltwarden extension 9.9.0 was published on GitHub');
+    expect(notices()[1]!.textContent).toContain('Browser store updates may still be pending');
+    expect(notices()[1]!.textContent).not.toMatch(/ready to install/i);
+    expect(notices()[0]!.querySelector('a')?.getAttribute('href')).toBe('https://github.com/vleeuwenmenno/boltwarden/releases/tag/v1.0.0');
+    expect(document.querySelector('.release-notices img')).toBeNull();
+    expect(app.textContent).toContain('Vault locked');
+    // Opening the popup reads the cache without asking for a check.
+    expect(releaseCalls).toEqual([{ type: 'releases' }]);
+  });
+
+  it('keeps search focus and login rows when notices are shown', async () => {
+    await open();
+    await vi.waitFor(() => expect(notices()).toHaveLength(2));
+    expect(document.activeElement).toBe(field());
+    expect(rows()).toHaveLength(2);
+  });
+
+  it('persists a per-version dismissal and shows a later version again', async () => {
+    connection = { state: 'locked', epoch: 1 };
+    await act(() => mount());
+    await vi.waitFor(() => expect(notices()).toHaveLength(2));
+    await click(notices()[1]!.querySelector('button')!);
+    await vi.waitFor(() => expect(notices()).toHaveLength(1));
+    expect(h.stored['release-notices']).toEqual({ notices: true, dismissed: { extension: '9.9.0' } });
+    expect(notices()[0]!.textContent).toContain('desktop');
+    await act(() => h.port.onMessage.emit({ type: 'state-changed', reason: 'releases', connection, releases: meta(snapshot({ extension: info('extension-v9.9.1') })) }));
+    await vi.waitFor(() => expect(notices()).toHaveLength(2));
+  });
+
+  it('hides popup notices when switched off in options', async () => {
+    h.stored['release-notices'] = { notices: false, dismissed: {} };
+    connection = { state: 'locked', epoch: 1 };
+    await act(() => mount());
+    await vi.waitFor(() => expect(releaseCalls).toHaveLength(1));
+    expect(notices()).toHaveLength(0);
+  });
+
+  it('ignores malformed release data in a push and keeps the connection', async () => {
+    releases = { invalid: true, receivedAt: 1 };
+    await open(true);
+    await vi.waitFor(() => expect(app.textContent).toContain('could not read'));
+    expect(app.textContent).toContain('Paired with Boltwarden desktop');
+  });
+
+  it.each([
+    ['up to date', meta(snapshot({ extension: info('extension-v9.8.7') }, { update: 'up_to_date', offer: undefined })), ['Desktop app 1.0.0-rc.5', 'Up to date.', 'This extension 9.8.7', 'Last checked']],
+    ['newer releases', meta(snapshot()), ['Version 1.0.0 is available.', 'Version 9.9.0 was published on GitHub. Browser store updates may still be pending.']],
+    ['incomplete list', meta(snapshot({ complete: false, extension: info('extension-v9.8.7') }, { update: 'unknown', offer: undefined })), ['Could not confirm that this is the newest version.']],
+    ['failed check', meta(snapshot({ state: 'error', error: 'network', extension: info('extension-v9.8.7') }, { update: 'up_to_date', offer: undefined })), ['The last check failed: GitHub could not be reached.', 'Could not confirm']],
+    ['older desktop', { desktopVersion: '1.0.0-rc.4', receivedAt: 1 }, ['(1.0.0-rc.4) does not share release information']],
+    ['desktop without a checker', meta(snapshot({ state: 'unsupported' })), ['does not share release information']],
+    ['development desktop', meta(snapshot({}, { installed: '1.0.0+3.gabc', update: 'development', offer: undefined })), ['Development build; updates are not offered. Latest release: 1.0.0.']],
+  ])('shows versions and honest status in options: %s', async (_name, value, texts) => {
+    releases = value;
+    await open(true);
+    await vi.waitFor(() => expect(document.querySelector('.releases')?.textContent).toContain(texts[0]));
+    const text = document.querySelector('.releases')!.textContent!;
+    for (const expected of texts) expect(text).toContain(expected);
+    if (_name !== 'up to date') expect(text).not.toContain('Up to date.');
+    if (_name === 'older desktop' || _name === 'desktop without a checker') expect(button('Check now')).toBeUndefined();
+  });
+
+  it('asks to start the desktop when disconnected, without a false up-to-date claim', async () => {
+    connection = { state: 'disconnected', epoch: 0 }; releases = undefined;
+    await open(true);
+    await vi.waitFor(() => expect(document.querySelector('.releases')?.textContent).toContain('Start Boltwarden desktop to check for updates.'));
+    expect(document.querySelector('.releases')?.textContent).not.toContain('Up to date');
+    expect(button('Check now')).toBeUndefined();
+  });
+
+  const advance = async (ms: number) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); };
+  const flush = () => advance(0);
+  it('checks on request, polls every two seconds while checking, and stops when complete', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    const answers = ['fresh', 'checking', 'checking', 'fresh'];
+    serve(() => meta(snapshot({ state: answers.shift() ?? 'fresh' })));
+    await act(() => mount(true)); await flush(); await flush();
+    expect(releaseCalls).toEqual([{ type: 'releases' }]);
+    await click(button('Check now')); await flush();
+    expect(releaseCalls.at(-1)).toEqual({ type: 'releases', check: true });
+    expect(document.querySelector('.releases')?.textContent).toContain('Checking for updates…');
+    await advance(1999); expect(releaseCalls).toHaveLength(2);
+    await advance(1); expect(releaseCalls).toHaveLength(3);
+    await advance(2000); expect(releaseCalls).toHaveLength(4);
+    expect(document.querySelector('.releases')?.textContent).not.toContain('Checking for updates…');
+    await advance(60_000); expect(releaseCalls).toHaveLength(4);
+    // Only the explicit click asked for a check.
+    expect(releaseCalls.filter(call => call.check)).toHaveLength(1);
+  });
+
+  it('stops polling after 40 seconds and on close even if the desktop keeps checking', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    releases = meta(snapshot({ state: 'checking' }));
+    serve(() => meta(snapshot({ state: 'checking' })));
+    await act(() => mount(true)); await flush();
+    await advance(60_000);
+    const calls = releaseCalls.length;
+    expect(calls).toBeLessThanOrEqual(22); expect(calls).toBeGreaterThan(15);
+    await advance(60_000); expect(releaseCalls).toHaveLength(calls);
+    act(() => render(null, app));
+    releaseCalls.length = 0;
+    await act(() => mount(true)); await flush();
+    await advance(4_000);
+    expect(releaseCalls.length).toBeGreaterThan(1);
+    act(() => render(null, app));
+    const closed = releaseCalls.length;
+    await advance(20_000); expect(releaseCalls).toHaveLength(closed);
+  });
+
+  it('does not poll an older desktop that ignores the check request', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    releases = { receivedAt: 1 };
+    serve(() => ({ receivedAt: 1 }));
+    await act(() => mount(true)); await flush();
+    await click(button('Check now') ?? document.body);
+    await advance(20_000);
+    expect(releaseCalls).toEqual([{ type: 'releases' }]);
+    expect(app.textContent).toContain('does not share release information');
+  });
+
+  it('counts down the reported wait before allowing another check, then reads again', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    releases = meta(snapshot({ retry_after_seconds: 5 }));
+    serve(() => releaseCalls.length > 1 ? meta(snapshot()) : meta(snapshot({ retry_after_seconds: 5 })));
+    await act(() => mount(true)); await flush();
+    expect(document.querySelector('.releases')?.textContent).toContain('You can check again in 5 s.');
+    expect(button('Check now').disabled).toBe(true);
+    await advance(2000);
+    expect(document.querySelector('.releases')?.textContent).toContain('You can check again in 3 s.');
+    await advance(3000); await flush();
+    expect(button('Check now').disabled).toBe(false);
+    expect(releaseCalls.length).toBe(2);
+    expect(releaseCalls.every(call => !call.check)).toBe(true);
   });
 });

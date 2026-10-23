@@ -5,7 +5,7 @@ import { browser } from 'wxt/browser';
 import { NativeClient } from '../lib/native';
 import { publicIdentity } from '../lib/pairing';
 import { clearCard, expect, HOST_NAME, NativeError, webUrl, type Match, type PageContext } from '../lib/protocol';
-import type { UiFrame, UiPage, UiResult, UiState } from '../lib/ui-types';
+import type { UiFrame, UiPage, UiReleases, UiResult, UiState } from '../lib/ui-types';
 import { BUILD, UNKNOWN_ACTION } from '../lib/build';
 import { installPasskeyBroker } from '../lib/passkey-background';
 import { PASSKEY_PORT } from '../lib/passkey-types';
@@ -47,6 +47,7 @@ export default defineBackground(() => {
     async write(id) { await browser.storage.local.set({ pairing_id: id }); },
   });
   let previousSnapshot = { ...native.snapshot };
+  let previousReleases = native.releases;
   const passkeys = installPasskeyBroker(native);
 
   const saves = pendingSaves(native, browser.storage.session, () => notifyUi('page'), (entry, message) => {
@@ -70,9 +71,9 @@ export default defineBackground(() => {
     return sender?.id === browser.runtime.id
       && [browser.runtime.getURL('/popup.html'), browser.runtime.getURL('/options.html')].includes(sender.url ?? '');
   }
-  function notifyUi(reason: 'state' | 'matches' | 'page', ports: Iterable<Port> = uiPorts) {
+  function notifyUi(reason: 'state' | 'matches' | 'page' | 'releases', ports: Iterable<Port> = uiPorts) {
     for (const port of ports) {
-      try { port.postMessage({ type: 'state-changed', connection: { ...native.snapshot }, reason }); }
+      try { port.postMessage({ type: 'state-changed', connection: { ...native.snapshot }, reason, ...(native.releases ? { releases: native.releases } : {}) }); }
       catch { uiPorts.delete(port); }
     }
   }
@@ -132,12 +133,14 @@ export default defineBackground(() => {
       pickerTabs.clear();
     } else if (event || (snapshot.state !== 'ready' && snapshot.state !== 'connecting')) clearTargets();
     previousSnapshot = { ...snapshot };
+    const releasesChanged = native.releases !== previousReleases;
+    previousReleases = native.releases;
     const text = snapshot.state === 'ready' ? '' : snapshot.state === 'locked' ? 'L' : '!';
     badge(text, undefined, snapshot.error ?? `Boltwarden: ${snapshot.state}`);
     if (matchesChanged || stateChanged) {
       notifyUi(matchesChanged ? 'matches' : 'state');
       notifyInline(matchesChanged ? 'matches' : 'state');
-    }
+    } else if (releasesChanged) notifyUi('releases');
   };
 
   // Listeners are installed synchronously so event-page/service-worker wakeups are handled.
@@ -577,7 +580,15 @@ export default defineBackground(() => {
       switch (data.type) {
         case 'state': {
           await native.connect().catch(() => {});
-          return { connection: native.snapshot, fingerprint: (await publicIdentity()).fingerprint, build: BUILD } satisfies UiState;
+          return { connection: native.snapshot, fingerprint: (await publicIdentity()).fingerprint, build: BUILD,
+            ...(native.releases ? { releases: native.releases } : {}) } satisfies UiState;
+        }
+        case 'releases': {
+          // Reads the desktop's cached release information. Only an explicit "Check now"
+          // sets `check`; the desktop then queues one throttled check and answers at once.
+          await native.connect().catch(() => {});
+          await native.refreshStatus(data.check === true);
+          return { connection: { ...native.snapshot }, ...(native.releases ? { releases: native.releases } : {}) } satisfies UiReleases;
         }
         case 'pending-saves': return saves.list();
         case 'retry-save': await saves.retry(String(data.id)); return null;
