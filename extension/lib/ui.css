@@ -134,3 +134,12 @@ kbd { font: inherit; color: var(--text); }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
 @media (max-width: 460px) { .options { margin: 0; border: 0; border-radius: 0; } }
+.release-notice { display: flex; flex-direction: column; gap: 4px; }
+.release-notice p { margin: 0; }
+.release-actions { display: flex; align-items: center; gap: 12px; margin: 4px 0; }
+.release-actions a { color: var(--accent); }
+.release-actions button { font-size: 12px; }
+.versions { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 8px 0; font-size: 13px; }
+.versions dt { color: var(--strong); font-weight: 500; }
+.versions dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
+.versions a { color: var(--accent); margin-left: 4px; }

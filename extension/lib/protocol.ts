@@ -32,7 +32,8 @@ export type Request =
   | { type: 'Hello'; pairing_id?: string }
   | { type: 'Authenticate'; pairing_id: string; sig: string; host_pid: number }
   | { type: 'RequestPairing'; pairing_id: string; sig: string; host_pid: number; public_key_spki: string; label: string }
-  | { type: 'Status' }
+  /** `check_updates` asks the desktop for a release check now; only sent for an explicit user request. */
+  | { type: 'Status'; check_updates?: boolean }
   | { type: 'RequestUnlock' }
   | ({ type: 'ListMatches' | 'ListTotpMatches' | 'ListCards'; offset?: number } & PageContext)
   | ({ type: 'FillLogin' | 'FillTotp' | 'FillCard'; item_id: string; revision: string; interaction: 'shortcut' | 'popup'; confirm_insecure: boolean; confirm_cross_origin: boolean } & PageContext)
@@ -45,7 +46,9 @@ export type Response =
   | PasskeyResult
   | { type: 'Challenge'; nonce: string; pairing_id: string; paired: boolean }
   | { type: 'Authenticated' | 'Paired'; pairing_id: string }
-  | { type: 'Status'; enabled: boolean; unlocked: boolean; epoch: number }
+  /** Release fields are optional additions that older desktops omit. They stay untrusted
+   * here and are validated separately (see releases.ts) so they can never break Status. */
+  | { type: 'Status'; enabled: boolean; unlocked: boolean; epoch: number; desktop_version?: unknown; releases?: unknown }
   | { type: 'UnlockRequested' }
   | { type: 'LoginSaved'; saved: boolean }
   | { type: 'Matches'; items: Match[]; epoch: number; next_offset: number | null; warning?: string | null }

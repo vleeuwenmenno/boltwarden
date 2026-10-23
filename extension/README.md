@@ -62,6 +62,19 @@ to select and fill. Further matches remain available
 through **Load more matching logins**. The popup follows vault lock/unlock and page changes live.
 Risk confirmations initially focus **Deny** and require an explicit choice to fill.
 
+## Release notices
+
+The extension does not contact GitHub. It shows the release information that the
+paired desktop app already cached: the popup shows a small notice when a newer
+desktop or extension release exists, and the options page lists the installed and
+latest versions with a **Check now** button that asks the desktop app to check.
+Extension releases are announced once they are published on GitHub; the Chrome Web
+Store or Firefox Add-ons may still be reviewing them. Dismissing a notice hides that
+version only in this browser, and the options page can turn notices off. Automatic
+checks are controlled in the desktop app under About. Older desktop versions do not
+send release information; the options page says so instead of claiming you are up
+to date.
+
 ## Passkeys
 
 Use the site's normal passkey button. The desktop prompts for account selection
