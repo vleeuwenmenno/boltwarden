@@ -27,6 +27,10 @@ A testing release candidate, not the final stable 1.0 release.
 
 - Update dependencies for the reported ctutils advisory and yanked clipboard-win
   version. Security checks remain enabled.
+- Upgrade egui and eframe together to 0.37, preserving clipboard integration,
+  accessibility roles and saved panel widths. Selecting revealed text does not
+  automatically export it into Linux PRIMARY selection.
+- Refresh compatible libc, psl and Tokio patch versions.
 
 ## Downloads and validation
 
