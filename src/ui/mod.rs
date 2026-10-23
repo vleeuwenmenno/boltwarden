@@ -5,6 +5,7 @@ pub mod browser_setup;
 pub mod clipboard_policy;
 pub mod edit;
 pub mod paired_browsers;
+pub mod releases;
 pub mod search;
 pub mod settings_page;
 pub mod ssh_approval;

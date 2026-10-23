@@ -946,10 +946,12 @@ mod tests {
             show_website_icons: true,
             obscure_screen_capture: false,
             start_list: StartList::None,
+            check_for_updates: false,
             ..Default::default()
         })
         .unwrap();
         let actual = load_settings();
+        assert!(!actual.check_for_updates);
         assert!(!actual.obscure_screen_capture);
         assert!(!actual.show_keyboard_shortcuts);
         assert!(!actual.close_after_copy);
@@ -1088,6 +1090,7 @@ mod tests {
         assert!(!actual.show_keyboard_shortcuts);
         assert!(actual.close_after_copy);
         assert!(actual.restore_recent_item);
+        assert!(actual.check_for_updates);
         assert!(!actual.ssh_agent_enabled);
         assert_eq!(
             actual.ssh_agent_socket_path,

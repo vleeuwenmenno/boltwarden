@@ -328,6 +328,26 @@ Desktop releases embed the version from `Cargo.toml`; extension builds use
 independently of either release number. It is not the Vaultwarden/Bitwarden server
 version. Release CI rejects desktop tags that disagree with `Cargo.toml`.
 
+### Release notices
+
+When a newer desktop release is published on GitHub, the full window and quick access
+show a small notice with the new and installed versions, a **Release notes** button
+that opens the release page, and **Dismiss**, which hides that version in both views
+until a newer one appears. Stable releases are only offered to stable installations;
+release candidate installations are offered the newest candidate or final release.
+Builds from a source checkout (versions with `+` build metadata) never show the notice.
+Nothing is downloaded or installed automatically.
+
+The **Updates** section of About (the quick access `version` command, or **Settings →
+About** in the full window) shows the installed and latest versions, the
+latest browser extension release, when the last check ran and whether it failed. Use
+**Check now** to check immediately (at most once a minute, also when automatic checks
+are off), and **Check for updates automatically** to turn the daily check on or off.
+Checks run in the daemon against the public GitHub releases API of this repository
+and send no vault, account or browsing data; see [PRIVACY.md](PRIVACY.md). Failed
+checks retry after ten minutes, or later if GitHub asks. Results are cached in the
+Boltwarden cache directory (`~/.cache/boltwarden/release-check.json` on Linux).
+
 ### Settings and licenses
 
 Open **Settings** from the full window's toolbar or sidebar. **General**, **Browser integration**, and **SSH integration** tabs

@@ -1,6 +1,6 @@
 # Boltwarden privacy notice
 
-Last updated: 2026-10-08. Maintainer: Menno van Leeuwen.
+Last updated: 2026-10-23. Maintainer: Menno van Leeuwen.
 
 Boltwarden is an unofficial desktop client and browser extension for Bitwarden
 and Vaultwarden. It has no advertising, analytics, or telemetry service operated
@@ -67,11 +67,23 @@ Passwords and full hashes are not sent, and the results are not stored on disk. 
 setting is off by default.
 These services receive normal connection metadata such as your IP address.
 
+The desktop app checks for new Boltwarden releases. While **Check for updates
+automatically** is on (the default), it does so at most once a day; **Check now** in
+About checks on request, also when automatic checks are off. Each check requests the
+public release list of the Boltwarden repository from the GitHub API
+(api.github.com). It sends no cookies, tokens, account, vault, or browsing data;
+GitHub receives normal connection metadata such as your IP address and a fixed
+user agent. Only release versions and publish dates are kept, in a private cache
+file next to the release notice you dismissed. Turn the setting off in About to
+stop automatic checks. The browser extension does not contact GitHub; it only
+receives this cached release information from the paired desktop app.
+
 ## Controls and removal
 
 You can disable browser integration and revoke browser pairings in desktop
 settings, discard pending saves in the extension, disable website icons, disable
-the offline copy, or remove the extension. Removing the extension removes its
+the offline copy, turn off automatic release checks in About, or remove the
+extension. Removing the extension removes its
 browser-managed storage. Removing a package does not delete your desktop account
 files; sign out or remove those files deliberately when you no longer need them.
 Disabling the offline copy deletes that copy. Changes made while offline cannot
