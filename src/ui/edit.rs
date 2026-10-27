@@ -821,7 +821,30 @@ fn draw_field_value(
     }
 }
 
+/// Typed filter and keyboard highlight of the open folder dropdown.
+#[derive(Clone, Default)]
+struct FolderSearch {
+    query: String,
+    highlight: usize,
+}
+
+/// The dropdown's choices for `query`: "No folder" while the query is empty, then every
+/// folder whose name contains it, ignoring case.
+fn folder_choices<'a>(folders: &'a [Folder], query: &str) -> Vec<(Option<&'a str>, &'a str)> {
+    let query = query.trim().to_lowercase();
+    let none = query.is_empty().then_some((None, "No folder"));
+    none.into_iter()
+        .chain(
+            folders
+                .iter()
+                .filter(|folder| folder.name.to_lowercase().contains(&query))
+                .map(|folder| (Some(folder.id.as_str()), folder.name.as_str())),
+        )
+        .collect()
+}
+
 fn folder_selector(ui: &mut Ui, folder_id: &mut Option<String>, folders: &[Folder]) {
+    let t = theme();
     let current = match folder_id.as_deref() {
         None => "No folder".to_string(),
         Some(id) => folders
@@ -830,15 +853,71 @@ fn folder_selector(ui: &mut Ui, folder_id: &mut Option<String>, folders: &[Folde
             .map(|folder| folder.name.clone())
             .unwrap_or_else(|| "Unknown folder".into()),
     };
-    egui::ComboBox::from_id_salt(("edit", "folder"))
+    let search_id = ui.make_persistent_id(("edit", "folder-search"));
+    let opened = egui::ComboBox::from_id_salt(("edit", "folder"))
         .width(220.0)
+        .height(280.0)
         .selected_text(current)
+        // Clicks inside must reach the search field instead of closing the list.
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show_ui(ui, |ui| {
-            ui.selectable_value(folder_id, None, "No folder");
-            for folder in folders {
-                ui.selectable_value(folder_id, Some(folder.id.clone()), &folder.name);
+            // A fresh opening highlights the current folder.
+            let mut search: FolderSearch =
+                ui.data(|d| d.get_temp(search_id))
+                    .unwrap_or_else(|| FolderSearch {
+                        query: String::new(),
+                        highlight: folder_choices(folders, "")
+                            .iter()
+                            .position(|(id, _)| *id == folder_id.as_deref())
+                            .unwrap_or(0),
+                    });
+            let response =
+                widgets::search_input(ui, search_id, &mut search.query, "Search folders");
+            if !response.has_focus() && !response.lost_focus() {
+                response.request_focus();
             }
+            if response.changed() {
+                search.highlight = 0;
+            }
+            ui.add_space(4.0);
+            let choices = folder_choices(folders, &search.query);
+            let (down, up, enter) = ui.input_mut(|input| {
+                (
+                    input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                    input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                    input.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                )
+            });
+            if down {
+                search.highlight += 1;
+            }
+            if up {
+                search.highlight = search.highlight.saturating_sub(1);
+            }
+            search.highlight = search.highlight.min(choices.len().saturating_sub(1));
+            let mut picked = None;
+            if choices.is_empty() {
+                ui.label(RichText::new("No matching folders").color(t.text_faint));
+            }
+            for (idx, (id, name)) in choices.iter().enumerate() {
+                let row = ui.selectable_label(idx == search.highlight, *name);
+                if idx == search.highlight && (down || up) {
+                    row.scroll_to_me(None);
+                }
+                if row.clicked() || (enter && idx == search.highlight) {
+                    picked = Some(id.map(str::to_string));
+                }
+            }
+            if let Some(id) = picked {
+                *folder_id = id;
+                ui.close();
+            }
+            ui.data_mut(|d| d.insert_temp(search_id, search));
         });
+    if opened.inner.is_none() {
+        // Each opening starts with an empty search.
+        ui.data_mut(|d| d.remove::<FolderSearch>(search_id));
+    }
 }
 
 fn kind_selector(ui: &mut Ui, idx: usize, field: &mut DraftField) {
@@ -916,6 +995,33 @@ fn add_button(ui: &mut Ui, text: &str) -> egui::Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder_choices_filter_by_name_ignoring_case() {
+        let folder = |id: &str, name: &str| Folder {
+            id: id.into(),
+            name: name.into(),
+        };
+        let folders = [
+            folder("1", "Work"),
+            folder("2", "Work/Servers"),
+            folder("3", "Home"),
+        ];
+        assert_eq!(
+            folder_choices(&folders, ""),
+            [
+                (None, "No folder"),
+                (Some("1"), "Work"),
+                (Some("2"), "Work/Servers"),
+                (Some("3"), "Home"),
+            ]
+        );
+        assert_eq!(
+            folder_choices(&folders, " serv "),
+            [(Some("2"), "Work/Servers")]
+        );
+        assert!(folder_choices(&folders, "nothing").is_empty());
+    }
 
     #[test]
     fn switching_type_keeps_what_was_typed() {
