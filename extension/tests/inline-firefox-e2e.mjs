@@ -171,7 +171,10 @@ try {
     await openInline(selector); await key('Enter'); await checkFilled();
   }
   for (const [path, selector] of [['/otp', '#otp'], ['/otp-split', '#otp0']]) {
-    await navigate(path); await clickField(selector); const before = await calls('ListTotpMatches'); await key('ArrowDown');
+    await navigate(path);
+    // Focus can start the preview lookup before the keyboard action reaches Firefox.
+    const before = await calls('ListTotpMatches');
+    await clickField(selector); await key('ArrowDown');
     await until(async () => await calls('ListTotpMatches') > before, 'OTP matching account');
     await delay(200); await key('Enter');
     await until(async () => await evaluate(`[...document.querySelectorAll('input')].map(input => input.value).join('')`) === '012345', 'OTP fill');

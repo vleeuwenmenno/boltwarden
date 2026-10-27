@@ -92,6 +92,18 @@ unpacked development identity; it does not guarantee the store will assign that
 identity. If different, replace `chrome_public_key` and `chrome_id` together,
 rebuild both the desktop native host and extension, and retest pairing. Rust and
 Nix read the same identity file; no wildcard native messaging allowlist is permitted.
+The Chrome Web Store assigned `pomlcbogekpcooppkmjhdjalddakgmlo`, and
+`chrome_public_key` is the key from that store build, so unpacked builds match it.
+The earlier development ID `lalifhibgahkeifiadipppebhbigoppp` is listed in
+`retired_chrome_ids`: the native host never emits it, and `is_registered` treats a
+manifest that still allows it as unregistered. On Linux and macOS the desktop app
+rewrites existing exact Boltwarden-owned manifests in the known browser directories
+from the retired ID to the store ID at startup (foreign, modified, broadened and
+symlinked manifests are left alone, and missing directories are not created).
+Custom directories are not migrated automatically: press Apply in Browser setup.
+On Windows, press Apply in Browser setup or run `boltwarden install-browser` for a
+known browser. Unpacked installs built before this change carry the old ID:
+rebuild the extension, reload it, and pair again.
 See [Chrome's manifest key guidance](https://developer.chrome.com/docs/extensions/reference/manifest/key).
 
 Use https://github.com/vleeuwenmenno/boltwarden as the homepage and

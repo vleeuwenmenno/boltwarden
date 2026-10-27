@@ -629,7 +629,7 @@ fn draw_field(
     let (rect, response) = widgets::row(ui, selected, height);
     response.widget_info(|| {
         egui::WidgetInfo::selected(
-            egui::WidgetType::SelectableLabel,
+            egui::Role::Button,
             ui.is_enabled(),
             selected,
             format!("{}: {}", field.label, value),
@@ -818,9 +818,7 @@ fn glyph_button(
 ) -> bool {
     let t = theme();
     let response = ui.interact(rect, ui.id().with(id), egui::Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
-    });
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
     let color = if response.hovered() {
         t.accent
     } else {

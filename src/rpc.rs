@@ -99,6 +99,13 @@ pub enum RpcRequest {
     CancelUnlock,
     LockVault,
     ClearSavedSession,
+    /// Cached public release information; never waits for the network.
+    ReleaseStatus,
+    /// Queues a release check and returns the snapshot showing it as checking.
+    CheckReleases,
+    DismissRelease {
+        version: String,
+    },
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -135,6 +142,8 @@ pub enum RpcResponse {
     BrowserRevoked(Result<(), String>),
     LockVault(Result<(), String>),
     ClearSavedSession(Result<(), String>),
+    Releases(crate::releases::ReleaseSnapshot),
+    ReleaseDismissed(Result<crate::releases::ReleaseSnapshot, String>),
     /// The request was rejected before it reached a handler (bad token, unreadable body).
     Error(String),
 }

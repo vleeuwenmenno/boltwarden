@@ -6,12 +6,15 @@ const THIRD_PARTY_NOTICES: &str =
 const NOTICE_SEPARATOR: &str =
     "\n========================================================================\n";
 
-pub fn draw(ui: &mut egui::Ui) {
+/// `updates` draws the release section below the version summary.
+pub fn draw(ui: &mut egui::Ui, updates: impl FnOnce(&mut egui::Ui)) {
     egui::ScrollArea::vertical()
         .id_salt("licenses-and-acknowledgements")
         .show(ui, |ui| {
             ui.heading("Boltwarden");
             draw_versions(ui);
+            updates(ui);
+            ui.add_space(8.0);
             ui.label("Created by Menno van Leeuwen.");
             ui.hyperlink_to(
                 "Project and source code",

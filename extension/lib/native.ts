@@ -1,5 +1,6 @@
 import { identity, publicIdentity, signChallenge } from './pairing';
 import { expect, NativeError, parseWire, type Push, type Request, type Response } from './protocol';
+import { sameReleases, statusReleases, type ReleaseMetadata } from './releases';
 
 export interface NativePort {
   postMessage(message: unknown): void;
@@ -11,10 +12,20 @@ export interface PairingStorage { read(): Promise<string | undefined>; write(id:
 export type ConnectionState = 'disconnected' | 'connecting' | 'unpaired' | 'locked' | 'ready' | 'disabled';
 export interface NativeSnapshot { state: ConnectionState; error?: string; epoch: number }
 interface Pending { resolve(value: Response): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout>; cleanup(): void }
+const STATUS_TIMEOUT_MS = 10_000;
+const MAX_STATUS_REQUESTS = 32;
 
 /** One authenticated port; outstanding requests are never replayed after disconnect. */
 export class NativeClient {
   snapshot: NativeSnapshot = { state: 'disconnected', epoch: 0 };
+  /** Release information from the last Status on this authenticated connection. Kept across
+   * lock and unlock events; cleared when the connection or its authentication ends. Not part
+   * of the snapshot, which content scripts also receive. */
+  releases?: ReleaseMetadata;
+  private releaseRevision = 0;
+  /** Status requests on one connection run one at a time, so a slower earlier answer can
+   * never replace a later one (the daemon answers requests on separate threads). */
+  private statusQueue = { tail: Promise.resolve<unknown>(undefined), size: 0 };
   private port?: NativePort;
   private connecting?: Promise<void>;
   private pairing?: Promise<void>;
@@ -43,6 +54,8 @@ export class NativeClient {
   }
 
   private async open(): Promise<void> {
+    this.releases = undefined;
+    this.statusQueue = { tail: Promise.resolve<unknown>(undefined), size: 0 };
     this.update('connecting');
     try {
       const host = new Promise<number>((resolve, reject) => { this.hostReady = { resolve, reject }; });
@@ -100,11 +113,53 @@ export class NativeClient {
     await this.refreshStatus();
   }
 
-  async refreshStatus(): Promise<NativeSnapshot> {
+  /** `checkUpdates` must only be set for an explicit user request to check for releases. */
+  async refreshStatus(checkUpdates = false): Promise<NativeSnapshot> {
     if (!this.authenticated) return this.snapshot;
-    const status = expect(await this.raw({ type: 'Status' }), 'Status');
-    this.update(!status.enabled ? 'disabled' : status.unlocked ? 'ready' : 'locked', undefined, status.epoch);
-    return this.snapshot;
+    const port = this.port;
+    const queue = this.statusQueue;
+    if (queue.size >= MAX_STATUS_REQUESTS) {
+      this.releaseFailed();
+      throw new NativeError('Busy', 'Too many pending browser requests.');
+    }
+    queue.size++;
+    // Waiting for an earlier Status consumes this request's timeout too. Together with
+    // the queue limit, this keeps repeated popup opens from accumulating abandoned work.
+    const deadline = performance.now() + STATUS_TIMEOUT_MS;
+    const current = () => this.authenticated && this.port === port;
+    const run = async () => {
+      // A request queued on a connection that has since closed is dropped, never sent to a new host.
+      if (!current()) throw new NativeError('Disconnected', 'Native host disconnected.');
+      let status: Extract<Response, { type: 'Status' }>;
+      try {
+        const remaining = deadline - performance.now();
+        if (remaining <= 0) throw new NativeError('Timeout', 'Boltwarden did not respond in time.');
+        status = expect(await this.raw({ type: 'Status', ...(checkUpdates ? { check_updates: true } : {}) }, undefined, remaining), 'Status');
+      } catch (error) {
+        if (current()) this.releaseFailed();
+        throw error;
+      }
+      if (!current()) throw new NativeError('Disconnected', 'Native host disconnected.');
+      this.setReleases(statusReleases(status, Date.now()));
+      this.update(!status.enabled ? 'disabled' : status.unlocked ? 'ready' : 'locked', undefined, status.epoch);
+      return this.snapshot;
+    };
+    const result = queue.tail.then(run, run).finally(() => { queue.size--; });
+    queue.tail = result.catch(() => {});
+    return result;
+  }
+
+  private setReleases(releases: ReleaseMetadata) {
+    if (sameReleases(this.releases, releases)) return false;
+    this.releases = { ...releases, revision: ++this.releaseRevision };
+    return true;
+  }
+
+  /** The desktop did not answer a Status request: keep known releases and when they were
+   * checked, but stop claiming that nothing newer exists. */
+  private releaseFailed() {
+    const previous = this.releases;
+    if (this.setReleases({ ...previous, failed: true, receivedAt: previous?.receivedAt ?? Date.now(), revision: 0 })) this.onChange(this.snapshot);
   }
 
   async request(request: Request, signal?: AbortSignal): Promise<Response> {
@@ -162,7 +217,7 @@ export class NativeClient {
         case 'Unlocked': this.update(this.authenticated ? 'ready' : this.snapshot.state, undefined, message.epoch, message); break;
         case 'MatchesChanged': this.update(this.snapshot.state, undefined, message.epoch, message); break;
         case 'Disabled': this.update('disabled', undefined, this.snapshot.epoch, message); break;
-        case 'PairingRevoked': this.authenticated = false; this.update('unpaired', 'Pairing was revoked. Pair again to reconnect.', this.snapshot.epoch, message); break;
+        case 'PairingRevoked': this.authenticated = false; this.releases = undefined; this.update('unpaired', 'Pairing was revoked. Pair again to reconnect.', this.snapshot.epoch, message); break;
         case 'Error': throw new NativeError(message.code, message.message);
         default: throw new NativeError('ProtocolError', 'Unexpected native event.');
       }
@@ -172,7 +227,7 @@ export class NativeClient {
   private disconnected(message: string) {
     const wasUnpaired = this.snapshot.state === 'unpaired';
     const port = this.port;
-    this.port = undefined; this.hostPid = undefined; this.authenticated = false;
+    this.port = undefined; this.hostPid = undefined; this.authenticated = false; this.releases = undefined;
     this.hostReady?.reject(new NativeError('Disconnected', message)); this.hostReady = undefined;
     try { port?.disconnect(); } catch { /* already closed */ }
     for (const pending of this.pending.values()) {

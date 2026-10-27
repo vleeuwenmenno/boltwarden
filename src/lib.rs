@@ -25,6 +25,7 @@ mod offline_cache;
 mod passkeys;
 mod platform;
 mod random;
+mod releases;
 mod rpc;
 #[cfg_attr(windows, path = "platform/screen_capture_windows.rs")]
 #[cfg_attr(target_os = "macos", path = "platform/screen_capture_macos.rs")]
@@ -220,7 +221,13 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
         ssh_approvals: ssh_approvals.clone(),
         ssh_key_store,
     }));
-    let rpc_socket = start_vault_rpc_listener(vault.clone(), ssh_approvals.clone(), tx.clone());
+    let releases = releases::ReleaseService::start();
+    let rpc_socket = start_vault_rpc_listener(
+        vault.clone(),
+        ssh_approvals.clone(),
+        releases.clone(),
+        tx.clone(),
+    );
 
     start_tray(tx.clone());
     start_activation_listener(listener, tx.clone());
@@ -247,6 +254,7 @@ fn run_daemon(listener: Option<UnixListener>, show_on_start: bool) -> eframe::Re
         state.browser_handler = Some(Arc::new(browser_backend::DaemonBrowserBackend {
             vault: Arc::downgrade(&vault),
             unlock: unlock_show_tx,
+            releases: releases.clone(),
         }));
         if let Err(error) = apply_browser_settings(&mut state) {
             eprintln!("browser integration: {error}");
@@ -390,6 +398,7 @@ fn run_popup() -> eframe::Result<()> {
             #[cfg(target_os = "macos")]
             platform::macos::join_all_spaces(cc);
             ui::theme::theme().install(&cc.egui_ctx);
+            ui::clipboard_policy::install(&cc.egui_ctx);
             Ok(Box::new(App::new(backend, popup_rx)))
         }),
     );
@@ -415,6 +424,7 @@ fn run_window() -> eframe::Result<()> {
         window::options(),
         Box::new(|cc| {
             ui::theme::theme().install(&cc.egui_ctx);
+            ui::clipboard_policy::install(&cc.egui_ctx);
             Ok(Box::new(window::WindowApp::new(backend, popup_rx)))
         }),
     )
@@ -511,6 +521,7 @@ fn start_unlock_popup_listener(
 fn start_vault_rpc_listener(
     vault: Arc<Mutex<VaultState>>,
     ssh_approvals: SshApprovalService,
+    releases: releases::ReleaseService,
     daemon: mpsc::Sender<DaemonCommand>,
 ) -> Option<RpcEndpoint> {
     match rpc::prepare_listener() {
@@ -520,10 +531,11 @@ fn start_vault_rpc_listener(
                 for stream in listener.incoming().flatten() {
                     let vault = vault.clone();
                     let ssh_approvals = ssh_approvals.clone();
+                    let releases = releases.clone();
                     let token = token.clone();
                     let daemon = daemon.clone();
                     std::thread::spawn(move || {
-                        handle_rpc_stream(stream, &token, vault, ssh_approvals, daemon)
+                        handle_rpc_stream(stream, &token, vault, ssh_approvals, releases, daemon)
                     });
                 }
             });
@@ -541,10 +553,11 @@ fn handle_rpc_stream(
     token: &str,
     vault: Arc<Mutex<VaultState>>,
     ssh_approvals: SshApprovalService,
+    releases: releases::ReleaseService,
     daemon: mpsc::Sender<DaemonCommand>,
 ) {
     let response = match read_authenticated_request(&mut stream, token) {
-        Ok(request) => handle_rpc_request(request, &vault, &ssh_approvals, &daemon),
+        Ok(request) => handle_rpc_request(request, &vault, &ssh_approvals, &releases, &daemon),
         Err(message) => {
             debug_log(&format!("rejected RPC request: {message}"));
             RpcResponse::Error(message)
@@ -608,9 +621,16 @@ fn handle_rpc_request(
     request: RpcRequest,
     vault: &Arc<Mutex<VaultState>>,
     ssh_approvals: &SshApprovalService,
+    releases: &releases::ReleaseService,
     daemon: &mpsc::Sender<DaemonCommand>,
 ) -> RpcResponse {
     match request {
+        // Public release data never needs the vault; answer before taking its lock.
+        RpcRequest::ReleaseStatus => return RpcResponse::Releases(releases.snapshot()),
+        RpcRequest::CheckReleases => return RpcResponse::Releases(releases.check_now()),
+        RpcRequest::DismissRelease { version } => {
+            return RpcResponse::ReleaseDismissed(releases.dismiss(&version));
+        }
         RpcRequest::GetShortcut => return RpcResponse::Shortcut(Ok(shortcut::status())),
         RpcRequest::SetShortcut(value) => return RpcResponse::Shortcut(shortcut::set(value)),
         RpcRequest::ShortcutBinding(value) => {
@@ -703,7 +723,15 @@ fn handle_rpc_request(
             return RpcResponse::BrowserApprovalDecided(result);
         }
         request => {
-            return handle_vault_rpc_request(request, vault);
+            let auto_check = match &request {
+                RpcRequest::ApplySettings(settings) => Some(settings.check_for_updates),
+                _ => None,
+            };
+            let response = handle_vault_rpc_request(request, vault);
+            if let (Some(enabled), RpcResponse::SettingsApplied(Ok(_))) = (auto_check, &response) {
+                releases.set_auto_check(enabled);
+            }
+            return response;
         }
     }
 }
@@ -907,7 +935,10 @@ fn handle_vault_rpc_request(request: RpcRequest, vault: &Arc<Mutex<VaultState>>)
         | RpcRequest::ShortcutBinding(_)
         | RpcRequest::OpenWindow
         | RpcRequest::Sync
-        | RpcRequest::VaultHealth => unreachable!("handled before taking the vault lock"),
+        | RpcRequest::VaultHealth
+        | RpcRequest::ReleaseStatus
+        | RpcRequest::CheckReleases
+        | RpcRequest::DismissRelease { .. } => unreachable!("handled before taking the vault lock"),
     };
     if was_unlocked && !state.bw.has_session() && !explicit_lock {
         lock_vault_state(&mut state, "session revoked");
