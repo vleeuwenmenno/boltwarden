@@ -1067,7 +1067,7 @@ impl BwClient {
             login.password.zeroize();
             login.password = password.into();
             let body = build_save_request(&stored, &draft, &iso8601_now())?;
-            let response = self.send_authed(Method::PUT, &cipher_path(&target.id)?, Some(&body))?;
+            let response = self.send_cipher(Method::PUT, &cipher_path(&target.id)?, body)?;
             let raw: Value = expect_success(response, "update browser password")?
                 .json()
                 .map_err(|_| BwError::Parse("Invalid save response".into()))?;
@@ -1400,7 +1400,7 @@ impl BwClient {
                     build_passkey_create_request(context, options, &generated, key)?,
                 )
             };
-        let response = self.send_authed(method, &path, Some(&body))?;
+        let response = self.send_cipher(method, &path, body)?;
         let raw: Value = expect_success(response, "create passkey")?
             .json()
             .map_err(|_| BwError::Parse("invalid create passkey response".into()))?;
@@ -1845,7 +1845,7 @@ impl BwClient {
         }
         let stored = self.ciphers.get(id).cloned().ok_or(BwError::NotFound)?;
         let body = build_save_request(&stored, draft, &iso8601_now())?;
-        let response = self.send_authed(Method::PUT, &cipher_path(id)?, Some(&body))?;
+        let response = self.send_cipher(Method::PUT, &cipher_path(id)?, body)?;
         let raw: Value = expect_success(response, "save")?
             .json()
             .map_err(|e| BwError::Parse(format!("save response: {e}")))?;
@@ -1858,7 +1858,7 @@ impl BwClient {
         self.require_online()?;
         let user_key = self.user_key.as_deref().ok_or(BwError::NotUnlocked)?;
         let body = build_create_request(draft, user_key)?;
-        let response = self.send_authed(Method::POST, "/api/ciphers", Some(&body))?;
+        let response = self.send_cipher(Method::POST, "/api/ciphers", body)?;
         let raw: Value = expect_success(response, "create")?
             .json()
             .map_err(|e| BwError::Parse(format!("create response: {e}")))?;
@@ -1895,6 +1895,26 @@ impl BwClient {
     }
 
     /// Sends an authenticated API request, refreshing the access token once on HTTP 401.
+    /// Sends a full cipher body. Vaultwarden rejects these with 422 unless they name
+    /// the account they were encrypted for, as the official clients do.
+    fn send_cipher(
+        &mut self,
+        method: Method,
+        path: &str,
+        mut body: Value,
+    ) -> Result<Response, BwError> {
+        let user_id = self
+            .raw_profile
+            .as_ref()
+            .and_then(|profile| raw_get(profile, "id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| BwError::Cli("sync again before saving: account id unknown".into()))?
+            .to_string();
+        raw_set(&mut body, "encryptedFor", Value::String(user_id));
+        self.send_authed(method, path, Some(&body))
+    }
+
     fn send_authed(
         &mut self,
         method: Method,
@@ -3428,6 +3448,12 @@ fn server_error_message(body: &str) -> String {
                 .and_then(Value::as_str)
                 .filter(|message| !message.trim().is_empty())
                 .map(str::to_string)
+        })
+        .or_else(|| {
+            // Rocket's error pages are HTML; their title is the readable part.
+            let (_, rest) = body.split_once("<title>")?;
+            let (title, _) = rest.split_once("</title>")?;
+            Some(title.trim().to_string()).filter(|title| !title.is_empty())
         })
         .unwrap_or_else(|| body.chars().take(200).collect())
 }
@@ -6175,6 +6201,18 @@ mod tests {
     }
 
     #[test]
+    fn server_error_message_reads_json_then_html_title() {
+        assert_eq!(server_error_message(r#"{"message":"Bad"}"#), "Bad");
+        assert_eq!(
+            server_error_message(
+                "<!DOCTYPE html><html><head><title>422 Unprocessable Entity</title></head></html>"
+            ),
+            "422 Unprocessable Entity"
+        );
+        assert_eq!(server_error_message("plain"), "plain");
+    }
+
+    #[test]
     fn offline_write_guards_and_retry_backoff() {
         let mut client = protected_fixture();
         client.access_token = None;
@@ -6551,7 +6589,7 @@ mod tests {
         .unwrap();
         let mut client = BwClient {
             email: None,
-            raw_profile: None,
+            raw_profile: Some(json!({"id": "user-1"})),
             raw_folders: Vec::new(),
             undecodable_ciphers: Vec::new(),
             retry_seconds: 60,
