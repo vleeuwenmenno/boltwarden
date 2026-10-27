@@ -14,6 +14,7 @@ use crate::model::{
 use crate::ui::auth::{AuthAction, AuthState, draw_auth};
 use crate::ui::edit::{EditAction, EditState, draw_edit};
 use crate::ui::paired_browsers::{PairedBrowsersAction, PairedBrowsersState, draw_paired_browsers};
+use crate::ui::releases::{ReleaseAction, ReleaseUi};
 use crate::ui::settings_page;
 use crate::ui::shortcuts as sc;
 use crate::ui::summary::{SummaryAction, SummaryState, draw_summary};
@@ -172,6 +173,8 @@ pub struct WindowApp {
     section: Section,
     order: ListOrder,
     query: String,
+    sidebar_panel_id: Option<egui::Id>,
+    list_panel_id: Option<egui::Id>,
     query_changed_at: Instant,
     /// The query and item state the current `results` answer.
     searched: Option<(String, ItemState)>,
@@ -215,6 +218,8 @@ pub struct WindowApp {
     closing: bool,
     focus_search: bool,
     folder_edit: Option<FolderEdit>,
+    /// Kept when the vault locks; release data is public.
+    releases: ReleaseUi,
 }
 
 impl WindowApp {
@@ -270,6 +275,8 @@ impl WindowApp {
                 config::load_window_layout()
             },
             query: String::new(),
+            sidebar_panel_id: None,
+            list_panel_id: None,
             query_changed_at: Instant::now(),
             searched: None,
             search_in_flight: false,
@@ -312,6 +319,7 @@ impl WindowApp {
             closing: false,
             focus_search: true,
             folder_edit: None,
+            releases: ReleaseUi::default(),
         };
         if let Ok(mode) = std::env::var("BOLTWARDEN_DEMO") {
             if mode == "settings" || mode == "licenses" || mode == "shortcut" {
@@ -873,22 +881,22 @@ impl WindowApp {
         if crate::demo::enabled() || ctx.input(|input| input.pointer.any_down()) {
             return;
         }
-        // egui 0.36 identifies panel resize handles with this suffix. Save only
+        // egui identifies panel resize handles with this suffix. Save only
         // an explicit splitter drag, not the temporary clamp from a smaller
         // viewport. The headless drag test verifies this ID and release timing.
         let Some(stopped) = ctx.drag_stopped_id() else {
             return;
         };
         let mut layout = self.layout;
-        if stopped == egui::Id::new("vault-sidebar").with("__resize")
-            && let Some(panel) =
-                egui::containers::panel::PanelState::load(ctx, egui::Id::new("vault-sidebar"))
+        if let Some(id) = self.sidebar_panel_id
+            && stopped == id.with("__resize")
+            && let Some(panel) = egui::containers::panel::PanelState::load(ctx, id)
         {
             layout.sidebar_width = panel.size().x;
         }
-        if stopped == egui::Id::new("vault-list").with("__resize")
-            && let Some(panel) =
-                egui::containers::panel::PanelState::load(ctx, egui::Id::new("vault-list"))
+        if let Some(id) = self.list_panel_id
+            && stopped == id.with("__resize")
+            && let Some(panel) = egui::containers::panel::PanelState::load(ctx, id)
         {
             layout.list_width = panel.size().x;
         }
@@ -930,6 +938,7 @@ impl WindowApp {
             }
         }
         self.poll_replies(ctx);
+        self.releases.poll(ctx, &self.backend);
         if self
             .reprompt_at
             .is_some_and(|at| at.elapsed() >= REPROMPT_TTL)
@@ -1345,6 +1354,10 @@ impl eframe::App for WindowApp {
                 ui.colored_label(theme().warning, warning);
             });
         }
+        let about_open = self.section == Section::Settings && self.settings_licenses;
+        if matches!(self.screen, Screen::Auth | Screen::Vault) && !about_open {
+            self.releases.draw_notice(root, "vault-release-notice");
+        }
         if self.confirm_close {
             self.draw_confirm_close(ctx);
             if self.closing {
@@ -1469,6 +1482,8 @@ impl WindowApp {
     }
 
     fn draw_vault(&mut self, root: &mut egui::Ui) {
+        self.sidebar_panel_id = Some(root.make_persistent_id("vault-sidebar"));
+        self.list_panel_id = Some(root.make_persistent_id("vault-list"));
         self.refresh_settings(false);
         let ctx = &root.ctx().clone();
         let editing = self.edit_state.is_some()
@@ -1550,7 +1565,18 @@ impl WindowApp {
                 )
                 .show(root, |ui| {
                     if self.settings_licenses {
-                        settings_page::column(ui, crate::ui::acknowledgements::draw);
+                        let auto_check = self.settings.check_for_updates;
+                        let mut release_action = None;
+                        settings_page::column(ui, |ui| {
+                            crate::ui::acknowledgements::draw(ui, |ui| {
+                                release_action = self.releases.draw_about(ui, auto_check);
+                            })
+                        });
+                        if let Some(ReleaseAction::SetAutoCheck(enabled)) = release_action {
+                            self.refresh_settings(true);
+                            self.settings.check_for_updates = enabled;
+                            self.save_settings();
+                        }
                     } else if let Some(action) = settings_page::draw_page(
                         ui,
                         group,
@@ -2567,7 +2593,8 @@ mod tests {
             app.section = Section::Settings;
             frame(&mut app, &ctx, 1180.0, vec![]);
             let sidebar =
-                egui::containers::panel::PanelState::load(&ctx, "vault-sidebar".into()).unwrap();
+                egui::containers::panel::PanelState::load(&ctx, app.sidebar_panel_id.unwrap())
+                    .unwrap();
             let start = egui::pos2(sidebar.outer_rect.right(), 300.0);
             let end = egui::pos2(start.x + 45.0, start.y);
             frame(
@@ -2598,13 +2625,18 @@ mod tests {
                 WindowApp::with_settings(AppBackend::demo(), commands, AppSettings::default());
             let fresh_ctx = Context::default();
             frame(&mut reopened, &fresh_ctx, 1180.0, vec![]);
-            let restored =
-                egui::containers::panel::PanelState::load(&fresh_ctx, "vault-sidebar".into())
-                    .unwrap();
+            let restored = egui::containers::panel::PanelState::load(
+                &fresh_ctx,
+                reopened.sidebar_panel_id.unwrap(),
+            )
+            .unwrap();
             assert!((restored.size().x - saved.sidebar_width).abs() < 1.0);
 
-            let list =
-                egui::containers::panel::PanelState::load(&fresh_ctx, "vault-list".into()).unwrap();
+            let list = egui::containers::panel::PanelState::load(
+                &fresh_ctx,
+                reopened.list_panel_id.unwrap(),
+            )
+            .unwrap();
             let start = egui::pos2(list.outer_rect.right(), 300.0);
             let end = egui::pos2(start.x + 100.0, start.y);
             frame(
@@ -2630,8 +2662,11 @@ mod tests {
             assert!((saved.list_width - 430.0).abs() < 1.0, "{saved:?}");
             let inode = file_identity(&path);
             frame(&mut reopened, &fresh_ctx, MIN_WINDOW_SIZE.x, vec![]);
-            let list =
-                egui::containers::panel::PanelState::load(&fresh_ctx, "vault-list".into()).unwrap();
+            let list = egui::containers::panel::PanelState::load(
+                &fresh_ctx,
+                reopened.list_panel_id.unwrap(),
+            )
+            .unwrap();
             assert!(MIN_WINDOW_SIZE.x - list.outer_rect.right() >= 259.0);
             assert!(list.size().x < saved.list_width);
             reopened.close_window(&fresh_ctx);

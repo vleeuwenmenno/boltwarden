@@ -10,6 +10,7 @@ use crate::ui::browser_approval::{
 };
 use crate::ui::edit::{EditAction, EditState, draw_edit};
 use crate::ui::paired_browsers::PairedBrowsersAction;
+use crate::ui::releases::{ReleaseAction, ReleaseUi};
 use crate::ui::search::{SearchAction, SearchState, SearchView, draw_search};
 use crate::ui::ssh_approval::{SshApprovalAction, SshApprovalUiState, draw_ssh_approval};
 use crate::ui::summary::{SummaryAction, SummaryState, draw_summary};
@@ -153,6 +154,8 @@ pub struct App {
     last_sync_attempt: Instant,
     focus_hide_enabled_at: Instant,
     unfocused_since: Option<Instant>,
+    /// Kept when the vault locks; release data is public.
+    releases: ReleaseUi,
 }
 
 impl Default for App {
@@ -259,6 +262,7 @@ impl App {
             last_sync_attempt: Instant::now(),
             focus_hide_enabled_at: Instant::now() + UNFOCUS_HIDE_GRACE,
             unfocused_since: None,
+            releases: ReleaseUi::default(),
         };
         app.search_state.start_list = app.settings.start_list;
         // Load the start list on the first frame, before anything is typed.
@@ -274,6 +278,7 @@ impl App {
         self.poll_capture_preference(ctx);
         self.poll_popup_commands(ctx);
         self.poll_responses(ctx);
+        self.releases.poll(ctx, &self.backend);
         if self
             .reprompt_at
             .is_some_and(|at| at.elapsed() >= Duration::from_secs(55))
@@ -1334,6 +1339,9 @@ impl eframe::App for App {
                 ui.colored_label(crate::ui::theme::theme().warning, warning);
             });
         }
+        if matches!(self.screen, Screen::Auth | Screen::Search) && !self.acknowledgements_open {
+            self.releases.draw_notice(root, "release-notice");
+        }
 
         // Screens with their own Escape handling must not hide the whole window.
         let escape_handled_by_screen = match self.screen {
@@ -1617,6 +1625,7 @@ impl App {
     fn update_search(&mut self, root: &mut egui::Ui) {
         self.refresh_settings(false);
         if self.acknowledgements_open {
+            let mut release_action = None;
             egui::CentralPanel::default().show(root, |ui| {
                 if crate::ui::widgets::button(
                     ui,
@@ -1635,8 +1644,16 @@ impl App {
                 {
                     self.acknowledgements_open = false;
                 }
-                crate::ui::acknowledgements::draw(ui);
+                let auto_check = self.settings.check_for_updates;
+                crate::ui::acknowledgements::draw(ui, |ui| {
+                    release_action = self.releases.draw_about(ui, auto_check);
+                });
             });
+            if let Some(ReleaseAction::SetAutoCheck(enabled)) = release_action {
+                self.refresh_settings(true);
+                self.settings.check_for_updates = enabled;
+                self.save_and_apply_settings();
+            }
             return;
         }
 

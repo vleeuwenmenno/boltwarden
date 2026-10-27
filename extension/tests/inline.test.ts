@@ -473,6 +473,67 @@ describe('isolated inline login picker', () => {
 });
 
 describe('inline OTP preview', () => {
+  function otpField() {
+    const container = document.createElement('form');
+    container.innerHTML = '<input autocomplete="one-time-code" inputmode="numeric" maxlength="6">';
+    document.body.append(container);
+    const input = container.querySelector('input')!;
+    input.getBoundingClientRect = () => new DOMRect(20, 30, 240, 32);
+    input.getClientRects = () => [input.getBoundingClientRect()] as unknown as DOMRectList;
+    input.focus(); return input;
+  }
+
+  it.each(['click', 'focus'])('previews an automatically %s-opened account without selecting or filling it', async mode => {
+    const field = otpField();
+    const page: InlineValue = {...ready, frame: {...ready.frame!, kind: 'totp'}};
+    const request = vi.fn<InlineOptions['request']>().mockImplementation(async action => action === 'preview'
+      ? {...page, preview: {itemId: 'first', code: '012345', expiresAt: Math.floor(Date.now() / 1000) + 30}}
+      : page);
+    const {ui, menu} = setup(request);
+    if (mode === 'click') trusted(field, 'pointerdown');
+    ui.configure({autoOpen: true, theme: 'system'}); ui.state(ready.connection);
+    if (mode === 'click') trusted(field, 'click');
+    await settle(); await settle(); await settle();
+    expect(menu.hidden).toBe(false);
+    expect(menu.querySelector('.otp-code')?.textContent).toBe('012 345');
+    expect(menu.querySelector('.otp-expiry')?.textContent).toMatch(/^\d+s$/);
+    expect([...menu.querySelectorAll('[role=option]')].every(row => row.getAttribute('aria-selected') === 'false')).toBe(true);
+    const enter = trusted(field, 'keydown', 'Enter'); await settle();
+    expect(enter.defaultPrevented).toBe(false);
+    expect(menu.hidden).toBe(true);
+    expect(request.mock.calls.some(([action]) => action === 'fill')).toBe(false);
+  });
+
+  it('moves the preview to an explicitly selected account after automatic opening', async () => {
+    const field = otpField();
+    const page: InlineValue = {...ready, frame: {...ready.frame!, kind: 'totp', items: ready.frame!.items.map(item => ({...item, reprompt: false}))}};
+    const request = vi.fn<InlineOptions['request']>().mockImplementation(async (action, fields) => action === 'preview'
+      ? {...page, preview: {itemId: fields.itemId!, code: fields.itemId === 'first' ? '012345' : '654321', expiresAt: Math.floor(Date.now() / 1000) + 30}}
+      : page);
+    const {ui, menu} = setup(request);
+    ui.configure({autoOpen: true, theme: 'system'}); ui.state(ready.connection);
+    await settle(); await settle(); await settle();
+    expect(menu.querySelector('.otp-code')?.textContent).toBe('012 345');
+    trusted(field, 'keydown', 'ArrowDown');
+    trusted(field, 'keydown', 'ArrowDown');
+    await settle(); await settle();
+    expect(menu.querySelector('[aria-selected=true] .otp-code')?.textContent).toBe('654 321');
+    expect(menu.querySelectorAll('.otp-code')).toHaveLength(1);
+    expect(request.mock.calls.some(([action]) => action === 'fill')).toBe(false);
+  });
+
+  it('does not skip a protected first account to preview another account automatically', async () => {
+    otpField();
+    const page: InlineValue = {...ready, frame: {...ready.frame!, kind: 'totp', items: [...ready.frame!.items].reverse()}};
+    const request = vi.fn<InlineOptions['request']>().mockResolvedValue(page);
+    const {ui, menu} = setup(request);
+    ui.configure({autoOpen: true, theme: 'system'}); ui.state(ready.connection);
+    await settle(); await settle(); await settle();
+    expect(menu.textContent).toContain('Locked');
+    expect(menu.querySelector('.otp-code')).toBeNull();
+    expect(request.mock.calls.map(([action]) => action)).toEqual(['list']);
+  });
+
   it('groups digits, refreshes expired codes, and clears on lock', async () => {
     vi.useFakeTimers();
     try {

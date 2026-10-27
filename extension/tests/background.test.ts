@@ -11,7 +11,7 @@ const h = vi.hoisted(() => {
     tabs: { sendMessage: vi.fn(), query: vi.fn(), get: vi.fn(), onRemoved: event(), onActivated: event() },
     windows: { onFocusChanged: event(), WINDOW_ID_NONE: -1 }, commands: { onCommand: event() }, alarms: { onAlarm: event(), create: vi.fn(async () => {}) },
   };
-  const native = { snapshot: { state: 'ready', epoch: 1 }, connect: vi.fn(async () => {}), refreshStatus: vi.fn(async () => {}), request: vi.fn(), pair: vi.fn(), onChange: (_snapshot: any, _event?: any) => {} };
+  const native = { snapshot: { state: 'ready', epoch: 1 }, releases: undefined as any, connect: vi.fn(async () => {}), refreshStatus: vi.fn(async (_check?: boolean) => {}), request: vi.fn(), pair: vi.fn(), onChange: (_snapshot: any, _event?: any) => {} };
   return { browser, native, event };
 });
 vi.mock('wxt/browser', () => ({ browser: h.browser }));
@@ -29,7 +29,7 @@ beforeEach(() => {
     if (value && typeof value === 'object' && 'listeners' in value) value.listeners.length = 0;
   }
   tab = { id: 1, windowId: 10, active: true, url: 'https://example.com/login' };
-  h.native.snapshot = { state: 'ready', epoch: 1 };
+  h.native.snapshot = { state: 'ready', epoch: 1 }; h.native.releases = undefined;
   h.browser.tabs.query.mockImplementation(async () => [tab]); h.browser.tabs.get.mockImplementation(async () => tab);
   h.browser.webNavigation.getFrame.mockImplementation(async () => ({ url: tab.url, documentId: 'doc' }));
   h.native.request.mockImplementation(async (request: any) => request.type === 'ListMatches'
@@ -621,4 +621,43 @@ describe('credit card document routing', () => {
 it('pairs with a browser label instead of the old generic extension label', async () => {
   expect(await ui({ type: 'pair' })).toMatchObject({ ok: true });
   expect(h.native.pair).toHaveBeenCalledWith('Chromium-based browser');
+});
+
+describe('release information routing', () => {
+  const metadata = { desktopVersion: '1.0.0-rc.5', releases: { state: 'fresh', auto_check: true, complete: true, desktop: { installed: '1.0.0-rc.5', update: 'up_to_date', dismissed: false } }, receivedAt: 1 };
+  it('reads cached releases for trusted pages and checks only on an explicit request', async () => {
+    h.native.refreshStatus.mockImplementation(async () => { h.native.releases = metadata; });
+    expect(await ui({ type: 'releases' })).toEqual({ ok: true, value: { connection: { state: 'ready', epoch: 1 }, releases: metadata } });
+    expect(h.native.refreshStatus).toHaveBeenLastCalledWith(false);
+    await ui({ type: 'releases', check: true }, 'chrome-extension://extension/options.html');
+    expect(h.native.refreshStatus).toHaveBeenLastCalledWith(true);
+    await ui({ type: 'releases', check: 'yes' });
+    expect(h.native.refreshStatus).toHaveBeenLastCalledWith(false);
+    // Routine status reads never ask for a check.
+    await ui({ type: 'retry' }); await ui({ type: 'list' });
+    expect(h.native.refreshStatus.mock.calls.filter((args: unknown[]) => args[0] === true)).toHaveLength(1);
+    expect((await ui({ type: 'state' })).value.releases).toBe(metadata);
+  });
+  it('rejects release checks from websites, other extensions, and content scripts', async () => {
+    for (const [url, id] of [[tab.url, 'extension'], ['chrome-extension://extension/popup.html', 'other'], ['chrome-extension://extension/popup.html?x', 'extension']]) {
+      expect(h.browser.runtime.onMessage.emit({ type: 'releases', check: true }, { id, url })[0]).toBeUndefined();
+    }
+    const document = documentPort();
+    const response = await inline(document, 'releases', { check: true });
+    expect(response).toMatchObject({ ok: false });
+    expect(h.native.refreshStatus).not.toHaveBeenCalled();
+  });
+  it('pushes release changes to extension pages only, never to content scripts', () => {
+    const page = uiPort();
+    const document = documentPort();
+    h.native.releases = metadata; h.native.onChange(h.native.snapshot);
+    expect(page.messages.at(-1)).toEqual({ type: 'state-changed', reason: 'releases', connection: { state: 'ready', epoch: 1 }, releases: metadata });
+    const count = page.messages.length;
+    h.native.onChange(h.native.snapshot);
+    expect(page.messages).toHaveLength(count);
+    h.native.snapshot = { state: 'locked', epoch: 2 }; h.native.onChange(h.native.snapshot, { type: 'Locked', epoch: 2 });
+    expect(page.messages.at(-1)).toMatchObject({ reason: 'state', releases: metadata });
+    expect(JSON.stringify(document.messages)).not.toContain('releases');
+    expect(JSON.stringify(document.messages)).not.toContain('1.0.0-rc.5');
+  });
 });

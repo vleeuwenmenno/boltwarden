@@ -149,21 +149,29 @@ fn helper(binary: Option<PathBuf>) -> Result<PathBuf> {
     Ok(path)
 }
 fn manifest(browser: &Browser, host: &Path) -> serde_json::Value {
+    manifest_for(browser, host, &identities().chrome_id)
+}
+fn manifest_for(browser: &Browser, host: &Path, chrome_id: &str) -> serde_json::Value {
     let ids = identities();
     let mut value = serde_json::json!({"name":ids.host_name, "description":"Boltwarden browser integration", "path":host, "type":"stdio"});
     match browser.family {
         BrowserFamily::Firefox => value["allowed_extensions"] = serde_json::json!([ids.firefox_id]),
         BrowserFamily::Chromium => {
             value["allowed_origins"] =
-                serde_json::json!([format!("chrome-extension://{}/", ids.chrome_id)])
+                serde_json::json!([format!("chrome-extension://{chrome_id}/")])
         }
     }
     value
 }
 fn check_existing(browser: &Browser, host: &Path) -> Result<bool> {
+    Ok(existing(browser, host)?.is_some())
+}
+/// `None` when absent, `Some(true)` for the current manifest, `Some(false)` for an exact manifest
+/// of ours that still allows a retired extension ID (replaceable and removable, not registered).
+fn existing(browser: &Browser, host: &Path) -> Result<Option<bool>> {
     let path = manifest_path(browser)?;
     if !path.exists() {
-        return Ok(false);
+        return Ok(None);
     }
     verify_private(&path)?;
     let metadata = fs::metadata(&path)?;
@@ -171,10 +179,17 @@ fn check_existing(browser: &Browser, host: &Path) -> Result<bool> {
         bail!("Invalid native host manifest");
     }
     let value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
-    if value != manifest(browser, host) {
-        bail!("Native host manifest belongs to another installation; unregister it there first");
+    if value == manifest(browser, host) {
+        return Ok(Some(true));
     }
-    Ok(true)
+    if identities()
+        .retired_chrome_ids
+        .iter()
+        .any(|id| value == manifest_for(browser, host, id))
+    {
+        return Ok(Some(false));
+    }
+    bail!("Native host manifest belongs to another installation; unregister it there first");
 }
 fn check_registry(browser: &Browser) -> Result<bool> {
     let expected = manifest_path(browser)?;
@@ -347,7 +362,7 @@ pub fn is_registered(dir: &Path) -> Result<bool> {
         Ok(host) => host,
         Err(_) => return Ok(false),
     };
-    Ok(check_existing(browser, &host)? && check_registry(browser)?)
+    Ok(existing(browser, &host)? == Some(true) && check_registry(browser)?)
 }
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
     let execute = || -> Result<()> {
@@ -406,6 +421,36 @@ mod tests {
             assert!(check_existing(&browser, &host).unwrap());
             let mut foreign = manifest(&browser, &host);
             foreign["path"] = serde_json::json!(root.join("other-host.exe"));
+            let retired_id = identities().retired_chrome_ids[0].clone();
+            let retired = manifest_for(&browser, &host, &retired_id);
+            write_private(
+                &manifest_path(&browser).unwrap(),
+                &serde_json::to_vec(&retired).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(existing(&browser, &host).unwrap(), Some(false));
+            assert!(check_existing(&browser, &host).unwrap());
+            install(&browser, &host).unwrap();
+            assert_eq!(existing(&browser, &host).unwrap(), Some(true));
+            write_private(
+                &manifest_path(&browser).unwrap(),
+                &serde_json::to_vec(&retired).unwrap(),
+            )
+            .unwrap();
+            uninstall(&browser, &host).unwrap();
+            install(&browser, &host).unwrap();
+            let mut broadened = retired.clone();
+            broadened["allowed_origins"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!("chrome-extension://other/"));
+            write_private(
+                &manifest_path(&browser).unwrap(),
+                &serde_json::to_vec(&broadened).unwrap(),
+            )
+            .unwrap();
+            assert!(existing(&browser, &host).is_err());
+            assert!(uninstall(&browser, &host).is_err());
             write_private(
                 &manifest_path(&browser).unwrap(),
                 &serde_json::to_vec(&foreign).unwrap(),

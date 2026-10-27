@@ -635,6 +635,7 @@ pub fn repair_launcher() -> Result<bool> {
 }
 
 fn repair_launcher_at(paths: &Paths, binary: Option<PathBuf>) -> Result<bool> {
+    migrate_retired_manifests(paths);
     let launcher = paths.launcher();
     if let Some(bytes) = read_owned(&launcher)? {
         match launcher_binary(&bytes) {
@@ -806,6 +807,10 @@ fn manifest_path(directory: &Path) -> PathBuf {
 }
 
 fn manifest(launcher: &Path, family: BrowserFamily) -> serde_json::Value {
+    manifest_for(launcher, family, &identities().chrome_id)
+}
+
+fn manifest_for(launcher: &Path, family: BrowserFamily, chrome_id: &str) -> serde_json::Value {
     let ids = identities();
     let mut value = serde_json::json!({"name": ids.host_name, "description": "Boltwarden browser integration", "path": launcher, "type": "stdio"});
     match family {
@@ -814,7 +819,7 @@ fn manifest(launcher: &Path, family: BrowserFamily) -> serde_json::Value {
         }
         BrowserFamily::Chromium => {
             value["allowed_origins"] =
-                serde_json::json!([format!("chrome-extension://{}/", ids.chrome_id)]);
+                serde_json::json!([format!("chrome-extension://{chrome_id}/")]);
         }
     }
     value
@@ -825,13 +830,45 @@ fn is_our_manifest(value: &serde_json::Value, launcher: &Path) -> bool {
         || *value == manifest(launcher, BrowserFamily::Chromium)
 }
 
+/// Exact manifest we wrote for a retired development ID: safe to rewrite or remove, but no
+/// longer a valid registration.
+fn is_retired_manifest(value: &serde_json::Value, launcher: &Path) -> bool {
+    identities()
+        .retired_chrome_ids
+        .iter()
+        .any(|id| *value == manifest_for(launcher, BrowserFamily::Chromium, id))
+}
+
+/// Rewrite owned manifests that still allow a retired extension ID. Existing registrations only,
+/// so integration stays opt-in; foreign, modified or symlinked manifests are left alone.
+fn migrate_retired_manifests(paths: &Paths) {
+    let launcher = paths.launcher();
+    for (directory, _) in destinations(paths, Browser::All) {
+        let path = manifest_path(&directory);
+        let Ok(Some(bytes)) = read_owned(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        if is_retired_manifest(&value, &launcher) {
+            let body = serde_json::to_vec_pretty(&manifest(&launcher, BrowserFamily::Chromium));
+            if let Ok(body) = body
+                && let Err(error) = write_atomic(&path, &body, 0o600)
+            {
+                eprintln!("browser integration migration: {}: {error}", path.display());
+            }
+        }
+    }
+}
+
 fn check_managed_manifest(path: &Path, launcher: &Path) -> io::Result<bool> {
     let Some(bytes) = read_owned(path)? else {
         return Ok(false);
     };
     let value = serde_json::from_slice::<serde_json::Value>(&bytes)
         .map_err(|_| permission_denied("Refusing to replace or remove an invalid manifest"))?;
-    if !is_our_manifest(&value, launcher) {
+    if !is_our_manifest(&value, launcher) && !is_retired_manifest(&value, launcher) {
         return Err(permission_denied(
             "Manifest belongs to another installation",
         ));
@@ -1427,6 +1464,115 @@ mod tests {
         assert_eq!(fs::read(manifest_path(&directory)).unwrap(), original);
         assert!(!fixture.paths.launcher().exists());
         assert!(!is_registered_at(&directory, &fixture.paths.launcher()).unwrap());
+    }
+
+    fn write_retired(fixture: &Fixture, directory: &Path) -> serde_json::Value {
+        let retired = identities().retired_chrome_ids[0].clone();
+        let value = manifest_for(&fixture.paths.launcher(), BrowserFamily::Chromium, &retired);
+        fs::create_dir_all(directory).unwrap();
+        fs::write(
+            manifest_path(directory),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        value
+    }
+
+    #[test]
+    fn retired_owned_manifest_is_not_registered_and_install_migrates_it() {
+        let fixture = Fixture::new();
+        let directory = fixture.root.join("native-hosts");
+        fixture.install(&directory, BrowserFamily::Firefox).unwrap();
+        let retired = write_retired(&fixture, &directory);
+        assert!(!is_registered_at(&directory, &fixture.paths.launcher()).unwrap());
+        fixture
+            .install(&directory, BrowserFamily::Chromium)
+            .unwrap();
+        let written: serde_json::Value =
+            serde_json::from_slice(&fs::read(manifest_path(&directory)).unwrap()).unwrap();
+        assert_ne!(written, retired);
+        assert_eq!(
+            written["allowed_origins"],
+            serde_json::json!([format!("chrome-extension://{}/", identities().chrome_id)])
+        );
+        assert!(is_registered_at(&directory, &fixture.paths.launcher()).unwrap());
+    }
+
+    #[test]
+    fn retired_owned_manifest_can_be_removed_but_modified_one_cannot() {
+        let fixture = Fixture::new();
+        let directory = fixture.root.join("native-hosts");
+        fixture.install(&directory, BrowserFamily::Firefox).unwrap();
+        let mut value = write_retired(&fixture, &directory);
+        remove_owned_manifest(&manifest_path(&directory), &fixture.paths.launcher()).unwrap();
+        assert!(!manifest_path(&directory).exists());
+        value["allowed_origins"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!("chrome-extension://other/"));
+        fs::write(
+            manifest_path(&directory),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            remove_owned_manifest(&manifest_path(&directory), &fixture.paths.launcher()).is_err()
+        );
+        assert!(manifest_path(&directory).exists());
+    }
+
+    #[test]
+    fn startup_migration_rewrites_only_exact_retired_manifests_in_known_directories() {
+        let fixture = Fixture::new();
+        let launcher = fixture.paths.launcher();
+        #[cfg(target_os = "macos")]
+        let browser = Browser::Brave;
+        #[cfg(not(target_os = "macos"))]
+        let browser = Browser::BraveOrigin;
+        let origin = destinations(&fixture.paths, browser)[0].0.clone();
+        let firefox = destinations(&fixture.paths, Browser::Firefox)[0].0.clone();
+        let chrome = destinations(&fixture.paths, Browser::Chrome)[0].0.clone();
+        assert!(origin != firefox && origin != chrome);
+        fixture.install(&firefox, BrowserFamily::Firefox).unwrap();
+        let firefox_before = fs::read(manifest_path(&firefox)).unwrap();
+        write_retired(&fixture, &origin);
+
+        repair_launcher_at(&fixture.paths, Some(fixture.boltwarden.clone())).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_slice(&fs::read(manifest_path(&origin)).unwrap()).unwrap();
+        assert_eq!(written, manifest(&launcher, BrowserFamily::Chromium));
+        assert_eq!(fs::read(manifest_path(&firefox)).unwrap(), firefox_before);
+        assert!(!chrome.exists(), "missing directories stay absent");
+
+        let mut broadened = write_retired(&fixture, &origin);
+        broadened["allowed_origins"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!("chrome-extension://other/"));
+        let bytes = serde_json::to_vec(&broadened).unwrap();
+        fs::write(manifest_path(&origin), &bytes).unwrap();
+        repair_launcher_at(&fixture.paths, Some(fixture.boltwarden.clone())).unwrap();
+        assert_eq!(fs::read(manifest_path(&origin)).unwrap(), bytes);
+
+        fs::remove_file(manifest_path(&origin)).unwrap();
+        let target = fixture.root.join("target.json");
+        fs::write(
+            &target,
+            serde_json::to_vec(&manifest_for(
+                &launcher,
+                BrowserFamily::Chromium,
+                &identities().retired_chrome_ids[0],
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        symlink(&target, manifest_path(&origin)).unwrap();
+        repair_launcher_at(&fixture.paths, Some(fixture.boltwarden.clone())).unwrap();
+        assert!(
+            fs::symlink_metadata(manifest_path(&origin))
+                .unwrap()
+                .is_symlink()
+        );
     }
 
     #[test]

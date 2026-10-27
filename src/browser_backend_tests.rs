@@ -107,12 +107,17 @@ struct Harness {
     notices: mpsc::Receiver<()>,
     daemon: mpsc::Sender<DaemonCommand>,
     ssh_approvals: SshApprovalService,
+    releases: crate::releases::ReleaseService,
     directory: PathBuf,
     pairing_id: String,
 }
 
 impl Harness {
     fn paired() -> Self {
+        Self::paired_with(crate::releases::ReleaseService::unsupported())
+    }
+
+    fn paired_with(releases: crate::releases::ReleaseService) -> Self {
         let (notify, notices) = mpsc::channel();
         let (ssh_notify, _) = mpsc::channel();
         let (unlock_notify, _) = mpsc::channel();
@@ -142,6 +147,7 @@ impl Harness {
         let backend = Arc::new(DaemonBrowserBackend {
             vault: Arc::downgrade(&vault),
             unlock: unlock_notify,
+            releases: releases.clone(),
         });
         let directory =
             crate::test_temp_dir().join(format!("boltwarden-backend-{}", uuid::Uuid::new_v4()));
@@ -158,6 +164,7 @@ impl Harness {
             notices,
             daemon,
             ssh_approvals,
+            releases,
             directory,
             pairing_id: String::new(),
         };
@@ -230,6 +237,7 @@ impl Harness {
             }),
             &self.vault,
             &self.ssh_approvals,
+            &self.releases,
             &self.daemon,
         ) {
             RpcResponse::BrowserApprovalDecided(result) => result,
@@ -270,6 +278,7 @@ impl Harness {
             }),
             &self.vault,
             &self.ssh_approvals,
+            &self.releases,
             &self.daemon,
         ) {
             RpcResponse::BrowserApprovalDecided(result) => result,
@@ -437,7 +446,12 @@ fn browser_lists_and_status_return_cached_data_while_sync_is_pending() {
             assert_eq!(cached["items"].as_array().unwrap().len(), 1, "{kind}");
             h.send("cached-again", request());
             assert_eq!(h.read("cached-again")["items"], cached["items"]);
-            h.send("responsive-status", BrowserRequest::Status);
+            h.send(
+                "responsive-status",
+                BrowserRequest::Status {
+                    check_updates: false,
+                },
+            );
             assert_eq!(h.read("responsive-status")["unlocked"], true);
             assert!(h.vault.lock().unwrap().browser_sync_in_flight);
 
@@ -633,6 +647,7 @@ fn browser_fill_revoke_and_disconnect_cancel_desktop_approval() {
                     },
                     &h.vault,
                     &h.ssh_approvals,
+                    &h.releases,
                     &h.daemon,
                 ),
                 RpcResponse::BrowserRevoked(Ok(()))
@@ -671,6 +686,7 @@ fn disabled_browser_integration_lists_and_revokes_durable_pairings_and_reports_s
                 RpcRequest::ListPairedBrowsers,
                 &h.vault,
                 &h.ssh_approvals,
+                &h.releases,
                 &h.daemon,
             )
         };
@@ -685,6 +701,7 @@ fn disabled_browser_integration_lists_and_revokes_durable_pairings_and_reports_s
                 },
                 &h.vault,
                 &h.ssh_approvals,
+                &h.releases,
                 &h.daemon,
             ),
             RpcResponse::BrowserRevoked(Ok(()))
@@ -709,6 +726,7 @@ fn disabled_browser_integration_lists_and_revokes_durable_pairings_and_reports_s
                 },
                 &h.vault,
                 &h.ssh_approvals,
+                &h.releases,
                 &h.daemon,
             ),
             RpcResponse::BrowserRevoked(Err(_))
@@ -779,7 +797,12 @@ fn browser_sync_revocation_locks_daemon_and_cancels_pending_fill() {
             }
             assert!(h.decide(&approval.id, true, "correct").is_err());
             h.assert_no_credentials();
-            h.send("status", BrowserRequest::Status);
+            h.send(
+                "status",
+                BrowserRequest::Status {
+                    check_updates: false,
+                },
+            );
             assert_eq!(h.read("status")["unlocked"], false);
         }
     });
@@ -1588,4 +1611,107 @@ fn protected_card_fill_requires_fresh_password_and_lock_cancels_approval() {
     crate::lock_vault_state(&mut h.vault.lock().unwrap(), "card test");
     h.wait_for_approval_end();
     h.assert_no_credentials();
+}
+
+#[test]
+fn browser_status_check_updates_is_a_manual_check_even_when_not_due() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    // Automatic checks off, and on with today's check already done: neither is "due",
+    // yet the extension's Check now must still queue one.
+    for auto in [false, true] {
+        let releases = crate::releases::ReleaseService::for_tests(auto, true);
+        let mut h = Harness::paired_with(releases.clone());
+        h.send(
+            "refresh",
+            BrowserRequest::Status {
+                check_updates: false,
+            },
+        );
+        let refresh = h.read("refresh");
+        assert_eq!(refresh["releases"]["state"], "fresh");
+        assert!(!releases.has_queued_check(), "status refreshes never check");
+
+        h.send(
+            "check",
+            BrowserRequest::Status {
+                check_updates: true,
+            },
+        );
+        let check = h.read("check");
+        assert_eq!(check["releases"]["state"], "checking", "auto {auto}");
+        assert!(check["releases"].get("retry_after_seconds").is_none());
+        assert!(releases.has_queued_check());
+    }
+}
+
+#[test]
+fn browser_status_check_updates_requires_enabled_integration() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let releases = crate::releases::ReleaseService::for_tests(false, true);
+    let mut h = Harness::paired_with(releases.clone());
+    h.vault.lock().unwrap().browser_enabled = false;
+    h.send(
+        "check",
+        BrowserRequest::Status {
+            check_updates: true,
+        },
+    );
+    assert_eq!(h.read("check")["code"], "Disabled");
+    assert!(!releases.has_queued_check());
+}
+
+#[test]
+fn browser_status_reports_release_state_and_desktop_version() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let mut h = Harness::paired();
+    h.send(
+        "status",
+        BrowserRequest::Status {
+            check_updates: true,
+        },
+    );
+    let status = h.read("status");
+    assert_eq!(status["type"], "Status");
+    assert_eq!(status["desktop_version"], crate::version::APP);
+    assert_eq!(status["releases"]["state"], "unsupported");
+    assert_eq!(
+        status["releases"]["desktop"]["installed"],
+        crate::version::APP
+    );
+}
+
+#[test]
+fn release_rpc_requests_never_wait_for_the_vault_lock() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let h = Harness::paired();
+    let held = h.vault.lock().unwrap();
+    for request in [
+        RpcRequest::ReleaseStatus,
+        RpcRequest::CheckReleases,
+        RpcRequest::DismissRelease {
+            version: "1.0.0".into(),
+        },
+    ] {
+        let (tx, rx) = mpsc::channel();
+        let (vault, ssh_approvals, releases, daemon) = (
+            h.vault.clone(),
+            h.ssh_approvals.clone(),
+            h.releases.clone(),
+            h.daemon.clone(),
+        );
+        std::thread::spawn(move || {
+            let response =
+                crate::handle_rpc_request(request, &vault, &ssh_approvals, &releases, &daemon);
+            let _ = tx.send(response);
+        });
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(RpcResponse::Releases(snapshot)) => {
+                assert_eq!(snapshot.state, crate::releases::CheckState::Unsupported)
+            }
+            Ok(RpcResponse::ReleaseDismissed(result)) => assert!(result.is_err()),
+            Ok(other) => panic!("unexpected response {other:?}"),
+            Err(_) => panic!("release request waited for the vault lock"),
+        }
+    }
+    drop(held);
 }

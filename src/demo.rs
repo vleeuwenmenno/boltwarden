@@ -5,6 +5,7 @@
 //! --vault-window`; `BOLTWARDEN_DEMO=action` opens it on the action center. Nothing is read
 //! from or written to disk except the icon cache. `BOLTWARDEN_DEMO=settings` and
 //! `BOLTWARDEN_DEMO=licenses` open the corresponding full-window settings pages.
+//! `BOLTWARDEN_DEMO=update` shows a fixed release notice; demo mode never checks GitHub.
 
 use crate::backend::{BackendError, SearchResult};
 use crate::bw::TwoFactorProvider;
@@ -24,6 +25,7 @@ pub struct DemoBackend {
     ssh_request_pending: AtomicBool,
     items: Mutex<Vec<BwItemDetail>>,
     folders: Mutex<Vec<Folder>>,
+    release_dismissed: AtomicBool,
 }
 
 pub fn enabled() -> bool {
@@ -43,7 +45,20 @@ impl DemoBackend {
             ssh_request_pending: AtomicBool::new(mode == "ssh"),
             items: Mutex::new(details()),
             folders: Mutex::new(folders()),
+            release_dismissed: AtomicBool::new(false),
         }
+    }
+
+    pub fn releases(&self) -> crate::releases::ReleaseSnapshot {
+        let mode = std::env::var("BOLTWARDEN_DEMO").unwrap_or_default();
+        let mut snapshot = crate::releases::ReleaseSnapshot::demo(mode == "update");
+        snapshot.desktop.dismissed = self.release_dismissed.load(Ordering::Relaxed);
+        snapshot
+    }
+
+    pub fn dismiss_release(&self) -> crate::releases::ReleaseSnapshot {
+        self.release_dismissed.store(true, Ordering::Relaxed);
+        self.releases()
     }
 
     pub fn has_session(&self) -> bool {
