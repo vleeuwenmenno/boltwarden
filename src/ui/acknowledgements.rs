@@ -52,7 +52,7 @@ pub fn draw(ui: &mut egui::Ui, updates: impl FnOnce(&mut egui::Ui)) {
             ui.label(sections.next().unwrap_or_default().trim());
             let search_id = ui.make_persistent_id("license-search");
             let mut search = ui.data_mut(|data| data.get_temp::<String>(search_id)).unwrap_or_default();
-            ui.add(egui::TextEdit::singleline(&mut search).hint_text("Find a dependency"));
+            ui.add(egui::TextEdit::singleline(&mut search).align(egui::Align2::LEFT_CENTER).hint_text("Find a dependency"));
             let query = search.trim().to_lowercase();
             ui.data_mut(|data| data.insert_temp(search_id, search));
             let mut matched = false;
