@@ -1494,6 +1494,7 @@ impl App {
                 );
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.reprompt_password)
+                        .align(egui::Align2::LEFT_CENTER)
                         .password(true)
                         .hint_text("Master password")
                         .id_source("item-reprompt"),

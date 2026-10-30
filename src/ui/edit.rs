@@ -211,6 +211,7 @@ fn draw_generator(
                             ui.label("Separator");
                             ui.add(
                                 egui::TextEdit::singleline(&mut options.separator)
+                                    .align(egui::Align2::LEFT_CENTER)
                                     .char_limit(3)
                                     .desired_width(36.0),
                             );
