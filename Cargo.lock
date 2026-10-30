@@ -640,6 +640,7 @@ dependencies = [
  "tokio",
  "toml",
  "tray-icon",
+ "unicode-segmentation",
  "url",
  "uuid",
  "wgpu",

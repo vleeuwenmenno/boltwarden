@@ -134,6 +134,7 @@ pub struct App {
     browser_approval_return: Option<(Screen, bool)>,
     paired_browsers_fetched: Option<Instant>,
     summary_state: SummaryState,
+    large_password: Option<crate::ui::large_password::LargePassword>,
     /// Open edit form for the item shown in the summary.
     edit_state: Option<EditState>,
     icons: IconCache,
@@ -243,6 +244,7 @@ impl App {
             browser_approval_return: None,
             paired_browsers_fetched: None,
             summary_state: SummaryState::default(),
+            large_password: None,
             edit_state: None,
             rx,
             tx,
@@ -1319,6 +1321,11 @@ impl eframe::App for App {
 
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &root.ctx().clone();
+        if let Some(password) = &mut self.large_password
+            && password.show(ctx, self.settings.obscure_screen_capture)
+        {
+            self.large_password = None;
+        }
         if ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.hide_quick_access(ctx);
@@ -1553,6 +1560,10 @@ impl App {
             // The browser takes over; quick access has done its job.
             Some(SummaryAction::Opened) => self.hide_quick_access(ctx),
             Some(SummaryAction::Back) => self.return_to_search(ctx),
+            Some(SummaryAction::LargePassword(index)) => {
+                self.large_password = self.summary_state.large_password(index);
+                ctx.request_repaint();
+            }
             Some(SummaryAction::Edit) => {
                 if let Some(id) = self.summary_state.detail_id.clone() {
                     self.summary_state.error = None;

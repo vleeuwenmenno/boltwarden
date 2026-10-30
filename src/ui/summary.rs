@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 const MASK: &str = "••••••••••••";
 const LABEL_WIDTH: f32 = 128.0;
+const REVEAL_DURATION: Duration = Duration::from_secs(60);
 const COPIED_NOTICE: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
@@ -147,6 +148,15 @@ impl Drop for SummaryState {
 }
 
 impl SummaryState {
+    pub fn large_password(&self, index: usize) -> Option<crate::ui::large_password::LargePassword> {
+        let detail = self.detail.as_ref()?;
+        let fields = fields(detail);
+        let field = fields.get(index)?;
+        (field.kind == FieldKind::Secret).then(|| {
+            crate::ui::large_password::LargePassword::new(&detail.name, field.label, &field.value)
+        })
+    }
+
     pub fn needs_totp_refresh(&self) -> bool {
         if self.totp_in_flight {
             return false;
@@ -169,10 +179,10 @@ impl SummaryState {
             .as_ref()
             .and_then(|(_, at)| COPIED_NOTICE.checked_sub(at.elapsed()));
         let totp = self.totp.as_ref().map(|_| Duration::from_millis(500));
-        match (copied, totp) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        let reveal = self
+            .revealed_at
+            .map(|at| REVEAL_DURATION.saturating_sub(at.elapsed()));
+        [copied, totp, reveal].into_iter().flatten().min()
     }
 }
 
@@ -191,7 +201,7 @@ pub fn draw_summary(
     let mut action = None;
     if state
         .revealed_at
-        .is_some_and(|at| at.elapsed() >= Duration::from_secs(15))
+        .is_some_and(|at| at.elapsed() >= REVEAL_DURATION)
     {
         state.reveal_fields.clear();
         state.revealed_at = None;
@@ -709,7 +719,17 @@ fn draw_field(
         ) {
             toggle_reveal(state, idx);
         }
-        value_right = eye_rect.left() - 8.0;
+        let large_rect = eye_rect.translate(egui::vec2(-32.0, 0.0));
+        if glyph_button(
+            ui,
+            large_rect,
+            t.icon("\u{f065}", "⛶"),
+            ("large-password", idx),
+            &format!("Show {} in large window", field.label),
+        ) {
+            return (Some(SummaryAction::LargePassword(idx)), rect);
+        }
+        value_right = large_rect.left() - 8.0;
     }
 
     let value_left = rect.left() + 14.0 + LABEL_WIDTH;
@@ -876,6 +896,8 @@ fn unix_now() -> u64 {
 pub enum SummaryAction {
     Back,
     Copied,
+    /// Open a persistent character-by-character view of this secret field.
+    LargePassword(usize),
     /// A website was handed to the browser.
     Opened,
     Edit,
@@ -930,6 +952,30 @@ mod tests {
         for (idx, row) in rows.iter().enumerate() {
             assert_eq!(detail.copy_value(idx).unwrap(), row.value);
         }
+    }
+
+    #[test]
+    fn reveal_lasts_sixty_seconds_and_schedules_expiry() {
+        let ctx = egui::Context::default();
+        let mut state = SummaryState::default();
+        toggle_reveal(&mut state, 0);
+        state.revealed_at = Some(Instant::now() - Duration::from_secs(16));
+        let remaining = state.repaint_after().unwrap();
+        assert!(remaining > Duration::from_secs(43) && remaining <= Duration::from_secs(44));
+        let mut icons = IconCache::new(false);
+        ctx.run_ui(Default::default(), |ui| {
+            draw_summary(ui, &mut state, false, false, &mut icons, &mut |_| Ok(()));
+        })
+        .drop_without_applying_deltas();
+        assert!(state.reveal_fields.contains(&0));
+        state.revealed_at = Some(Instant::now() - Duration::from_secs(61));
+        assert_eq!(state.repaint_after(), Some(Duration::ZERO));
+        ctx.run_ui(Default::default(), |ui| {
+            draw_summary(ui, &mut state, false, false, &mut icons, &mut |_| Ok(()));
+        })
+        .drop_without_applying_deltas();
+        assert!(state.reveal_fields.is_empty());
+        assert!(state.repaint_after().is_none());
     }
 
     #[test]
