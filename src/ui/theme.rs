@@ -178,47 +178,7 @@ impl Theme {
 
     /// Installs fonts, text sizes and widget visuals. Call once at startup.
     pub fn install(&self, ctx: &egui::Context) {
-        let mut fonts = egui::FontDefinitions::default();
-        let mut custom = false;
-        if let Some(bytes) = self
-            .font_file
-            .as_ref()
-            .and_then(|path| std::fs::read(path).ok())
-        {
-            fonts.font_data.insert(
-                "omarchy".to_owned(),
-                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-            );
-            // Keep egui's bundled fonts behind it for emoji and any missing glyphs.
-            for family in [FontFamily::Proportional, FontFamily::Monospace] {
-                fonts
-                    .families
-                    .entry(family)
-                    .or_default()
-                    .insert(0, "omarchy".to_owned());
-            }
-            custom = true;
-        }
-        // The bundled fonts lack the modifier key symbols (⇧ ⌥ ⌃) and arrows that macOS
-        // shortcuts are written with; the system's symbol font has them.
-        #[cfg(target_os = "macos")]
-        if let Ok(bytes) = std::fs::read("/System/Library/Fonts/Apple Symbols.ttf") {
-            fonts.font_data.insert(
-                "apple-symbols".to_owned(),
-                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-            );
-            for family in [FontFamily::Proportional, FontFamily::Monospace] {
-                fonts
-                    .families
-                    .entry(family)
-                    .or_default()
-                    .push("apple-symbols".to_owned());
-            }
-            custom = true;
-        }
-        if custom {
-            ctx.set_fonts(fonts);
-        }
+        ctx.set_fonts(self.font_definitions());
 
         let mut style = (*ctx.global_style()).clone();
         style.text_styles = [
@@ -288,6 +248,54 @@ impl Theme {
 
         ctx.set_style_of(egui::Theme::Dark, style.clone());
         ctx.set_style_of(egui::Theme::Light, style);
+    }
+
+    /// The Omarchy monospace font when there is one, then egui's bundled fonts, and on
+    /// macOS the system symbol font.
+    fn font_definitions(&self) -> egui::FontDefinitions {
+        let mut fonts = egui::FontDefinitions::default();
+        if let Some(bytes) = self
+            .font_file
+            .as_ref()
+            .and_then(|path| std::fs::read(path).ok())
+        {
+            fonts.font_data.insert(
+                "omarchy".to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            // Keep egui's bundled fonts behind it for emoji and any missing glyphs.
+            for family in [FontFamily::Proportional, FontFamily::Monospace] {
+                fonts
+                    .families
+                    .entry(family)
+                    .or_default()
+                    .insert(0, "omarchy".to_owned());
+            }
+        }
+        // The bundled fonts lack the modifier key symbols (⇧ ⌥ ⌃) and arrows that macOS
+        // shortcuts are written with; the system's symbol font has them.
+        #[cfg(target_os = "macos")]
+        if let Ok(bytes) = std::fs::read("/System/Library/Fonts/Apple Symbols.ttf") {
+            fonts.font_data.insert(
+                "apple-symbols".to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            for family in [FontFamily::Proportional, FontFamily::Monospace] {
+                fonts
+                    .families
+                    .entry(family)
+                    .or_default()
+                    .push("apple-symbols".to_owned());
+            }
+        }
+        // Ubuntu Light lacks arrows and shapes (← ↑ ● ▸) that the bundled monospace
+        // font has; borrow them for proportional text as a last resort.
+        fonts
+            .families
+            .entry(FontFamily::Proportional)
+            .or_default()
+            .push("Hack".to_owned());
+        fonts
     }
 
     /// Icon for a vault item type: a Nerd Font glyph when available, else an emoji
@@ -512,5 +520,47 @@ mod tests {
         let white = Color32::from_rgb(255, 255, 255);
         assert_eq!(mix(black, white, 0.5), Color32::from_rgb(128, 128, 128));
         assert_eq!(mix(black, white, 2.0), white);
+    }
+
+    /// Every symbol and emoji the UI draws must have a glyph in the fonts we install
+    /// when no Nerd Font is available, or it renders as a box (#124).
+    #[test]
+    fn fallback_icons_have_glyphs() {
+        let mut theme = theme().clone();
+        theme.font_file = None;
+        let ctx = egui::Context::default();
+        ctx.set_fonts(theme.font_definitions());
+        ctx.run_ui(Default::default(), |_| {})
+            .textures_delta
+            .clear();
+
+        let is_symbol = |c: char| {
+            matches!(c as u32, 0x2190..=0x2BFF | 0x1F000..=0x1FFFF)
+                // Keyboard modifiers only appear in macOS shortcut labels.
+                && (cfg!(target_os = "macos") || !"⇧⌥⌃⌘⌫".contains(c))
+        };
+        let mut symbols = std::collections::BTreeSet::new();
+        let mut dirs = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui")];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let source = std::fs::read_to_string(&path).unwrap();
+                    symbols.extend(source.chars().filter(|&c| is_symbol(c)));
+                }
+            }
+        }
+        assert!(symbols.contains(&'🔑'), "scan found no icons");
+
+        let font = theme.font(theme.body());
+        let missing: String = ctx.fonts_mut(|fonts| {
+            symbols
+                .into_iter()
+                .filter(|&c| !fonts.has_glyph(&font, c))
+                .collect()
+        });
+        assert!(missing.is_empty(), "no glyph for: {missing}");
     }
 }
