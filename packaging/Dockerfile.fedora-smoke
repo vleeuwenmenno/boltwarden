@@ -1,4 +1,4 @@
-FROM fedora:44
+FROM fedora:45
 COPY *.rpm /tmp/
 RUN dnf install -y /tmp/*.rpm python3 && dnf clean all
 RUN test ! -e /usr/lib/systemd/user/boltwarden.service && \
