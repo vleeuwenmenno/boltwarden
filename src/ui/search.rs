@@ -1108,7 +1108,7 @@ fn draw_search_field(ui: &mut Ui, state: &mut SearchState) {
                 .color(t.text_faint),
             )
             .frame(egui::Frame::NONE)
-            .vertical_align(egui::Align::Center);
+            .align(egui::Align2::LEFT_CENTER);
         if state.focus_search {
             field = field.cursor_at_end(true);
         }

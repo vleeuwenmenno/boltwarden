@@ -4,6 +4,7 @@ pub mod browser_approval;
 pub mod browser_setup;
 pub mod clipboard_policy;
 pub mod edit;
+pub mod large_password;
 pub mod paired_browsers;
 pub mod releases;
 pub mod search;

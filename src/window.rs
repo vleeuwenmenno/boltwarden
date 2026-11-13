@@ -203,6 +203,7 @@ pub struct WindowApp {
     move_in_flight: bool,
     scroll_to_selected: bool,
     summary_state: SummaryState,
+    large_password: Option<crate::ui::large_password::LargePassword>,
     edit_state: Option<EditState>,
     reprompt_id: Option<String>,
     reprompt_password: String,
@@ -302,6 +303,7 @@ impl WindowApp {
             move_in_flight: false,
             scroll_to_selected: false,
             summary_state: SummaryState::default(),
+            large_password: None,
             edit_state: None,
             reprompt_id: None,
             reprompt_password: String::new(),
@@ -1329,6 +1331,11 @@ impl eframe::App for WindowApp {
 
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &root.ctx().clone();
+        if let Some(password) = &mut self.large_password
+            && password.show(ctx, self.settings.obscure_screen_capture)
+        {
+            self.large_password = None;
+        }
         if self.closing {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
@@ -2407,6 +2414,10 @@ impl WindowApp {
             &mut |index| backend.copy_field(&copy_id, index, copy_version.ok_or("No item open")?),
         );
         match action {
+            Some(SummaryAction::LargePassword(index)) => {
+                self.large_password = self.summary_state.large_password(index);
+                ui.ctx().request_repaint();
+            }
             Some(SummaryAction::Edit) => self.start_edit(),
             Some(SummaryAction::Item(action)) => {
                 if let Some(id) = self.summary_state.detail_id.clone() {

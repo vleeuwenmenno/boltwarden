@@ -474,6 +474,88 @@ fn monospace_font_file() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// One file's source with the test module dropped and every comment removed, so a
+    /// scan sees only what the code can actually draw. Comments and test fixtures are
+    /// not drawn, and a glyph named in prose must not count as a glyph on screen.
+    fn production_code(source: &str) -> String {
+        // The test module starts at the `#[cfg(test)]` attribute, which always sits on
+        // its own line. Anchor on the preceding newline so the marker is not matched
+        // where this helper's own name for it appears in a comment or a string.
+        let text: Vec<char> = source
+            .split_once("\n#[cfg(test)]")
+            .map_or(source, |(production, _)| production)
+            .chars()
+            .collect();
+        let mut stripped = String::with_capacity(source.len());
+        let mut i = 0;
+        while i < text.len() {
+            let (c, next) = (text[i], text.get(i + 1).copied());
+            if c == '/' && next == Some('/') {
+                while i < text.len() && text[i] != '\n' {
+                    i += 1;
+                }
+            } else if c == '/' && next == Some('*') {
+                // Rust block comments nest.
+                let mut depth = 1;
+                i += 2;
+                while i < text.len() && depth > 0 {
+                    if text[i] == '/' && text.get(i + 1) == Some(&'*') {
+                        depth += 1;
+                        i += 2;
+                    } else if text[i] == '*' && text.get(i + 1) == Some(&'/') {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+            } else if c == '"' {
+                // Keep string contents, including anything that looks like a comment.
+                stripped.push(c);
+                i += 1;
+                while i < text.len() && text[i] != '"' {
+                    if text[i] == '\\' {
+                        stripped.push(text[i]);
+                        i += 1;
+                        if i < text.len() {
+                            stripped.push(text[i]);
+                            i += 1;
+                        }
+                    } else {
+                        stripped.push(text[i]);
+                        i += 1;
+                    }
+                }
+                if i < text.len() {
+                    stripped.push(text[i]);
+                    i += 1;
+                }
+            } else {
+                stripped.push(c);
+                i += 1;
+            }
+        }
+        stripped
+    }
+
+    #[test]
+    fn production_code_strips_comments_but_keeps_literals() {
+        // A glyph named in a comment is not drawn; one in a literal is.
+        assert!(!production_code("// ␣\nlet a = \"x\";").contains('␣'));
+        assert!(!production_code("/* ␣ */ let a = \"x\";").contains('␣'));
+        assert!(!production_code("/* a /* ␣ */ b */ let a = \"x\";").contains('␣'));
+        assert!(!production_code("let a = \"x\"; // ␣").contains('␣'));
+        assert!(production_code("let a = \"🔑\";").contains('🔑'));
+        // Comment markers inside a string are literal text, not comments.
+        assert!(production_code("let u = \"https://x.test/␣\";").contains('␣'));
+        // The test module's own fixtures are never drawn.
+        let fixture = "let a = 1;\n#[cfg(test)]\nmod tests {\n    const F: char = '␣';\n}";
+        assert!(!production_code(fixture).contains('␣'));
+        // The marker only counts at the start of a line, so naming it mid-line does not
+        // truncate the file and hide real code.
+        assert!(production_code("let s = \"#[cfg(test)]\";\nlet a = \"🔑\";").contains('🔑'));
+    }
+
     #[test]
     fn parses_hex_colors() {
         assert_eq!(
@@ -524,6 +606,10 @@ mod tests {
 
     /// Every symbol and emoji the UI draws must have a glyph in the fonts we install
     /// when no Nerd Font is available, or it renders as a box (#124).
+    ///
+    /// Both families are checked because they are configured separately: the icon
+    /// fallbacks are drawn with `Theme::font` (proportional) while the password boxes
+    /// use `Theme::mono`, so a glyph can be present in one and missing in the other.
     #[test]
     fn fallback_icons_have_glyphs() {
         let mut theme = theme().clone();
@@ -548,19 +634,26 @@ mod tests {
                     dirs.push(path);
                 } else if path.extension().is_some_and(|ext| ext == "rs") {
                     let source = std::fs::read_to_string(&path).unwrap();
-                    symbols.extend(source.chars().filter(|&c| is_symbol(c)));
+                    symbols.extend(production_code(&source).chars().filter(|&c| is_symbol(c)));
                 }
             }
         }
         assert!(symbols.contains(&'🔑'), "scan found no icons");
 
-        let font = theme.font(theme.body());
-        let missing: String = ctx.fonts_mut(|fonts| {
-            symbols
-                .into_iter()
-                .filter(|&c| !fonts.has_glyph(&font, c))
-                .collect()
-        });
-        assert!(missing.is_empty(), "no glyph for: {missing}");
+        let missing: Vec<String> = [FontFamily::Proportional, FontFamily::Monospace]
+            .into_iter()
+            .filter_map(|family| {
+                let font = FontId::new(theme.body(), family.clone());
+                let absent: String = ctx.fonts_mut(|fonts| {
+                    symbols
+                        .iter()
+                        .copied()
+                        .filter(|&c| !fonts.has_glyph(&font, c))
+                        .collect()
+                });
+                (!absent.is_empty()).then(|| format!("{family:?}: {absent}"))
+            })
+            .collect();
+        assert!(missing.is_empty(), "no glyph for {}", missing.join(", "));
     }
 }

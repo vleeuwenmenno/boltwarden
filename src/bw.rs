@@ -1067,7 +1067,7 @@ impl BwClient {
             login.password.zeroize();
             login.password = password.into();
             let body = build_save_request(&stored, &draft, &iso8601_now())?;
-            let response = self.send_authed(Method::PUT, &cipher_path(&target.id)?, Some(&body))?;
+            let response = self.send_cipher(Method::PUT, &cipher_path(&target.id)?, body)?;
             let raw: Value = expect_success(response, "update browser password")?
                 .json()
                 .map_err(|_| BwError::Parse("Invalid save response".into()))?;
@@ -1400,7 +1400,7 @@ impl BwClient {
                     build_passkey_create_request(context, options, &generated, key)?,
                 )
             };
-        let response = self.send_authed(method, &path, Some(&body))?;
+        let response = self.send_cipher(method, &path, body)?;
         let raw: Value = expect_success(response, "create passkey")?
             .json()
             .map_err(|_| BwError::Parse("invalid create passkey response".into()))?;
@@ -1845,7 +1845,7 @@ impl BwClient {
         }
         let stored = self.ciphers.get(id).cloned().ok_or(BwError::NotFound)?;
         let body = build_save_request(&stored, draft, &iso8601_now())?;
-        let response = self.send_authed(Method::PUT, &cipher_path(id)?, Some(&body))?;
+        let response = self.send_cipher(Method::PUT, &cipher_path(id)?, body)?;
         let raw: Value = expect_success(response, "save")?
             .json()
             .map_err(|e| BwError::Parse(format!("save response: {e}")))?;
@@ -1858,7 +1858,7 @@ impl BwClient {
         self.require_online()?;
         let user_key = self.user_key.as_deref().ok_or(BwError::NotUnlocked)?;
         let body = build_create_request(draft, user_key)?;
-        let response = self.send_authed(Method::POST, "/api/ciphers", Some(&body))?;
+        let response = self.send_cipher(Method::POST, "/api/ciphers", body)?;
         let raw: Value = expect_success(response, "create")?
             .json()
             .map_err(|e| BwError::Parse(format!("create response: {e}")))?;
@@ -1895,6 +1895,26 @@ impl BwClient {
     }
 
     /// Sends an authenticated API request, refreshing the access token once on HTTP 401.
+    /// Sends a full cipher body. Vaultwarden rejects these with 422 unless they name
+    /// the account they were encrypted for, as the official clients do.
+    fn send_cipher(
+        &mut self,
+        method: Method,
+        path: &str,
+        mut body: Value,
+    ) -> Result<Response, BwError> {
+        let user_id = self
+            .raw_profile
+            .as_ref()
+            .and_then(|profile| raw_get(profile, "id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| BwError::Cli("sync again before saving: account id unknown".into()))?
+            .to_string();
+        raw_set(&mut body, "encryptedFor", Value::String(user_id));
+        self.send_authed(method, path, Some(&body))
+    }
+
     fn send_authed(
         &mut self,
         method: Method,
@@ -2740,6 +2760,9 @@ struct SyncResponse {
 struct SyncProfileResponse {
     #[serde(default, alias = "Organizations")]
     organizations: Vec<OrganizationResponse>,
+    /// PKCS#8 RSA key, encrypted with the user key. Unwraps organization keys.
+    #[serde(default, alias = "PrivateKey")]
+    private_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3041,16 +3064,41 @@ fn decrypt_organization_keys(
     profile: Option<SyncProfileResponse>,
     user_key: &[u8],
 ) -> Result<HashMap<String, Vec<u8>>, BwError> {
-    profile
-        .map(|profile| profile.organizations)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|organization| {
-            organization
-                .key
-                .map(|key| Ok((organization.id, decrypt_symmetric_key(&key, user_key)?)))
-        })
-        .collect()
+    let Some(profile) = profile else {
+        return Ok(HashMap::new());
+    };
+    let mut private_key: Option<Zeroizing<Vec<u8>>> = None;
+    let mut keys = HashMap::new();
+    for organization in profile.organizations {
+        let Some(wrapped) = organization.key else {
+            continue;
+        };
+        let key = if is_rsa_encrypted(&wrapped) {
+            if private_key.is_none() {
+                let encrypted = profile.private_key.as_deref().ok_or_else(|| {
+                    BwError::Parse("organization key needs the account private key".into())
+                })?;
+                private_key = Some(Zeroizing::new(decrypt_bytes(encrypted, user_key)?));
+            }
+            let der = private_key.as_deref().map_or(&[][..], Vec::as_slice);
+            let plain = decrypt_rsa_bytes(&wrapped, der)?;
+            if !matches!(plain.len(), 32 | 64) {
+                return Err(BwError::Parse(format!(
+                    "decrypted organization key has unsupported length {}",
+                    plain.len()
+                )));
+            }
+            plain
+        } else {
+            decrypt_symmetric_key(&wrapped, user_key)?
+        };
+        keys.insert(organization.id, key);
+    }
+    Ok(keys)
+}
+
+fn is_rsa_encrypted(value: &str) -> bool {
+    matches!(value.split_once('.'), Some(("3" | "4" | "5" | "6", _)))
 }
 
 #[cfg(test)]
@@ -3428,6 +3476,12 @@ fn server_error_message(body: &str) -> String {
                 .and_then(Value::as_str)
                 .filter(|message| !message.trim().is_empty())
                 .map(str::to_string)
+        })
+        .or_else(|| {
+            // Rocket's error pages are HTML; their title is the readable part.
+            let (_, rest) = body.split_once("<title>")?;
+            let (title, _) = rest.split_once("</title>")?;
+            Some(title.trim().to_string()).filter(|title| !title.is_empty())
         })
         .unwrap_or_else(|| body.chars().take(200).collect())
 }
@@ -4628,6 +4682,27 @@ pub(crate) fn decrypt_bytes(value: &str, key: &[u8]) -> Result<Vec<u8>, BwError>
     }
 }
 
+/// Decrypts an RSA-OAEP value (`3.`..`6.`) with a PKCS#8 DER private key. Organization
+/// keys are wrapped this way for each member.
+fn decrypt_rsa_bytes(value: &str, private_key_der: &[u8]) -> Result<Vec<u8>, BwError> {
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::traits::Decryptor;
+
+    let enc = EncString::parse(value)?;
+    let key = rsa::RsaPrivateKey::from_pkcs8_der(private_key_der)
+        .map_err(|e| BwError::Parse(format!("invalid RSA private key: {e}")))?;
+    let plain = match enc.enc_type {
+        3 | 5 => rsa::oaep::DecryptingKey::<Sha256>::new(key).decrypt(&enc.data),
+        4 | 6 => rsa::oaep::DecryptingKey::<Sha1>::new(key).decrypt(&enc.data),
+        other => {
+            return Err(BwError::Parse(format!(
+                "encryption type {other} is not RSA-OAEP"
+            )));
+        }
+    };
+    plain.map_err(|e| BwError::Parse(format!("RSA decrypt failed: {e}")))
+}
+
 fn stretch_key(key: &[u8]) -> Result<Vec<u8>, BwError> {
     if key.len() != 32 {
         return Err(BwError::Parse(format!(
@@ -4705,6 +4780,14 @@ impl EncString {
                 iv: decode(iv)?,
                 data: decode(data)?,
                 mac: Some(decode(mac)?),
+            }),
+            // RSA-OAEP: the whole body is the ciphertext. Types 5 and 6 are legacy
+            // forms that append an unused MAC.
+            (3 | 4, [data]) | (5 | 6, [data, _]) => Ok(Self {
+                enc_type,
+                iv: Vec::new(),
+                data: decode(data)?,
+                mac: None,
             }),
             _ => Err(BwError::Parse(format!(
                 "encrypted value type {enc_type} has {} parts",
@@ -4784,6 +4867,42 @@ mod passkey_vault_tests;
 
 #[cfg(test)]
 mod tests {
+    // Throwaway 2048-bit key; `ORG_KEY` was encrypted to it with
+    // `openssl pkeyutl -encrypt -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha1`.
+    const TEST_RSA_PRIVATE_KEY_DER: &str = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDBuR5b0+UdGzVi+w0ODW0PoLpOeBsUmVmzchh2Tj4wT/5d19RzBxaE10vMOE6je2+mJedfiAW+W9olptt0ZikmAMmKcQU6GfUhMvAbNGFkS23MdqXLfZkpL0U/0VXVvmf9swtK/ZPFdceZ+1+G8t0S/scj9npUPCsLfOvR9+scTVzluwObL5gpWOD/aKWUOMnI0nEpMMjZaYJB/fX6+nxpzpyHeEa6AE7PZU46tc5AmBvXJo9elD2kz+uqfllyLo5I4kzpR1aEZqEH7LqkvlzzrnVgpahFMjspFG0HYoC89lZ09twazPNBvBYyQEPLYVGNnXxW1Lze1+7+wGaptIGzAgMBAAECggEAARpBnvoswqal/iM5psvSxBUBGnM6jDp3NTtAAmRdnD7ITtZsoh73NNhY2Re08t8/+m0azQNkLPou2qoBc78lGs9EVmJgSj1dlMvKbA03RK/dNx2xwd+8IGzhcwSI/Ydw5hO/y7R3w9bwxOKWX5lAQtxqW70KYzJYeF9EpFRJ5UZU6QU9sTn4LtWNgyyFjW9bcuq3b7ooypaJAiFF1L7p76v/9P1r0OolnePhxx+laSdcFM7E9BgsJICO5eIlrZ+eXgodvLv4NgESRSfrjZh8J4MlWbWSZ4KDJgiGa8Ex8mFPmKHWLaxGCm84bh65e7kgDwhQ/ozV0WQNaPgvR3r6+QKBgQDhmyvfpxoa8zhNwhv5N5JoWd/oA7lEV5DlnnHjWPjp48WOwqYV8X5WbuJ6vLIaKjjn4ymudLskNKfMuJdEh4gfU6EPtsgoKD7CoTx+LUcKTNAHUP4ynkUYPsVmNsmjUTqnhIYuXGsvHmmzUzJCKwsDfHx3EpB5pDPl7cIVQjxltwKBgQDb0lkeJFvmWq8X414E7Ybjpb1yMWlvZ4qlynmRlzM0x/d2yK3yyIh4AiRXQ2K8de3MM+syrg0Y+aCjyhCP7TET6UFka6nFXrUQWNTPrEmCslSSiS/18GunsDHjnsI/2211U6kWZuh7lnIM2MWHJyA8HTm1vozCuxKrtf12Amaj5QKBgQDdxJDeKv7IWymPli21T2FF3oLxKSfm/ETc0mGVYBJep529da2ZiGfuQtWyXOaePb7ugyin6utC7de8r/9SSAAQ+z4pmj0q7FS1MZWrWoqon1UmvAEEdPvql1mn3ldbiS+lF+pmjEZ4bObudevDi1gqNyaKTd9jE3xImuzbxN5mBQKBgAEvG93GslwGRwUo61u5b82QGfogfAHmm9+SvJ7lIph5L0MLh6xUGjATSuDRcxmyxOohqXWnbFijF5NqRjaQP4Bs9DY3Qj3W6cDBybuooOi8TypO5Nw9REct8sbYFxHC+87y+WkuergXsluRW1cEBe9s9N+evCFcYphcLZZSIv1lAoGAVzkYgUjt9o0WrfWEuMBSDRWnJ6JL5W1y9iN1wsZO+fXRSDLXBMFbAc5Vm3aHTy4G/pZuf4ThNXUMirTGASu6wVPQcTwkATkD7LgFSXixlWyPOqc8JS+cE+1yRKVqaXPzAkrxERIK+Q1U9yBW2+PoDrZceLb4VLZ+CvBdz07nXO8=";
+    const TEST_RSA_ORG_KEY: &str =
+        "ayPRPu1xa6H2NEUYMtR/PACUZXO+DnxhThwfb+pi6kxWHye8oD/eD882n8tAdZU68sZXhBStSncOXyzFSULPwg==";
+    const TEST_RSA_OAEP_SHA1_CIPHERTEXT: &str = "nKnU+y6BMsYhVbGDfHo6t6igKK/ayU1IgTD73WH0ApIjNtRpD2ASP/OUlhZ/psvz5rAyH+LURuXprP03sCM2OPSTTeJT1w7qke+y0WRmuEMU6j0vlTvvTN1+Qw7StEm9BA5Eu6QI1b5k9BnHS57Pk2p28fX549B8BY0V6lWip4cw/KJJag8KSCdBfMZlyHMLpTVCLNe+f8maNOfXHtZ0SYAHifaiA+izYn9srw9PexuEdB4MmSjH8bodkhvWRRKjKnYjIqXU6/hph0eehamuqqkdlNrsEvCJjRdKyNaV1ZU6dqJdfg1oKvxF35N8u95vG4uZT96hV8asRM/OU8GhZA==";
+
+    #[test]
+    fn decrypts_rsa_wrapped_organization_key() {
+        use base64::Engine;
+        let engine = base64::engine::general_purpose::STANDARD;
+        let user_key = [3u8; 64];
+        let der = engine.decode(TEST_RSA_PRIVATE_KEY_DER).unwrap();
+        let profile = SyncProfileResponse {
+            organizations: vec![OrganizationResponse {
+                id: "org-1".into(),
+                key: Some(format!("4.{TEST_RSA_OAEP_SHA1_CIPHERTEXT}")),
+            }],
+            private_key: Some(encrypt_bytes(&der, &user_key)),
+        };
+        let keys = decrypt_organization_keys(Some(profile), &user_key).unwrap();
+        assert_eq!(keys["org-1"], engine.decode(TEST_RSA_ORG_KEY).unwrap());
+    }
+
+    #[test]
+    fn rsa_wrapped_organization_key_without_private_key_is_an_error() {
+        let profile = SyncProfileResponse {
+            organizations: vec![OrganizationResponse {
+                id: "org-1".into(),
+                key: Some(format!("4.{TEST_RSA_OAEP_SHA1_CIPHERTEXT}")),
+            }],
+            private_key: None,
+        };
+        assert!(decrypt_organization_keys(Some(profile), &[3u8; 64]).is_err());
+    }
+
     #[test]
     fn rejects_untrusted_kdf_costs_before_derivation() {
         for iterations in [0, 2_000_001, u32::MAX] {
@@ -5016,6 +5135,7 @@ mod tests {
                 id: "org-1".into(),
                 key: Some(encrypt_bytes(&org_key, &user_key)),
             }],
+            private_key: None,
         };
         let organization_keys = decrypt_organization_keys(Some(profile), &user_key).unwrap();
         let mut cipher = empty_cipher("cipher-1", encrypt_string("Shared Login", &item_key));
@@ -5036,6 +5156,7 @@ mod tests {
                 id: "org-2".into(),
                 key: Some(encrypt_bytes(&org_key, &user_key)),
             }],
+            private_key: None,
         };
         let organization_keys = decrypt_organization_keys(Some(profile), &user_key).unwrap();
         let mut cipher = empty_cipher("cipher-2", encrypt_string("Shared Secure Note", &org_key));
@@ -6175,6 +6296,18 @@ mod tests {
     }
 
     #[test]
+    fn server_error_message_reads_json_then_html_title() {
+        assert_eq!(server_error_message(r#"{"message":"Bad"}"#), "Bad");
+        assert_eq!(
+            server_error_message(
+                "<!DOCTYPE html><html><head><title>422 Unprocessable Entity</title></head></html>"
+            ),
+            "422 Unprocessable Entity"
+        );
+        assert_eq!(server_error_message("plain"), "plain");
+    }
+
+    #[test]
     fn offline_write_guards_and_retry_backoff() {
         let mut client = protected_fixture();
         client.access_token = None;
@@ -6551,7 +6684,7 @@ mod tests {
         .unwrap();
         let mut client = BwClient {
             email: None,
-            raw_profile: None,
+            raw_profile: Some(json!({"id": "user-1"})),
             raw_folders: Vec::new(),
             undecodable_ciphers: Vec::new(),
             retry_seconds: 60,

@@ -19,15 +19,15 @@
     "check:release": "node scripts/check-release.mjs"
   },
   "dependencies": {
-    "preact": "11.0.1"
+    "preact": "11.0.2"
   },
   "devDependencies": {
     "@simplewebauthn/server": "14.0.3",
     "fake-indexeddb": "6.2.6",
-    "happy-dom": "21.0.3",
+    "happy-dom": "21.0.4",
     "typescript": "7.0.2",
     "vitest": "5.0.5",
-    "wxt": "0.21.4"
+    "wxt": "0.21.5"
   },
   "engines": {
     "node": ">=22.12.0"

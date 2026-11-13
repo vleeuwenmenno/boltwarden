@@ -7,7 +7,15 @@
 # https://github.com/vleeuwenmenno/boltwarden/issues/75
 # Upstream tray migration: https://github.com/iovxw/ksni/issues/44
 # Review upstream status by 2026-11-04.
+#
+# RUSTSEC-2023-0071 (rsa, Marvin attack) is a real vulnerability notice with no fixed
+# release. It is a timing side channel that needs an attacker to observe many
+# decryptions. Boltwarden only decrypts organization keys once per sync, locally,
+# from data the server sends, and never exposes decryption timing or results to a
+# peer. It cannot sign or encrypt with the key. Bitwarden's own SDK uses the same
+# crate. Remove this exception when `rsa` ships a constant-time fix.
 ignore = [
+    "RUSTSEC-2023-0071", # rsa
     "RUSTSEC-2026-0370", # zvariant
     "RUSTSEC-2026-0371", # zbus_names
     "RUSTSEC-2026-0372", # zvariant_derive

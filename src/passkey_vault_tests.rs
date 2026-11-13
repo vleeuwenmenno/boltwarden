@@ -437,6 +437,7 @@ fn creation_persists_encrypted_personal_item_then_get_and_edit_preserve_passkey(
         let posted = server.join().unwrap();
         assert_eq!(posted["organizationId"], Value::Null);
         assert!(posted.get("id").is_none());
+        assert_eq!(posted["encryptedFor"], "user-1");
         let passkey = &posted["login"]["fido2Credentials"][0];
         for (field, value) in passkey.as_object().unwrap() {
             if field != "creationDate" {
@@ -842,6 +843,7 @@ fn attaching_passkey_preserves_login_and_requires_fresh_item_verification() {
             )
             .unwrap();
         let posted = server.join().unwrap();
+        assert_eq!(posted["encryptedFor"], "user-1");
         for field in ["password", "username", "totp", "uris"] {
             assert_eq!(posted["login"][field], before["login"][field], "{field}");
         }

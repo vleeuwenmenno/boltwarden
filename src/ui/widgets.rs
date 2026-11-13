@@ -234,6 +234,7 @@ pub fn text_input(
         .show(ui, |ui| {
             ui.add(
                 egui::TextEdit::singleline(value)
+                    .align(egui::Align2::LEFT_CENTER)
                     .id(id)
                     .font(t.font(size))
                     .text_color(t.text_strong)
@@ -269,6 +270,7 @@ pub fn search_input(ui: &mut Ui, id: egui::Id, value: &mut String, hint: &str) -
         .show(ui, |ui| {
             ui.add(
                 egui::TextEdit::singleline(value)
+                    .align(egui::Align2::LEFT_CENTER)
                     .id(id)
                     .font(t.font(t.body()))
                     .text_color(t.text_strong)

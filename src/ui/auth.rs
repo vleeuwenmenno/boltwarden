@@ -155,7 +155,7 @@ fn draw_unlock_header(root: &mut egui::Ui, state: &mut AuthState, action: &mut O
                     .hint_text(RichText::new(hint).color(t.text_faint))
                     .password(true)
                     .frame(egui::Frame::NONE)
-                    .vertical_align(egui::Align::Center),
+                    .align(egui::Align2::LEFT_CENTER),
             );
             if state.focus_password {
                 response.request_focus();
