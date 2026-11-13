@@ -409,7 +409,7 @@ pub fn draw_edit(
                 action = cancel_action(state);
             }
             ui.label(
-                RichText::new(t.icon("\u{f044}", "✎"))
+                RichText::new(t.icon("\u{f044}", "✏"))
                     .size(t.title())
                     .color(t.accent),
             );
@@ -980,7 +980,7 @@ fn reveal_button(ui: &mut Ui, revealed: bool) -> egui::Response {
 }
 
 fn remove_button(ui: &mut Ui) -> egui::Response {
-    glyph(ui, "\u{f00d}", "✕", "Remove")
+    glyph(ui, "\u{f00d}", "✖", "Remove")
 }
 
 fn add_button(ui: &mut Ui, text: &str) -> egui::Response {

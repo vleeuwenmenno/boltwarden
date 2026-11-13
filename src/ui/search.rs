@@ -1209,7 +1209,7 @@ fn draw_results(
                     DisplayEntry::VersionCommand => widgets::paint_row_content(
                         ui,
                         rect,
-                        t.icon("\u{f05a}", "ⓘ"),
+                        t.icon("\u{f05a}", "ℹ"),
                         None,
                         "Version",
                         Some(&crate::version::summary()),
@@ -1273,7 +1273,7 @@ fn draw_results(
                     DisplayEntry::WindowCommand => widgets::paint_row_content(
                         ui,
                         rect,
-                        t.icon("\u{f2d0}", "🗔"),
+                        t.icon("\u{f2d0}", "🗗"),
                         None,
                         "Open vault window",
                         Some("Browse folders, favorites and the action center"),

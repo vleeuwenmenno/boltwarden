@@ -178,47 +178,7 @@ impl Theme {
 
     /// Installs fonts, text sizes and widget visuals. Call once at startup.
     pub fn install(&self, ctx: &egui::Context) {
-        let mut fonts = egui::FontDefinitions::default();
-        let mut custom = false;
-        if let Some(bytes) = self
-            .font_file
-            .as_ref()
-            .and_then(|path| std::fs::read(path).ok())
-        {
-            fonts.font_data.insert(
-                "omarchy".to_owned(),
-                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-            );
-            // Keep egui's bundled fonts behind it for emoji and any missing glyphs.
-            for family in [FontFamily::Proportional, FontFamily::Monospace] {
-                fonts
-                    .families
-                    .entry(family)
-                    .or_default()
-                    .insert(0, "omarchy".to_owned());
-            }
-            custom = true;
-        }
-        // The bundled fonts lack the modifier key symbols (⇧ ⌥ ⌃) and arrows that macOS
-        // shortcuts are written with; the system's symbol font has them.
-        #[cfg(target_os = "macos")]
-        if let Ok(bytes) = std::fs::read("/System/Library/Fonts/Apple Symbols.ttf") {
-            fonts.font_data.insert(
-                "apple-symbols".to_owned(),
-                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-            );
-            for family in [FontFamily::Proportional, FontFamily::Monospace] {
-                fonts
-                    .families
-                    .entry(family)
-                    .or_default()
-                    .push("apple-symbols".to_owned());
-            }
-            custom = true;
-        }
-        if custom {
-            ctx.set_fonts(fonts);
-        }
+        ctx.set_fonts(self.font_definitions());
 
         let mut style = (*ctx.global_style()).clone();
         style.text_styles = [
@@ -288,6 +248,54 @@ impl Theme {
 
         ctx.set_style_of(egui::Theme::Dark, style.clone());
         ctx.set_style_of(egui::Theme::Light, style);
+    }
+
+    /// The Omarchy monospace font when there is one, then egui's bundled fonts, and on
+    /// macOS the system symbol font.
+    fn font_definitions(&self) -> egui::FontDefinitions {
+        let mut fonts = egui::FontDefinitions::default();
+        if let Some(bytes) = self
+            .font_file
+            .as_ref()
+            .and_then(|path| std::fs::read(path).ok())
+        {
+            fonts.font_data.insert(
+                "omarchy".to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            // Keep egui's bundled fonts behind it for emoji and any missing glyphs.
+            for family in [FontFamily::Proportional, FontFamily::Monospace] {
+                fonts
+                    .families
+                    .entry(family)
+                    .or_default()
+                    .insert(0, "omarchy".to_owned());
+            }
+        }
+        // The bundled fonts lack the modifier key symbols (⇧ ⌥ ⌃) and arrows that macOS
+        // shortcuts are written with; the system's symbol font has them.
+        #[cfg(target_os = "macos")]
+        if let Ok(bytes) = std::fs::read("/System/Library/Fonts/Apple Symbols.ttf") {
+            fonts.font_data.insert(
+                "apple-symbols".to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            for family in [FontFamily::Proportional, FontFamily::Monospace] {
+                fonts
+                    .families
+                    .entry(family)
+                    .or_default()
+                    .push("apple-symbols".to_owned());
+            }
+        }
+        // Ubuntu Light lacks arrows and shapes (← ↑ ● ▸) that the bundled monospace
+        // font has; borrow them for proportional text as a last resort.
+        fonts
+            .families
+            .entry(FontFamily::Proportional)
+            .or_default()
+            .push("Hack".to_owned());
+        fonts
     }
 
     /// Icon for a vault item type: a Nerd Font glyph when available, else an emoji
@@ -466,6 +474,88 @@ fn monospace_font_file() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// One file's source with the test module dropped and every comment removed, so a
+    /// scan sees only what the code can actually draw. Comments and test fixtures are
+    /// not drawn, and a glyph named in prose must not count as a glyph on screen.
+    fn production_code(source: &str) -> String {
+        // The test module starts at the `#[cfg(test)]` attribute, which always sits on
+        // its own line. Anchor on the preceding newline so the marker is not matched
+        // where this helper's own name for it appears in a comment or a string.
+        let text: Vec<char> = source
+            .split_once("\n#[cfg(test)]")
+            .map_or(source, |(production, _)| production)
+            .chars()
+            .collect();
+        let mut stripped = String::with_capacity(source.len());
+        let mut i = 0;
+        while i < text.len() {
+            let (c, next) = (text[i], text.get(i + 1).copied());
+            if c == '/' && next == Some('/') {
+                while i < text.len() && text[i] != '\n' {
+                    i += 1;
+                }
+            } else if c == '/' && next == Some('*') {
+                // Rust block comments nest.
+                let mut depth = 1;
+                i += 2;
+                while i < text.len() && depth > 0 {
+                    if text[i] == '/' && text.get(i + 1) == Some(&'*') {
+                        depth += 1;
+                        i += 2;
+                    } else if text[i] == '*' && text.get(i + 1) == Some(&'/') {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+            } else if c == '"' {
+                // Keep string contents, including anything that looks like a comment.
+                stripped.push(c);
+                i += 1;
+                while i < text.len() && text[i] != '"' {
+                    if text[i] == '\\' {
+                        stripped.push(text[i]);
+                        i += 1;
+                        if i < text.len() {
+                            stripped.push(text[i]);
+                            i += 1;
+                        }
+                    } else {
+                        stripped.push(text[i]);
+                        i += 1;
+                    }
+                }
+                if i < text.len() {
+                    stripped.push(text[i]);
+                    i += 1;
+                }
+            } else {
+                stripped.push(c);
+                i += 1;
+            }
+        }
+        stripped
+    }
+
+    #[test]
+    fn production_code_strips_comments_but_keeps_literals() {
+        // A glyph named in a comment is not drawn; one in a literal is.
+        assert!(!production_code("// ␣\nlet a = \"x\";").contains('␣'));
+        assert!(!production_code("/* ␣ */ let a = \"x\";").contains('␣'));
+        assert!(!production_code("/* a /* ␣ */ b */ let a = \"x\";").contains('␣'));
+        assert!(!production_code("let a = \"x\"; // ␣").contains('␣'));
+        assert!(production_code("let a = \"🔑\";").contains('🔑'));
+        // Comment markers inside a string are literal text, not comments.
+        assert!(production_code("let u = \"https://x.test/␣\";").contains('␣'));
+        // The test module's own fixtures are never drawn.
+        let fixture = "let a = 1;\n#[cfg(test)]\nmod tests {\n    const F: char = '␣';\n}";
+        assert!(!production_code(fixture).contains('␣'));
+        // The marker only counts at the start of a line, so naming it mid-line does not
+        // truncate the file and hide real code.
+        assert!(production_code("let s = \"#[cfg(test)]\";\nlet a = \"🔑\";").contains('🔑'));
+    }
+
     #[test]
     fn parses_hex_colors() {
         assert_eq!(
@@ -512,5 +602,58 @@ mod tests {
         let white = Color32::from_rgb(255, 255, 255);
         assert_eq!(mix(black, white, 0.5), Color32::from_rgb(128, 128, 128));
         assert_eq!(mix(black, white, 2.0), white);
+    }
+
+    /// Every symbol and emoji the UI draws must have a glyph in the fonts we install
+    /// when no Nerd Font is available, or it renders as a box (#124).
+    ///
+    /// Both families are checked because they are configured separately: the icon
+    /// fallbacks are drawn with `Theme::font` (proportional) while the password boxes
+    /// use `Theme::mono`, so a glyph can be present in one and missing in the other.
+    #[test]
+    fn fallback_icons_have_glyphs() {
+        let mut theme = theme().clone();
+        theme.font_file = None;
+        let ctx = egui::Context::default();
+        ctx.set_fonts(theme.font_definitions());
+        ctx.run_ui(Default::default(), |_| {})
+            .textures_delta
+            .clear();
+
+        let is_symbol = |c: char| {
+            matches!(c as u32, 0x2190..=0x2BFF | 0x1F000..=0x1FFFF)
+                // Keyboard modifiers only appear in macOS shortcut labels.
+                && (cfg!(target_os = "macos") || !"⇧⌥⌃⌘⌫".contains(c))
+        };
+        let mut symbols = std::collections::BTreeSet::new();
+        let mut dirs = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui")];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let source = std::fs::read_to_string(&path).unwrap();
+                    symbols.extend(production_code(&source).chars().filter(|&c| is_symbol(c)));
+                }
+            }
+        }
+        assert!(symbols.contains(&'🔑'), "scan found no icons");
+
+        let missing: Vec<String> = [FontFamily::Proportional, FontFamily::Monospace]
+            .into_iter()
+            .filter_map(|family| {
+                let font = FontId::new(theme.body(), family.clone());
+                let absent: String = ctx.fonts_mut(|fonts| {
+                    symbols
+                        .iter()
+                        .copied()
+                        .filter(|&c| !fonts.has_glyph(&font, c))
+                        .collect()
+                });
+                (!absent.is_empty()).then(|| format!("{family:?}: {absent}"))
+            })
+            .collect();
+        assert!(missing.is_empty(), "no glyph for {}", missing.join(", "));
     }
 }

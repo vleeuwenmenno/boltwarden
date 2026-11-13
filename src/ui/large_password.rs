@@ -158,10 +158,17 @@ fn draw_characters(ui: &mut egui::Ui, value: &str) {
                 let painter = ui.painter_at(cell);
                 painter.rect_filled(cell, 0.0, if index % 2 == 0 { t.bg } else { t.surface });
                 let text = match character {
-                    " " => "␣".to_owned(),
+                    // These three markers are covered by the bundled Ubuntu-Light and
+                    // Hack fonts: middle dot (U+00B7) for the space, rightwards arrow to
+                    // bar (U+21E5) for the tab, downwards arrow with corner leftwards
+                    // (U+21B5) for the newline. The Control Pictures block (U+2400..U+243F),
+                    // where the obvious space and carriage-return symbols live, ships in no
+                    // bundled font and rendered as boxes without a Nerd Font (#124).
+                    " " => "·".to_owned(),
                     "\t" => "⇥".to_owned(),
                     "\n" => "↵".to_owned(),
-                    "\r" => "␍".to_owned(),
+                    // Carriage returns and every other control character fall through to
+                    // `escape_debug`, which writes plain ASCII (`\r`).
                     c if c.chars().any(char::is_control) => c.escape_debug().to_string(),
                     c => c.to_string(),
                 };
@@ -213,7 +220,7 @@ mod tests {
         for shape in &output.shapes {
             text_shapes(&shape.shape, &mut texts);
         }
-        for expected in ["A", "e\u{301}", "👩‍💻", "␣", "1", "2", "3", "4"] {
+        for expected in ["A", "e\u{301}", "👩‍💻", "·", "1", "2", "3", "4"] {
             assert!(
                 texts.iter().any(|text| text == expected),
                 "missing {expected:?}: {texts:?}"

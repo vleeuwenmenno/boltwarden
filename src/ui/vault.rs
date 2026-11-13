@@ -1339,7 +1339,7 @@ fn check_icon(check: HealthCheck) -> &'static str {
         HealthCheck::PasskeysAvailable => t.icon("\u{f084}", "🔑"),
         HealthCheck::BreachedWebsites => t.icon("\u{f1e2}", "💥"),
         HealthCheck::ExposedPasswords => t.icon("\u{f06e}", "👁"),
-        HealthCheck::DataBreaches => t.icon("\u{f2c2}", "🪪"),
+        HealthCheck::DataBreaches => t.icon("\u{f2c2}", "🆔"),
     }
 }
 

@@ -547,7 +547,7 @@ fn draw_header_actions(
                 "Unarchive (A)",
                 SummaryAction::Item(ItemAction::Unarchive),
             ),
-            ("\u{f044}", "✎", "Edit (E)", SummaryAction::Edit),
+            ("\u{f044}", "✏", "Edit (E)", SummaryAction::Edit),
         ],
         ItemState::Active => &[
             (
@@ -562,7 +562,7 @@ fn draw_header_actions(
                 "Archive (A)",
                 SummaryAction::Item(ItemAction::Archive),
             ),
-            ("\u{f044}", "✎", "Edit (E)", SummaryAction::Edit),
+            ("\u{f044}", "✏", "Edit (E)", SummaryAction::Edit),
         ],
     };
     let mut clicked = None;
